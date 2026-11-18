@@ -5,7 +5,7 @@ use stitch_mux_core::{
     ProgramStatus, Rect, Row,
 };
 use stitch_mux_protocol::{
-    ActionInfo, Attached, CaptureRequest, CaptureResponse, CapturedRow, Clipboard,
+    ActionInfo, Attached, CaptureRequest, CaptureResponse, CapturedRow, ClientInfo, Clipboard,
     ClipboardSelection, Command, CommandRequest, CommandResponse, Detach, ErrorCode, ErrorInfo,
     Event, Focus, FocusRequest, Hello, HelloAck, InputEvent, KeyCode, KeyEvent, KeyEventKind,
     Layout, MessageKind, PaneDelta, PaneGeometry, PaneInfo, PaneSnapshot, ProcessInfo, ResizeEvent,
@@ -381,6 +381,16 @@ fn all_fixtures() -> Vec<(MessageKind, String)> {
                             program_status: None,
                         }],
                     }],
+                    clients: vec![ClientInfo {
+                        id: 3,
+                        name: "stitch-mux-gui-egui".into(),
+                        view_mode: ViewMode::Structured,
+                        session_id: Some(1),
+                        cols: 80,
+                        rows: 24,
+                        focus: Some(7),
+                        attached_at_unix_ms: 4,
+                    }],
                     actions: vec![ActionInfo {
                         name: "pane.split".into(),
                         title: "Split".into(),
@@ -490,7 +500,7 @@ const EXPECTED: [(u8, &str); 27] = [
     (24, "534d0100180011000000920191ad6c6973745f73657373696f6e73"),
     (
         25,
-        "534d01001900760000009c01c3c0919c01a464656d6f5018010001010102950000000000919807a27368c0c392a574696c6564c001c0c09090c09801055018010781a46c656166910791940794000050179401014e15a27368c09381a470616e65910700c29195aa70616e652e73706c6974a553706c6974c0a470616e65c0c0",
+        "534d010019009c0000009c01c3c0919c01a464656d6f5018010001010102950000000000919807a27368c0c392a574696c6564c001c0c0919803b37374697463682d6d75782d6775692d65677569aa73747275637475726564015018070490c09801055018010781a46c656166910791940794000050179401014e15a27368c09381a470616e65910700c29195aa70616e652e73706c6974a553706c6974c0a470616e65c0c0",
     ),
     (26, "534d01001a000800000093a464656d6fc228"),
     (

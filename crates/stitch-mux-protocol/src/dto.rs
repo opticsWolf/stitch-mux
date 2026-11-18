@@ -355,8 +355,12 @@ pub struct ClientInfo {
     pub id: u64,
     pub name: String,
     pub view_mode: ViewMode,
+    #[serde(default)]
+    pub session_id: Option<u64>,
     pub cols: u16,
     pub rows: u16,
+    #[serde(default)]
+    pub focus: Option<u64>,
     pub attached_at_unix_ms: u64,
 }
 

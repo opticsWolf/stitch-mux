@@ -785,11 +785,18 @@ struct ClientInfo {
     id: u64,
     name: String,
     view_mode: ViewMode,
+    session_id: Option<u64>,     // None for a control-only connection
     cols: u16,
     rows: u16,
+    focus: Option<u64>,          // focus for THIS client, not global
     attached_at_unix_ms: u64,
 }
 ```
+
+`ListClients` returns the daemon's client registry. A client is inserted at
+handshake, gains a `session_id` and `focus` on `Attach`, and is removed on
+`Detach`, EOF, or `DetachClient`. The canonical session size is recomputed from
+the smallest attached client whenever this registry changes.
 
 `EnsureSession` is the GUI startup primitive: reuse by name or create it. `NewSession`
 is explicit and fails if the name exists. `ListSessions` powers the GUI session
