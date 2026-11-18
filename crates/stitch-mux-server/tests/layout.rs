@@ -62,24 +62,36 @@ async fn wait_for<F: Fn(&SessionView) -> bool>(label: &str, session: &ClientSess
     .unwrap_or_else(|_| panic!("{label} within timeout"));
 }
 
-fn pane_text(view: &SessionView, pane_id: u64) -> String {
-    view.pane(pane_id)
-        .and_then(|pane| pane.snapshot.as_ref())
-        .map(|snapshot| {
-            snapshot
-                .cells
-                .iter()
-                .map(|row| {
-                    row.cells
-                        .iter()
-                        .filter(|cell| cell.width > 0)
-                        .map(|cell| cell.text.as_str())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
+async fn captured_text(endpoint: &Endpoint, pane_id: u64) -> String {
+    let response = command(
+        endpoint,
+        Command::Capture {
+            pane_id,
+            start: 0,
+            lines: 500,
+            format: stitch_mux_core::CaptureFormat::Text,
+        },
+    )
+    .await
+    .expect("capture response");
+    assert!(response.ok, "{:?}", response.error);
+    response
+        .capture
+        .and_then(|capture| capture.text)
         .unwrap_or_default()
+}
+
+async fn wait_for_capture(label: &str, endpoint: &Endpoint, pane_id: u64, needle: &str) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if captured_text(endpoint, pane_id).await.contains(needle) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{label} within timeout"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -175,10 +187,7 @@ async fn split_focus_zoom_close_and_revision_guard() {
     client.send(Outbound::Input(stitch_mux_protocol::InputEvent::Text(
         format!("echo m2-first{newline}"),
     )));
-    wait_for("input reaches first pane", &client, |view| {
-        pane_text(view, first).contains("m2-first")
-    })
-    .await;
+    wait_for_capture("input reaches first pane", &endpoint, first, "m2-first").await;
 
     // Focus the second pane again; the first pane must stop receiving input.
     client.send(Outbound::Focus(second));
@@ -190,7 +199,7 @@ async fn split_focus_zoom_close_and_revision_guard() {
         format!("echo m2-second{newline}"),
     )));
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(!pane_text(&client.view(), first).contains("m2-second"));
+    assert!(!captured_text(&endpoint, first).await.contains("m2-second"));
 
     let zoom = command(
         &endpoint,
