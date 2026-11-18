@@ -913,10 +913,13 @@ buffer. Clients should refresh state after any gap.
 ## 9. Error and backpressure semantics
 
 - Protocol errors close the connection after sending `Error` when possible.
-- A slow structured client: coalesce `PaneDelta`s per pane, keep at most a
-  bounded number of pending updates per pane, and drop intermediate rows while
-  preserving the latest cursor/modes/title. If the client still cannot drain,
-  close with `Error { code: Busy }`.
+- A slow structured client: the daemon offers updates into a bounded queue of 64
+  frames without blocking pane readers. Pending `PaneDelta`s are coalesced per
+  pane (at most 256 are drained per wake): only the newest row for each row index
+  survives, while the latest cursor/modes/title/metadata is kept. Delta sequence
+  numbers are rewritten to remain contiguous for that client, so coalescing is
+  not reported as a gap. If the queue still overflows, the daemon closes with
+  `Error { code: Busy, message: "client fell behind" }`.
 - A slow terminal client: keep only the newest ANSI frame.
 - Input and control messages are never silently dropped.
 - A serialization/backpressure gap must be recoverable with `Resync`; a client

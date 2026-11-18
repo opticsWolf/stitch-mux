@@ -133,8 +133,10 @@ cargo run -p stitch-mux -- split -t 101 --axis columns
 cargo run -p stitch-mux -- zoom -s demo -t 101
 cargo run -p stitch-mux -- zoom -s demo   # unzoom
 cargo run -p stitch-mux -- gui        # pick "demo"
+cargo run -p stitch-mux -- clients -s demo
 cargo run -p stitch-mux -- close -t 102
-cargo run -p stitch-mux -- kill -t demo
+cargo run -p stitch-mux -- rename --from demo --to work
+cargo run -p stitch-mux -- kill -t work
 ```
 
 On Windows use `cmd.exe` instead of `sh`. `stitch-mux gui -s demo` skips the

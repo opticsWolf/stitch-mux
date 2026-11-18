@@ -4,6 +4,7 @@
 //! structured snapshots/deltas to attached clients, and keep per-client focus
 //! local to each connection. Sessions survive detach/reattach.
 
+pub mod client_updates;
 pub mod pane;
 pub mod session;
 
@@ -12,7 +13,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use stitch_mux_core::{Size, layout_leaves};
 use stitch_mux_protocol::{
@@ -329,11 +330,23 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
 
     let mut attached: Option<Arc<Session>> = None;
     let mut focus: Option<u64> = None;
-    let mut update_rx: Option<mpsc::UnboundedReceiver<Arc<PaneUpdate>>> = None;
+    let mut update_rx: Option<client_updates::ClientUpdateQueue> = None;
+    let mut coalescer = client_updates::UpdateCoalescer::default();
     let mut update_tasks: Vec<JoinHandle<()>> = Vec::new();
     let mut layout_rx: Option<broadcast::Receiver<Arc<Layout>>> = None;
     let mut failure: Option<ServerError> = None;
     loop {
+        if update_rx
+            .as_ref()
+            .is_some_and(|queue| queue.overflows() >= client_updates::MAX_CLIENT_OVERFLOWS)
+        {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                send_error(&mut writer, ErrorCode::Busy, "client fell behind"),
+            )
+            .await;
+            break;
+        }
         let event = tokio::select! {
             _ = detach.notified() => Event::DetachedByControl,
             incoming = frame_rx.recv() => match incoming {
@@ -371,6 +384,7 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                     &mut attached,
                     &mut focus,
                     &mut update_rx,
+                    &mut coalescer,
                     &mut update_tasks,
                     &mut layout_rx,
                     &mut writer,
@@ -386,9 +400,28 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                 }
             }
             Event::Update(update) => {
-                if let Err(err) = send_update(&mut writer, &update).await {
-                    failure = Some(err);
-                    break;
+                coalescer.add(update);
+                if let Some(queue) = update_rx.as_mut() {
+                    for queued in queue.drain_batch() {
+                        coalescer.add(queued);
+                    }
+                }
+                match tokio::time::timeout(Duration::from_secs(2), coalescer.flush(&mut writer))
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        failure = Some(ServerError::Frame(err));
+                        break;
+                    }
+                    Err(_) => {
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            send_error(&mut writer, ErrorCode::Busy, "client fell behind"),
+                        )
+                        .await;
+                        break;
+                    }
                 }
             }
             Event::DetachedByControl => {
@@ -435,7 +468,7 @@ enum Event {
 }
 
 async fn next_update(
-    receiver: Option<&mut mpsc::UnboundedReceiver<Arc<PaneUpdate>>>,
+    receiver: Option<&mut client_updates::ClientUpdateQueue>,
 ) -> Option<Arc<PaneUpdate>> {
     match receiver {
         Some(receiver) => receiver.recv().await,
@@ -488,7 +521,8 @@ async fn handle_frame(
     state: &Arc<ServerState>,
     attached: &mut Option<Arc<Session>>,
     focus: &mut Option<u64>,
-    update_rx: &mut Option<mpsc::UnboundedReceiver<Arc<PaneUpdate>>>,
+    update_rx: &mut Option<client_updates::ClientUpdateQueue>,
+    coalescer: &mut client_updates::UpdateCoalescer,
     update_tasks: &mut Vec<JoinHandle<()>>,
     layout_rx: &mut Option<broadcast::Receiver<Arc<Layout>>>,
     writer: &mut Writer,
@@ -515,21 +549,38 @@ async fn handle_frame(
             };
             // Subscribe before snapshotting; updates produced in the gap stay
             // queued and are replayed after the full state.
-            let (update_tx, rx) = mpsc::unbounded_channel::<Arc<PaneUpdate>>();
+            let queue = client_updates::ClientUpdateQueue::new();
+            let update_tx = queue.sender();
+            let overflow = queue.overflow_counter();
             for pane in session.panes() {
                 let mut pane_rx = pane.subscribe();
                 let update_tx = update_tx.clone();
+                let overflow = Arc::clone(&overflow);
                 let task = tokio::spawn(async move {
-                    while let Ok(update) = pane_rx.recv().await {
-                        if update_tx.send(update).is_err() {
-                            break;
+                    loop {
+                        match pane_rx.recv().await {
+                            Ok(update) => {
+                                client_updates::offer_update(&update_tx, &overflow, update);
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_lagged)) => {
+                                // Never block the pane reader; offer the newest
+                                // authoritative screen instead of lost rows.
+                                overflow.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                client_updates::offer_update(
+                                    &update_tx,
+                                    &overflow,
+                                    Arc::new(PaneUpdate::Snapshot(pane.snapshot())),
+                                );
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
                         }
                     }
                 });
                 update_tasks.push(task);
             }
             drop(update_tx);
-            *update_rx = Some(rx);
+            *update_rx = Some(queue);
+            coalescer.reset();
             *layout_rx = Some(session.subscribe_layout());
             *focus = session.visible_pane_ids().first().copied();
             state.set_attached(client_id, session.id, *focus);
@@ -676,21 +727,6 @@ fn route_input(session: &Session, focus: Option<u64>, event: InputEvent) {
         }
         InputEvent::Focus(_) | InputEvent::Mouse(_) => {}
     }
-}
-
-async fn send_update(writer: &mut Writer, update: &PaneUpdate) -> Result<(), ServerError> {
-    match update {
-        PaneUpdate::Snapshot(snapshot) => {
-            writer.send(MessageKind::PaneSnapshot, snapshot).await?;
-        }
-        PaneUpdate::Delta(delta) => {
-            writer.send(MessageKind::PaneDelta, delta).await?;
-        }
-        PaneUpdate::Exit(exit) => {
-            writer.send(MessageKind::Exit, exit).await?;
-        }
-    }
-    Ok(())
 }
 
 fn session_error_code(error: &SessionError) -> ErrorCode {

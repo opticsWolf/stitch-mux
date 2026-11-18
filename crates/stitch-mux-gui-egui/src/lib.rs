@@ -5,6 +5,7 @@
 //! `stitch-mux-client`.
 
 use std::error::Error;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use stitch_mux_client::{ClientSession, Outbound, SessionView, command, size_from_pixels};
@@ -64,6 +65,8 @@ struct MuxApp {
     last_size: Size,
     next_request_id: u64,
     error: Option<String>,
+    retry_backoff: Duration,
+    next_retry: Option<Instant>,
 }
 
 impl MuxApp {
@@ -86,6 +89,8 @@ impl MuxApp {
             last_size: Size::new(80, 24),
             next_request_id: 1,
             error: None,
+            retry_backoff: Duration::from_millis(500),
+            next_retry: None,
         };
         if !selected.is_empty() {
             app.attach(&selected);
@@ -114,6 +119,63 @@ impl MuxApp {
                 self.client = Some(client);
                 self.selected = name.to_owned();
                 self.error = None;
+                self.retry_backoff = Duration::from_millis(500);
+                self.next_retry = None;
+            }
+            Err(err) => {
+                self.error = Some(err.to_string());
+                self.retry_backoff = (self.retry_backoff * 2).min(Duration::from_secs(8));
+                self.next_retry = Some(Instant::now() + self.retry_backoff);
+            }
+        }
+    }
+
+    /// Retry a lost session with bounded exponential backoff. A daemon that is
+    /// down is never silently replaced with a fresh session.
+    fn maybe_reconnect(&mut self, view: &SessionView) {
+        if view.connection != stitch_mux_client::ConnectionState::Lost {
+            self.next_retry = None;
+            return;
+        }
+        let now = Instant::now();
+        match self.next_retry {
+            None => self.next_retry = Some(now + self.retry_backoff),
+            Some(at) if now >= at => {
+                let name = self.selected.clone();
+                self.next_retry = None;
+                self.attach(&name);
+            }
+            Some(_) => {}
+        }
+    }
+
+    fn create_session_and_attach(&mut self) {
+        let name = if self.selected.is_empty() {
+            "default".to_owned()
+        } else {
+            self.selected.clone()
+        };
+        let (program, args) = if cfg!(windows) {
+            ("cmd.exe".to_owned(), Vec::new())
+        } else {
+            ("sh".to_owned(), Vec::new())
+        };
+        let response = self.handle.block_on(command(
+            &self.endpoint,
+            Command::EnsureSession {
+                name: name.clone(),
+                program,
+                args,
+                cwd: None,
+                env: None,
+                cols: self.last_size.cols,
+                rows: self.last_size.rows,
+            },
+        ));
+        match response {
+            Ok(response) if response.ok => self.attach(&name),
+            Ok(response) => {
+                self.error = response.error.map(|error| error.message);
             }
             Err(err) => self.error = Some(err.to_string()),
         }
@@ -162,6 +224,11 @@ impl eframe::App for MuxApp {
             return;
         };
         let view = receiver.borrow_and_update().clone();
+        self.maybe_reconnect(&view);
+        if view.connection == stitch_mux_client::ConnectionState::Lost {
+            self.lost_ui(ui, &view);
+            return;
+        }
 
         let available = ui.available_size();
         let next_size = size_from_pixels(available.x, available.y, CELL_W, CELL_H);
@@ -201,6 +268,39 @@ impl eframe::App for MuxApp {
 }
 
 impl MuxApp {
+    fn lost_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) {
+        ui.heading("Session lost");
+        ui.colored_label(
+            egui::Color32::RED,
+            "The daemon connection was lost. Child processes are not restored              by this client; retry or start a new session explicitly.",
+        );
+        if let Some(error) = &view.error {
+            ui.label(format!("Reason: {}", error.message));
+        }
+        if let Some(at) = self.next_retry {
+            ui.label(format!(
+                "Retrying in {:.1}s",
+                at.saturating_duration_since(Instant::now()).as_secs_f32()
+            ));
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Retry now").clicked() {
+                let name = self.selected.clone();
+                self.next_retry = None;
+                self.attach(&name);
+            }
+            if ui.button("New session").clicked() {
+                self.create_session_and_attach();
+            }
+            if ui.button("Back to picker").clicked() {
+                self.client = None;
+                self.view_rx = None;
+                self.error = None;
+                self.refresh_sessions();
+            }
+        });
+    }
+
     fn picker_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("stitch-mux");
         if self.sessions.is_empty() {

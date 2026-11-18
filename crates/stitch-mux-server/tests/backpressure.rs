@@ -1,0 +1,175 @@
+//! End-to-end M3 backpressure proof over a real endpoint and a real child.
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use stitch_mux_client::{ClientSession, ConnectionState, SessionView, connect};
+use stitch_mux_core::CaptureFormat;
+use stitch_mux_protocol::{
+    Attach, Command, DEFAULT_CLIENT_CAPABILITIES, Endpoint, ErrorCode, ErrorInfo, Hello,
+    MessageKind, ViewMode, decode_message,
+};
+
+fn test_endpoint() -> (Endpoint, Option<PathBuf>) {
+    let unique = format!("stitch-mux-backpressure-{}-{}", std::process::id(), nanos());
+    if cfg!(windows) {
+        (Endpoint::from_override(&unique), None)
+    } else {
+        let path = std::env::temp_dir().join(format!("{unique}.sock"));
+        (
+            Endpoint::from_override(path.to_string_lossy().as_ref()),
+            Some(path),
+        )
+    }
+}
+
+fn nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos()
+}
+
+fn hello(label: &str) -> Hello {
+    Hello {
+        protocol_version: stitch_mux_protocol::PROTOCOL_VERSION,
+        client_name: format!("backpressure-{label}"),
+        client_instance: format!("{label}-{}", std::process::id()),
+        view_mode: ViewMode::Structured,
+        cols: 80,
+        rows: 24,
+        pixel_width: 0,
+        pixel_height: 0,
+        capabilities: DEFAULT_CLIENT_CAPABILITIES,
+    }
+}
+
+fn noisy_program() -> (&'static str, Vec<String>) {
+    if cfg!(windows) {
+        ("cmd.exe", vec!["/Q".into()])
+    } else {
+        ("sh", Vec::new())
+    }
+}
+
+async fn wait_for(session: &ClientSession, predicate: impl Fn(&SessionView) -> bool) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if predicate(&session.view()) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("view condition within timeout");
+}
+
+#[tokio::test]
+async fn stalled_client_is_disconnected_with_busy_and_cannot_block_other_clients() {
+    let (endpoint, socket) = test_endpoint();
+    let listener = endpoint.bind().await.expect("bind");
+    let server = tokio::spawn(stitch_mux_server::serve(listener));
+
+    let (program, args) = noisy_program();
+    let created = stitch_mux_client::command(
+        &endpoint,
+        Command::NewSession {
+            name: "noisy".into(),
+            program: program.into(),
+            args,
+            cwd: None,
+            env: None,
+            cols: 80,
+            rows: 24,
+        },
+    )
+    .await
+    .expect("new response");
+    assert!(created.ok, "{:?}", created.error);
+    let pane_id = created.sessions[0].panes[0].id;
+
+    // A normal client keeps draining while the other connection stalls.
+    let healthy = ClientSession::attach(&endpoint, "noisy", hello("healthy"))
+        .await
+        .expect("healthy attach");
+    wait_for(&healthy, |view| view.pane(pane_id).is_some()).await;
+
+    let (mut stalled, _ack) = connect(&endpoint, hello("stalled"))
+        .await
+        .expect("stalled handshake");
+    stalled
+        .send(
+            MessageKind::Attach,
+            &Attach {
+                session_name: "noisy".into(),
+                takeover: false,
+            },
+        )
+        .await
+        .expect("stalled attach");
+    // Deliberately do not read from `stalled`: its socket buffer and the
+    // daemon's bounded update queue will fill under the child's output.
+
+    // Eight megabytes of echoed input is enough to exceed any local socket or
+    // pipe buffer while the stalled client refuses to read.
+    let flood = "a".repeat(900_000);
+    for _ in 0..9 {
+        let sent = stitch_mux_client::command(
+            &endpoint,
+            Command::SendText {
+                pane_id,
+                text: flood.clone(),
+            },
+        )
+        .await
+        .expect("flood response");
+        assert!(sent.ok, "{:?}", sent.error);
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for(&healthy, |view| {
+        view.pane(pane_id)
+            .and_then(|pane| pane.snapshot.as_ref())
+            .is_some_and(|snapshot| snapshot.seq > 1)
+    })
+    .await;
+    assert_eq!(healthy.view().connection, ConnectionState::Connected);
+
+    let mut busy: Option<ErrorInfo> = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(3), stalled.recv_frame()).await {
+            Ok(Ok(frame)) => {
+                if frame.kind == MessageKind::Error
+                    && let Ok(error) = decode_message::<ErrorInfo>(&frame)
+                {
+                    busy = Some(error);
+                    break;
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => break,
+        }
+    }
+    let busy = busy.expect("slow client receives a typed Busy error");
+    assert_eq!(busy.code, ErrorCode::Busy);
+
+    let capture = stitch_mux_client::command(
+        &endpoint,
+        Command::Capture {
+            pane_id,
+            start: 0,
+            lines: 20,
+            format: CaptureFormat::Text,
+        },
+    )
+    .await
+    .expect("capture response");
+    assert!(capture.ok, "{:?}", capture.error);
+
+    healthy.detach().await;
+    server.abort();
+    if let Some(path) = socket {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+}

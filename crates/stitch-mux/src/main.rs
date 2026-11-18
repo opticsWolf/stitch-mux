@@ -1,6 +1,6 @@
 //! stitch-mux command-line entry point.
 //!
-//! M2 surface: daemon, session/pane lifecycle, layout control, and the reference GUI launcher.
+//! M3 surface: daemon, session/pane lifecycle, layout control, client control, and the reference GUI launcher.
 
 use clap::{Parser, Subcommand};
 use std::error::Error;
@@ -56,6 +56,25 @@ enum Commands {
     },
     /// List sessions as JSON.
     Ls,
+    /// List attached and control clients as JSON.
+    Clients {
+        #[arg(short = 's', long = "session", default_value = "default")]
+        session: String,
+    },
+    /// Ask the daemon to detach one client by ID.
+    DetachClient {
+        #[arg(long, value_name = "CLIENT_ID")]
+        id: u64,
+    },
+    /// Rename a session.
+    Rename {
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: String,
+    },
+    /// Stop the daemon and detach its clients.
+    Shutdown,
     /// Kill a session and all of its children.
     Kill {
         #[arg(short = 't', long = "target")]
@@ -271,6 +290,29 @@ async fn run(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
             send_command(&endpoint, command).await
         }
         Commands::Ls => send_command(&endpoint, Command::ListSessions).await,
+        Commands::Clients { session } => {
+            send_command(
+                &endpoint,
+                Command::ListClients {
+                    session: session.clone(),
+                },
+            )
+            .await
+        }
+        Commands::DetachClient { id } => {
+            send_command(&endpoint, Command::DetachClient { client_id: *id }).await
+        }
+        Commands::Rename { from, to } => {
+            send_command(
+                &endpoint,
+                Command::RenameSession {
+                    name: from.clone(),
+                    new_name: to.clone(),
+                },
+            )
+            .await
+        }
+        Commands::Shutdown => send_command(&endpoint, Command::Shutdown).await,
         Commands::Kill { target } => {
             send_command(
                 &endpoint,

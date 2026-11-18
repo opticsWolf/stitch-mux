@@ -6,7 +6,7 @@ This is the **operating protocol** for turning the design in
 document: update it in the **same commit** as the work it describes. It is not
 the wire protocol; that contract lives in [PROTOCOL.md](PROTOCOL.md).
 
-Last updated: **2026-11-18** — M0, M1, and M2 complete, M3 ready.
+Last updated: **2026-11-18** — M0–M2 complete, M3 client work in progress.
 
 ## 1. Standing rules
 
@@ -183,6 +183,9 @@ Before marking a task Ready for review:
 | 2026-11-18 | The daemon keeps one client registry with view mode, size, focus, and attach time | Canonical sizing and `DetachClient` need one authoritative record, not per-connection counters | Registry entries exist from handshake through EOF; `ClientInfo` exposes them |
 | 2026-11-18 | Smallest attached client determines canonical size; no-op resizes do not bump revision | Multiple viewports must agree on one PTY geometry without churn | Attach/detach publish a layout so every client sees the new `attached_clients` count |
 | 2026-11-18 | Preserve a typed daemon error when the socket closes | `DetachClient`'s `Busy` frame is followed immediately by EOF | `mark_lost_preserving_error` keeps the typed error and still marks the view lost |
+| 2026-11-18 | Bound each client's update queue at 64 and coalesce deltas per pane | A stalled GUI must never block a PTY reader or grow memory without limit | `try_send` + lagged-snapshot fallback; one overflow closes with typed `Busy` |
+| 2026-11-18 | Rewrite delta sequence numbers per client after coalescing | Dropping intermediate deltas must not look like a protocol gap | `UpdateCoalescer` keeps client-visible `seq` contiguous; `Resync` remains for real gaps |
+| 2026-11-18 | GUI retries a lost session with exponential backoff, capped at 8s | Daemon loss must be visible and never silently recreated | Lost overlay offers Retry, New session, and Back to picker |
 
 ## 9. Current status
 
@@ -191,7 +194,7 @@ Before marking a task Ready for review:
 | M0 — workspace, core, protocol, client skeleton | **Done** | `3b6bcca`; 30 tests; fmt/clippy/test/doc green; CLI `ping` verified on Windows named pipe |
 | M1 — one-pane GUI session with detach/reattach | **Done** | 35 tests; real-child echo, capture, resize, detach/reattach test; CLI `new`/`ls`/`kill`/`gui` smoke; abrupt GUI kill leaves child alive and clears attached count |
 | M2 — multi-pane GUI layout and per-client focus | **Done** | 42 tests; real-child split/focus/zoom/stale-revision/close test; CLI `new`/`split`/`ls`/`zoom`/`close`/`kill` smoke; 8-second GUI smoke leaves children alive with `attached_clients: 0` |
-| M3 — multiple clients, backpressure | Backlog | Depends on M2 layout revisions |
+| M3 — multiple clients, backpressure | **In progress** | Registry, smallest-client sizing, control commands, bounded coalescing with typed `Busy`, CLI client control, and GUI lost/retry UX land; final gates and CI pending |
 | M4 — terminal ANSI compatibility | Backlog | Structured path first |
 | M5 — Qt/PySide6 + optional GPUI | Backlog | Second-toolkit proof, no protocol changes allowed |
 | M6 — hardening / v0.1 | Backlog | Release checklist in `IMPLEMENTATION_PLAN.md` §7 |
