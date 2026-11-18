@@ -158,11 +158,33 @@ async fn echo_detach_reattach_resize_and_capture() {
     let reattached = ClientSession::attach(&endpoint, "demo", hello())
         .await
         .expect("reattach");
-    wait_for("reattach", &reattached, |view| {
-        has_text(view, "stitch-mux-echo")
+    wait_for("reattach snapshot", &reattached, |view| {
+        view.pane(pane_id).is_some()
     })
     .await;
     assert_eq!(reattached.view().size, Size::new(60, 20));
+    // The echo may have moved into bounded history after the resize; capture
+    // is the authoritative check that the child's screen survived.
+    let restored = command(
+        &endpoint,
+        Command::Capture {
+            pane_id,
+            start: 0,
+            lines: 200,
+            format: stitch_mux_core::CaptureFormat::Text,
+        },
+    )
+    .await
+    .expect("capture after reattach");
+    assert!(restored.ok, "{:?}", restored.error);
+    assert!(
+        restored
+            .capture
+            .unwrap()
+            .text
+            .unwrap()
+            .contains("stitch-mux-echo")
+    );
     reattached.detach().await;
 
     let listed = command(&endpoint, Command::ListSessions)
