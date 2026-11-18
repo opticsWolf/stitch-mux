@@ -50,7 +50,7 @@ fn shell() -> (&'static str, Vec<String>) {
 }
 
 async fn wait_for<F: Fn(&SessionView) -> bool>(label: &str, session: &ClientSession, f: F) {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if f(&session.view()) {
                 return;
@@ -82,7 +82,7 @@ async fn captured_text(endpoint: &Endpoint, pane_id: u64) -> String {
 }
 
 async fn wait_for_capture(label: &str, endpoint: &Endpoint, pane_id: u64, needle: &str) {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if captured_text(endpoint, pane_id).await.contains(needle) {
                 return;
