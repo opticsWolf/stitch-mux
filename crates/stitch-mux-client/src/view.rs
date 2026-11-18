@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 
 use stitch_mux_core::{ActivitySummary, Row, Size};
 use stitch_mux_protocol::{
-    Attached, ErrorInfo, Focus, Layout, PaneDelta, PaneSnapshot, ResizeEvent, SessionExit,
+    Attached, CommandResponse, ErrorInfo, Focus, Layout, PaneDelta, PaneSnapshot, ResizeEvent,
+    SessionExit,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -95,6 +96,7 @@ pub struct SessionView {
     pub attached_clients: u32,
     pub connection: ConnectionState,
     pub needs_resync: bool,
+    pub last_command: Option<CommandResponse>,
     pub render_seq: u64,
     pub error: Option<ErrorInfo>,
     pub exit: Option<SessionExit>,
@@ -131,6 +133,9 @@ impl SessionView {
         self.size = Size::new(layout.cols, layout.rows);
         self.status_rows = layout.status_rows;
         self.focus = layout.focus;
+        let visible: std::collections::BTreeSet<u64> =
+            layout.panes.iter().map(|pane| pane.pane_id).collect();
+        self.panes.retain(|pane_id, _| visible.contains(pane_id));
         self.layout = Some(layout);
     }
 
@@ -166,6 +171,18 @@ impl SessionView {
 
     pub fn apply_resize(&mut self, event: ResizeEvent) {
         self.size = Size::new(event.cols, event.rows);
+    }
+
+    pub fn apply_command_response(&mut self, response: CommandResponse) {
+        if let Some(layout) = response.layout.clone() {
+            self.apply_layout(layout);
+        }
+        if !response.ok
+            && let Some(error) = response.error.clone()
+        {
+            self.error = Some(error);
+        }
+        self.last_command = Some(response);
     }
 
     pub fn apply_render_seq(&mut self, seq: u64) {
@@ -340,6 +357,30 @@ mod tests {
         assert!(!view.needs_resync);
         view.apply_render_seq(5);
         assert!(view.needs_resync);
+    }
+
+    #[test]
+    fn layout_prunes_panes_that_no_longer_exist() {
+        let mut view = SessionView::default();
+        view.apply_snapshot(snapshot(1, 1, "a"));
+        view.apply_snapshot(snapshot(2, 1, "b"));
+        view.apply_layout(stitch_mux_protocol::Layout {
+            session_id: 1,
+            revision: 2,
+            cols: 80,
+            rows: 24,
+            status_rows: 0,
+            focus: Some(1),
+            root: stitch_mux_core::LayoutNode::leaf(stitch_mux_core::PaneId::new(1)),
+            panes: vec![stitch_mux_protocol::PaneGeometry {
+                pane_id: 1,
+                outer: stitch_mux_core::Rect::new(0, 0, 80, 24),
+                content: stitch_mux_core::Rect::new(1, 1, 78, 22),
+                title: "sh".into(),
+            }],
+        });
+        assert!(view.pane(1).is_some());
+        assert!(view.pane(2).is_none());
     }
 
     #[test]

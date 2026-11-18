@@ -3,7 +3,7 @@
 //! A frontend clones a watch receiver, renders `SessionView`, and sends
 //! `Outbound` messages. No UI toolkit is involved.
 
-use stitch_mux_core::Size;
+use stitch_mux_core::{Direction, PaneId, ResolvedPane, Size};
 use stitch_mux_protocol::{
     Attach, Command, CommandRequest, CommandResponse, Connection, Detach, Endpoint, ErrorInfo,
     FocusRequest, Frame, FrameError, FrameReader, FrameWriter, Hello, HelloAck, InputEvent,
@@ -21,6 +21,8 @@ pub enum Outbound {
     Input(InputEvent),
     Resize(ResizeRequest),
     Focus(u64),
+    FocusDirection(Direction),
+    Command(CommandRequest),
     Resync,
     Detach,
 }
@@ -153,6 +155,32 @@ impl ClientSession {
                             break;
                         }
                     }
+                    Event::Outbound(Outbound::FocusDirection(direction)) => {
+                        let Some(target) = focus_in_direction(&view, direction) else {
+                            continue;
+                        };
+                        if writer
+                            .send(
+                                MessageKind::FocusRequest,
+                                &FocusRequest {
+                                    pane_id: target.get(),
+                                },
+                            )
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Event::Outbound(Outbound::Command(request)) => {
+                        if writer
+                            .send(MessageKind::CommandRequest, &request)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Event::Outbound(Outbound::Resync) => {
                         view.needs_resync = false;
                         if writer
@@ -254,6 +282,10 @@ where
                 stitch_mux_protocol::decode_message(frame)?;
             view.apply_resize(event);
         }
+        MessageKind::CommandResponse => {
+            let response: CommandResponse = stitch_mux_protocol::decode_message(frame)?;
+            view.apply_command_response(response);
+        }
         MessageKind::Error => {
             let info: ErrorInfo = stitch_mux_protocol::decode_message(frame)?;
             view.error = Some(info);
@@ -276,6 +308,21 @@ fn publish_error(
     let frame_error: FrameError = error.into();
     view.mark_lost(frame_error.to_string());
     let _ = view_tx.send_replace(view.clone());
+}
+
+fn focus_in_direction(view: &SessionView, direction: Direction) -> Option<PaneId> {
+    let from = PaneId::new(view.focus?);
+    let layout = view.layout.as_ref()?;
+    let panes = layout
+        .panes
+        .iter()
+        .map(|geometry| ResolvedPane {
+            pane_id: geometry.pane_id,
+            outer: geometry.outer,
+            content: geometry.content,
+        })
+        .collect::<Vec<_>>();
+    stitch_mux_core::focus_direction(&panes, from, direction)
 }
 
 /// Send one control command and read its response.
@@ -327,6 +374,47 @@ pub fn size_from_pixels(width: f32, height: f32, cell_w: f32, cell_h: f32) -> Si
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_direction_uses_the_authoritative_geometry() {
+        let mut view = crate::view::SessionView {
+            focus: Some(1),
+            ..Default::default()
+        };
+        view.layout = Some(stitch_mux_protocol::Layout {
+            session_id: 1,
+            revision: 1,
+            cols: 80,
+            rows: 24,
+            status_rows: 0,
+            focus: Some(1),
+            root: stitch_mux_core::LayoutNode::split(
+                stitch_mux_core::SplitAxis::Columns,
+                5000,
+                stitch_mux_core::LayoutNode::leaf(PaneId::new(1)),
+                stitch_mux_core::LayoutNode::leaf(PaneId::new(2)),
+            ),
+            panes: vec![
+                stitch_mux_protocol::PaneGeometry {
+                    pane_id: 1,
+                    outer: stitch_mux_core::Rect::new(0, 0, 40, 24),
+                    content: stitch_mux_core::Rect::new(1, 1, 38, 22),
+                    title: "one".into(),
+                },
+                stitch_mux_protocol::PaneGeometry {
+                    pane_id: 2,
+                    outer: stitch_mux_core::Rect::new(40, 0, 40, 24),
+                    content: stitch_mux_core::Rect::new(41, 1, 38, 22),
+                    title: "two".into(),
+                },
+            ],
+        });
+        assert_eq!(
+            focus_in_direction(&view, Direction::Right),
+            Some(PaneId::new(2))
+        );
+        assert_eq!(focus_in_direction(&view, Direction::Left), None);
+    }
 
     #[test]
     fn size_from_pixels_has_a_floor() {
