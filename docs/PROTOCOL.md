@@ -64,7 +64,7 @@ Rules:
 | Kind | Payload encoding |
 |---|---|
 | Handshake, control, layout, pane cells, capture | MessagePack (`rmp-serde`) |
-| `Render` | Raw ANSI bytes, no nested encoding |
+| `Render` | 13-byte binary prefix (`seq` u64 LE, `cols` u16 LE, `rows` u16 LE, `full` u8) followed by raw ANSI bytes; no MessagePack wrapper |
 
 MessagePack is used because control and pane schemas will evolve during 0.x.
 Use `#[serde(default)]` for additive fields and keep enum variants append-only.
@@ -589,10 +589,13 @@ struct Render {
 }
 ```
 
-The server composes the session layout, borders, status bar, and focused cursor,
-then encodes ANSI. The terminal client enters the alternate screen, enables
-bracketed paste/focus reporting, writes frames, forwards input/resize, and
-restores the terminal on detach. It does not parse pane output.
+On the wire, `Render` is not MessagePack: it is the 13-byte binary prefix
+followed by raw ANSI bytes shown above. The struct is the decoded form used by
+`stitch-mux-client`. The server composes the session layout, borders, status
+bar, and focused cursor, then encodes ANSI. The terminal client enters the
+alternate screen, enables bracketed paste/focus reporting, writes frames,
+forwards input/resize, and restores the terminal on detach. It does not parse
+pane output.
 
 The terminal view is a compatibility projection, not a separate session model.
 Both views share PTYs, screens, layout, and per-client focus. The server may

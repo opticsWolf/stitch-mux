@@ -1,0 +1,10 @@
+[package]
+name = "stitch-mux-py"
+description = "PyO3 control SDK and PySide6 adapter for stitch-mux (stub until M5)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"

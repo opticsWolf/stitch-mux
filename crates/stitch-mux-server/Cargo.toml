@@ -1,0 +1,17 @@
+[package]
+name = "stitch-mux-server"
+description = "Local daemon for stitch-mux sessions and panes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+stitch-mux-core.workspace = true
+stitch-mux-protocol.workspace = true
+
+[dev-dependencies]
+stitch-mux-client.workspace = true

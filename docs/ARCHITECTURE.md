@@ -930,7 +930,7 @@ the current state rather than assuming it saw every delta. See
 | Layout | Binary split tree, server-owned | Simple, serializable, consistent PTY sizes | Freeform/client-owned layout in v0.1 |
 | Focus | Per client, shared layout | GUI and terminal clients do not steal focus | Global focus |
 | Protocol encoding | MessagePack control + typed pane cells | Evolvable DTOs, GUI-friendly | bincode-only (brittle schema), Protobuf (codegen overhead) |
-| IPC | `interprocess` local sockets/pipes | One API for Unix and Windows | Separate Unix/Windows implementations |
+| IPC | tokio Unix socket / Windows named pipe | Async endpoint behind one abstraction, already in the runtime | Separate blocking implementations; `interprocess` remains a fallback |
 | Reference GUI | egui/eframe | Pure Rust, fast to iterate, MIT/Apache | GPUI/Qt from day one |
 | Other GUIs | GPUI and PySide6 adapters | Same client state, different renderers | One hard-coded toolkit |
 | Daemon | Custom, small | Full control over lifecycle and protocol | Embed `zellij-server`, depend on `rmux` |

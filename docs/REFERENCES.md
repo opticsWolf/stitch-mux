@@ -338,7 +338,7 @@ purposes. The server keeps sessions alive when clients detach.
 | Alternative screen | `alacritty_terminal` | Evaluate for full Alacritty-grade grid |
 | Surface/deltas | `termwiz` | Evaluate for structured delta protocol |
 | Layout | own binary split tree | **Build**; Zellij/rmux as references |
-| Local IPC | `interprocess` | **Use now** |
+| Local IPC | tokio Unix socket / Windows named pipe | **Use now** (interprocess is a fallback) |
 | Control encoding | `rmp-serde` (MessagePack) | **Use now** |
 | High-speed binary frames | `bincode` | Evaluate later for render deltas |
 | Schema-first protocol | `prost` / protobuf | Evaluate if multi-language clients grow |

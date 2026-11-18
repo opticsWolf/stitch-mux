@@ -1,0 +1,10 @@
+[package]
+name = "stitch-mux-gui-gpui"
+description = "Optional GPUI adapter for stitch-mux (feature-gated spike)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
