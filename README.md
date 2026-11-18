@@ -2,9 +2,9 @@
 
 A terminal multiplexer built on top of [`stitch-pty`](../stitch-pty).
 
-> **Status: M0 workspace and protocol skeleton implemented.** The daemon can
-> bind the local endpoint, complete `Hello`/`HelloAck`, answer `Ping`, and
-> detach cleanly. PTY sessions, pane layout, and GUI frontends follow in M1.
+> **Status: M1 one-pane GUI session with detach/reattach implemented.** A real
+> child survives GUI close and abrupt GUI process kill; reattach restores the
+> layout and full screen. M2 adds multi-pane layout and per-client focus.
 
 ## Why another multiplexer?
 
@@ -104,6 +104,7 @@ stitch-mux/
 │   ├── FRONTENDS.md           # egui/GPUI/Qt-PySide6 adapter evaluation
 │   ├── AUTOMATION.md          # local CLI, events, and agent interface
 │   ├── IMPLEMENTATION_PLAN.md # milestones, tasks, acceptance criteria
+│   ├── IMPLEMENTATION_PROTOCOL.md # living execution rules and decision log
 │   └── REFERENCES.md          # rmux/Zellij/WezTerm/Rex evaluation
 ├── agent-skill/               # local agent instructions and hooks (later)
 └── crates/
@@ -117,6 +118,23 @@ stitch-mux/
     ├── stitch-mux/            # CLI binary
     └── stitch-mux-py/         # PyO3 control SDK + PySide6 adapter (later)
 ```
+
+## Quickstart (M1)
+
+```sh
+# Terminal 1: local daemon
+cargo run -p stitch-mux -- server --foreground
+
+# Terminal 2: a detached child that survives client exits
+cargo run -p stitch-mux -- new -s demo -- sh
+cargo run -p stitch-mux -- gui        # pick "demo"
+cargo run -p stitch-mux -- ls
+cargo run -p stitch-mux -- kill -t demo
+```
+
+On Windows use `cmd.exe` instead of `sh`. `stitch-mux gui -s demo` skips the
+picker. The egui adapter is a disposable reference; the protocol and client
+state are toolkit-neutral.
 
 ## Documentation map
 

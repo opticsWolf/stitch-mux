@@ -6,7 +6,7 @@ This is the **operating protocol** for turning the design in
 document: update it in the **same commit** as the work it describes. It is not
 the wire protocol; that contract lives in [PROTOCOL.md](PROTOCOL.md).
 
-Last updated: **2026-11-18** — M0 complete, M1 ready.
+Last updated: **2026-11-18** — M0 and M1 complete, M2 ready.
 
 ## 1. Standing rules
 
@@ -171,13 +171,17 @@ Before marking a task Ready for review:
 | 2026-11-18 | `Render` wires a 13-byte binary prefix plus raw ANSI, not MessagePack | Keeps ANSI bytes unescaped while carrying `seq`/size/full | Decoded DTO stays in `dto::Render`; golden fixture records the prefix |
 | 2026-11-18 | M0 is handshake-only; no PTY or session commands | Prove endpoint, framing, and typed errors before lifecycle complexity | CLI `ls` returns "arrives in M1"; `Ping` is the smoke test |
 | 2026-11-18 | `dev` integrates, `main` is fast-forward only | Keeps a green stable branch while allowing feature work | No force-push to shared branches; tags only on explicit approval |
+| 2026-11-18 | `PaneRuntime` owns `HistoryScreen`, Kitty flags, and the snapshot/delta stream | `PtySession` stays transport-only; reattach needs one authoritative screen | Frontends never parse ANSI or encode keys themselves |
+| 2026-11-18 | Split framed connections into reader and writer halves | A cancelled `recv_frame` in `select!` loses partially decoded bytes | Reader task owns the framed decoder; pushes and commands share one writer |
+| 2026-11-18 | `ResizeEvent` carries only `cols`/`rows` | `ResizeRequest` also carries pixel dimensions; the DTO shapes differ on the wire | Server sends the event DTO, not the request DTO, to avoid decode failures |
 
 ## 9. Current status
 
 | Milestone | Status | Evidence / next action |
 |---|---|---|
 | M0 — workspace, core, protocol, client skeleton | **Done** | `3b6bcca`; 30 tests; fmt/clippy/test/doc green; CLI `ping` verified on Windows named pipe |
-| M1 — one-pane GUI session with detach/reattach | **Ready** | Start with `PaneRuntime` using `PtySession` + `HistoryScreen`; then session registry, attach stream, egui reference |
+| M1 — one-pane GUI session with detach/reattach | **Done** | 35 tests; real-child echo, capture, resize, detach/reattach test; CLI `new`/`ls`/`kill`/`gui` smoke; abrupt GUI kill leaves child alive and clears attached count |
+| M2 — multi-pane GUI layout and per-client focus | **Ready** | Start from `LayoutNode::split`; M1 sends a fixed one-pane `Layout` |
 | M2 — multi-pane GUI layout and per-client focus | Backlog | Depends on M1 detach matrix |
 | M3 — multiple clients, backpressure | Backlog | Depends on M2 layout revisions |
 | M4 — terminal ANSI compatibility | Backlog | Structured path first |

@@ -1,14 +1,15 @@
 //! stitch-mux command-line entry point.
 //!
-//! M0 surface: start the local daemon in the foreground and verify the
-//! handshake with `ping`. Session commands arrive in M1.
+//! M1 surface: daemon, session lifecycle, and the reference GUI launcher.
 
 use clap::{Parser, Subcommand};
 use std::error::Error;
 use std::process::ExitCode;
 
-use stitch_mux_client::{ClientError, connect};
-use stitch_mux_protocol::{DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, MessageKind, ViewMode};
+use stitch_mux_client::{ClientError, ClientSession, Outbound, command as send_control};
+use stitch_mux_protocol::{
+    Command, CommandResponse, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, MessageKind, ViewMode,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -27,16 +28,48 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Run the daemon in the foreground (M0 debugging entry point).
+    /// Run the daemon in the foreground.
     Server {
-        /// Kept for compatibility with the documented CLI; M0 always runs foreground.
+        /// Kept for compatibility; M0+ runs foreground.
         #[arg(long, default_value_t = true)]
         foreground: bool,
     },
     /// Verify that a daemon is reachable and print its HelloAck as JSON.
     Ping,
-    /// Placeholder for the M1 session list.
+    /// Create a session whose child stays alive after clients detach.
+    New {
+        #[arg(short = 's', long = "session", default_value = "default")]
+        session: String,
+        #[arg(long, default_value_t = 80)]
+        cols: u16,
+        #[arg(long, default_value_t = 24)]
+        rows: u16,
+        #[arg(short = 'c', long)]
+        cwd: Option<String>,
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        #[arg(short = 'e', long)]
+        ensure: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        program: Vec<String>,
+    },
+    /// List sessions as JSON.
     Ls,
+    /// Kill a session and its child.
+    Kill {
+        #[arg(short = 't', long = "target")]
+        target: String,
+    },
+    /// Launch the disposable egui reference GUI.
+    Gui {
+        #[arg(short = 's', long = "session")]
+        session: Option<String>,
+    },
+    /// Terminal attach is a compatibility projection (M4).
+    Attach {
+        #[arg(short = 's', long = "session", default_value = "default")]
+        session: String,
+    },
 }
 
 fn endpoint(cli: &Cli) -> Result<Endpoint, Box<dyn Error>> {
@@ -60,9 +93,68 @@ fn hello(view_mode: ViewMode) -> Hello {
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    match run().await {
+fn parse_env(entries: &[String]) -> Result<Option<Vec<(String, String)>>, String> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let mut parsed = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let (key, value) = entry
+            .split_once('=')
+            .ok_or_else(|| format!("invalid --env {entry:?}; expected KEY=VALUE"))?;
+        parsed.push((key.to_owned(), value.to_owned()));
+    }
+    Ok(Some(parsed))
+}
+
+fn print_response(response: CommandResponse) -> ExitCode {
+    if !response.ok {
+        let message = response
+            .error
+            .map(|error| format!("{:?}: {}", error.code, error.message))
+            .unwrap_or_else(|| "command failed".into());
+        eprintln!("stitch-mux: {message}");
+        return ExitCode::from(1);
+    }
+    match serde_json::to_string(&response) {
+        Ok(json) => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("stitch-mux: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn send_command(endpoint: &Endpoint, request: Command) -> Result<ExitCode, Box<dyn Error>> {
+    match send_control(endpoint, request).await {
+        Ok(response) => Ok(print_response(response)),
+        Err(ClientError::Endpoint(_)) => Ok(ExitCode::from(4)),
+        Err(err) => Err(Box::new(err)),
+    }
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    if matches!(cli.command, Commands::Gui { .. }) {
+        // winit requires the GUI event loop on the main thread, and eframe
+        // blocks that thread, so no Tokio runtime may own it.
+        return finish(run_gui(&cli));
+    }
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => return finish(Err(Box::new(err))),
+    };
+    finish(runtime.block_on(run(&cli)))
+}
+
+fn finish(result: Result<ExitCode, Box<dyn Error>>) -> ExitCode {
+    match result {
         Ok(code) => code,
         Err(err) => {
             eprintln!("stitch-mux: {err}");
@@ -71,24 +163,31 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run() -> Result<ExitCode, Box<dyn Error>> {
-    let cli = Cli::parse();
-    let endpoint = endpoint(&cli)?;
-    match cli.command {
+fn run_gui(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
+    let Commands::Gui { session } = &cli.command else {
+        return Ok(ExitCode::from(2));
+    };
+    stitch_mux_gui_egui::run(endpoint(cli)?, session.clone())?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
+    let endpoint = endpoint(cli)?;
+    match &cli.command {
         Commands::Server { foreground } => {
             if !foreground {
-                eprintln!("stitch-mux: M0 only supports --foreground; running in foreground");
+                eprintln!("stitch-mux: M1 runs the daemon in the foreground");
             }
             stitch_mux_server::run_foreground(endpoint).await?;
             Ok(ExitCode::SUCCESS)
         }
         Commands::Ping => {
-            let (mut connection, ack) = match connect(&endpoint, hello(ViewMode::Structured)).await
-            {
-                Ok(result) => result,
-                Err(ClientError::Endpoint(_)) => return Ok(ExitCode::from(4)),
-                Err(err) => return Err(Box::new(err)),
-            };
+            let (mut connection, ack) =
+                match stitch_mux_client::connect(&endpoint, hello(ViewMode::Structured)).await {
+                    Ok(result) => result,
+                    Err(ClientError::Endpoint(_)) => return Ok(ExitCode::from(4)),
+                    Err(err) => return Err(Box::new(err)),
+                };
             println!("{}", serde_json::to_string(&ack)?);
             connection
                 .send(
@@ -101,9 +200,76 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
             connection.shutdown().await?;
             Ok(ExitCode::SUCCESS)
         }
-        Commands::Ls => {
-            eprintln!("stitch-mux: session listing arrives in M1");
+        Commands::New {
+            session,
+            cols,
+            rows,
+            cwd,
+            env,
+            ensure,
+            program,
+        } => {
+            let env = parse_env(env).map_err(CliError)?;
+            let command = if *ensure {
+                Command::EnsureSession {
+                    name: session.clone(),
+                    program: program[0].clone(),
+                    args: program[1..].to_vec(),
+                    cwd: cwd.clone(),
+                    env,
+                    cols: *cols,
+                    rows: *rows,
+                }
+            } else {
+                Command::NewSession {
+                    name: session.clone(),
+                    program: program[0].clone(),
+                    args: program[1..].to_vec(),
+                    cwd: cwd.clone(),
+                    env,
+                    cols: *cols,
+                    rows: *rows,
+                }
+            };
+            send_command(&endpoint, command).await
+        }
+        Commands::Ls => send_command(&endpoint, Command::ListSessions).await,
+        Commands::Kill { target } => {
+            send_command(
+                &endpoint,
+                Command::KillSession {
+                    name: target.clone(),
+                },
+            )
+            .await
+        }
+        Commands::Attach { session } => {
+            let client = match ClientSession::attach(
+                &endpoint,
+                session,
+                hello(ViewMode::Structured),
+            )
+            .await
+            {
+                Ok(client) => client,
+                Err(ClientError::Endpoint(_)) => return Ok(ExitCode::from(4)),
+                Err(err) => return Err(Box::new(err)),
+            };
+            println!("attached to {session}; terminal rendering arrives in M4");
+            client.send(Outbound::Detach);
             Ok(ExitCode::from(2))
         }
+        Commands::Gui { .. } => Ok(ExitCode::from(2)),
     }
 }
+
+#[derive(Debug)]
+struct CliError(String);
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Error for CliError {}

@@ -8,6 +8,92 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+/// Read half of a split framed connection. Owning the reader in its own task
+/// avoids losing partially decoded frames when a select! branch is cancelled.
+pub struct FrameReader<R> {
+    io: R,
+    decoder: FrameDecoder,
+}
+
+/// Write half of a split framed connection.
+pub struct FrameWriter<W> {
+    io: W,
+}
+
+impl<R> FrameReader<R>
+where
+    R: AsyncRead + Unpin,
+{
+    pub fn new(io: R) -> Self {
+        Self {
+            io,
+            decoder: FrameDecoder::new(),
+        }
+    }
+
+    pub async fn recv_frame(&mut self) -> Result<Frame, FrameError> {
+        let mut chunk = [0_u8; 8192];
+        loop {
+            if let Some(frame) = self.decoder.push(&[])?.into_iter().next() {
+                return Ok(frame);
+            }
+            let n = self.io.read(&mut chunk).await?;
+            if n == 0 {
+                return Err(FrameError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "local endpoint closed mid-frame",
+                )));
+            }
+            if let Some(frame) = self.decoder.push(&chunk[..n])?.into_iter().next() {
+                return Ok(frame);
+            }
+        }
+    }
+
+    pub async fn recv<T: DeserializeOwned>(
+        &mut self,
+        expected: MessageKind,
+    ) -> Result<T, FrameError> {
+        let frame = self.recv_frame().await?;
+        if frame.kind != expected {
+            return Err(FrameError::WrongKind {
+                expected,
+                actual: frame.kind,
+            });
+        }
+        decode_message(&frame)
+    }
+}
+
+impl<W> FrameWriter<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    pub fn new(io: W) -> Self {
+        Self { io }
+    }
+
+    pub async fn send_frame(&mut self, frame: &Frame) -> Result<(), FrameError> {
+        let bytes = frame.encode();
+        self.io.write_all(&bytes).await?;
+        self.io.flush().await?;
+        Ok(())
+    }
+
+    pub async fn send<T: Serialize>(
+        &mut self,
+        kind: MessageKind,
+        value: &T,
+    ) -> Result<(), FrameError> {
+        self.send_frame(&encode_message(kind, value)?).await
+    }
+
+    pub async fn shutdown(&mut self) -> Result<(), FrameError> {
+        self.io.shutdown().await?;
+        Ok(())
+    }
+}
+
 pub struct Connection<S> {
     io: S,
     decoder: FrameDecoder,
@@ -93,6 +179,18 @@ where
     pub async fn shutdown(&mut self) -> Result<(), FrameError> {
         self.io.shutdown().await?;
         Ok(())
+    }
+
+    /// Split into framed halves so a reader task can keep decoding while the
+    /// writer sends server pushes.
+    pub fn split(
+        self,
+    ) -> (
+        FrameReader<tokio::io::ReadHalf<S>>,
+        FrameWriter<tokio::io::WriteHalf<S>>,
+    ) {
+        let (read, write) = tokio::io::split(self.io);
+        (FrameReader::new(read), FrameWriter::new(write))
     }
 }
 

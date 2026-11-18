@@ -8,6 +8,6 @@ repository.workspace = true
 
 [dependencies]
 thiserror.workspace = true
-tokio = { version = "1", features = ["net", "io-util", "macros", "rt"] }
+tokio = { version = "1", features = ["net", "io-util", "macros", "rt", "sync"] }
 stitch-mux-core.workspace = true
 stitch-mux-protocol.workspace = true

@@ -16,7 +16,7 @@ pub use capabilities::{
     server as server_caps,
 };
 pub use command::{ClaimMode, Command, CommandRequest, CommandResponse, RunPlacement};
-pub use connection::Connection;
+pub use connection::{Connection, FrameReader, FrameWriter};
 pub use dto::*;
 pub use endpoint::{Endpoint, EndpointError, Listener, Stream};
 pub use frame::{

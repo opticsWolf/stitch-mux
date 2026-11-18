@@ -17,3 +17,4 @@ tokio.workspace = true
 stitch-mux-client.workspace = true
 stitch-mux-protocol.workspace = true
 stitch-mux-server.workspace = true
+stitch-mux-gui-egui.workspace = true
