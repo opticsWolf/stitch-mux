@@ -35,6 +35,30 @@ pub enum PaneError {
 }
 
 #[derive(Clone, Debug)]
+pub struct PaneSpec {
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: Option<Vec<(String, String)>>,
+}
+
+impl PaneSpec {
+    pub fn new(
+        program: &str,
+        args: &[String],
+        cwd: Option<&str>,
+        env: Option<&[(String, String)]>,
+    ) -> Self {
+        Self {
+            program: program.to_owned(),
+            args: args.to_vec(),
+            cwd: cwd.map(str::to_owned),
+            env: env.map(|entries| entries.to_vec()),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum PaneUpdate {
     Snapshot(PaneSnapshot),
     Delta(PaneDelta),
@@ -51,6 +75,7 @@ struct PaneState {
 pub struct PaneRuntime {
     pub id: u64,
     pub session_id: u64,
+    spec: PaneSpec,
     session: Arc<PtySession>,
     state: Mutex<PaneState>,
     updates: broadcast::Sender<Arc<PaneUpdate>>,
@@ -62,14 +87,10 @@ pub struct PaneRuntime {
 
 impl PaneRuntime {
     /// Spawn a child and start its reader, writer, and exit watcher tasks.
-    #[allow(clippy::too_many_arguments)]
     pub async fn spawn(
         session_id: u64,
         id: u64,
-        program: &str,
-        args: &[String],
-        cwd: Option<&str>,
-        env: Option<&[(String, String)]>,
+        spec: &PaneSpec,
         cols: u16,
         rows: u16,
     ) -> Result<Arc<Self>, PaneError> {
@@ -77,10 +98,25 @@ impl PaneRuntime {
             return Err(PaneError::InvalidGeometry { cols, rows });
         }
         let winsize = Winsize::new(rows, cols, 0, 0);
-        let session = match env {
-            None => PtySession::spawn(program, args, Some(winsize), cwd).await?,
+        let session = match &spec.env {
+            None => {
+                PtySession::spawn(
+                    &spec.program,
+                    &spec.args,
+                    Some(winsize),
+                    spec.cwd.as_deref(),
+                )
+                .await?
+            }
             Some(entries) => {
-                PtySession::spawn_with_env(program, args, entries, Some(winsize), cwd).await?
+                PtySession::spawn_with_env(
+                    &spec.program,
+                    &spec.args,
+                    entries,
+                    Some(winsize),
+                    spec.cwd.as_deref(),
+                )
+                .await?
             }
         };
         let session = Arc::new(session);
@@ -93,10 +129,11 @@ impl PaneRuntime {
             id,
             session_id,
             session: Arc::clone(&session),
+            spec: spec.clone(),
             state: Mutex::new(PaneState {
                 screen,
                 seq: 0,
-                program: program.to_owned(),
+                program: spec.program.clone(),
                 bell: false,
             }),
             updates,
@@ -164,6 +201,10 @@ impl PaneRuntime {
         tasks.push(watcher);
         drop(tasks);
         Ok(runtime)
+    }
+
+    pub fn spec(&self) -> &PaneSpec {
+        &self.spec
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<PaneUpdate>> {

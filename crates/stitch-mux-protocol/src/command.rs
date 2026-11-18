@@ -72,10 +72,12 @@ pub enum Command {
         pane_id: u64,
     },
     ZoomPane {
+        session: String,
         /// `None` unzooms; `Some(pane_id)` makes that pane fill the viewport.
         pane_id: Option<u64>,
     },
     ResizeSession {
+        session: String,
         cols: u16,
         rows: u16,
     },

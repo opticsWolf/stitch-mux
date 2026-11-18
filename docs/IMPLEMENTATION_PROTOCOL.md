@@ -6,7 +6,7 @@ This is the **operating protocol** for turning the design in
 document: update it in the **same commit** as the work it describes. It is not
 the wire protocol; that contract lives in [PROTOCOL.md](PROTOCOL.md).
 
-Last updated: **2026-11-18** — M0 and M1 complete, M2 ready.
+Last updated: **2026-11-18** — M0 and M1 complete, M2 server work in progress.
 
 ## 1. Standing rules
 
@@ -175,6 +175,9 @@ Before marking a task Ready for review:
 | 2026-11-18 | Split framed connections into reader and writer halves | A cancelled `recv_frame` in `select!` loses partially decoded bytes | Reader task owns the framed decoder; pushes and commands share one writer |
 | 2026-11-18 | `ResizeEvent` carries only `cols`/`rows` | `ResizeRequest` also carries pixel dimensions; the DTO shapes differ on the wire | Server sends the event DTO, not the request DTO, to avoid decode failures |
 | 2026-11-18 | Consume `stitch-pty` 0.15.0 from crates.io, not a sibling path | CI checks out only `stitch-mux`; a `../stitch-pty` path dep cannot resolve there | Local and CI builds use the same published API |
+| 2026-11-18 | The daemon owns the split tree and its revision; clients send intent | A stale `SetLayout` must never corrupt geometry | Rejected requests return `Busy` plus a fresh `Layout` |
+| 2026-11-18 | Broadcast layouts carry no focus; each connection adds its own focus | Focus is per client, but layout changes are session-wide | Every layout push is followed by a per-client `Focus` frame |
+| 2026-11-18 | Zoom uses `visible_pane_ids`, not all session panes | Reattach while zoomed must focus the pane actually on screen | Hidden panes stay alive but receive no input |
 
 ## 9. Current status
 
@@ -182,8 +185,7 @@ Before marking a task Ready for review:
 |---|---|---|
 | M0 — workspace, core, protocol, client skeleton | **Done** | `3b6bcca`; 30 tests; fmt/clippy/test/doc green; CLI `ping` verified on Windows named pipe |
 | M1 — one-pane GUI session with detach/reattach | **Done** | 35 tests; real-child echo, capture, resize, detach/reattach test; CLI `new`/`ls`/`kill`/`gui` smoke; abrupt GUI kill leaves child alive and clears attached count |
-| M2 — multi-pane GUI layout and per-client focus | **Ready** | Start from `LayoutNode::split`; M1 sends a fixed one-pane `Layout` |
-| M2 — multi-pane GUI layout and per-client focus | Backlog | Depends on M1 detach matrix |
+| M2 — multi-pane GUI layout and per-client focus | **In progress** | Server split/close/zoom/focus and revision guard implemented; 2 real-child layout tests pass; GUI chrome and CLI commands next |
 | M3 — multiple clients, backpressure | Backlog | Depends on M2 layout revisions |
 | M4 — terminal ANSI compatibility | Backlog | Structured path first |
 | M5 — Qt/PySide6 + optional GPUI | Backlog | Second-toolkit proof, no protocol changes allowed |

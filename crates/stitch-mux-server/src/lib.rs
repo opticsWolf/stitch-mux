@@ -1,7 +1,8 @@
 //! Local stitch-mux daemon.
 //!
-//! M1 scope: own PTY sessions, project structured snapshots/deltas to attached
-//! clients, and keep sessions alive across detach/reattach.
+//! M2 scope: own PTY panes and a server-validated binary split layout, project
+//! structured snapshots/deltas to attached clients, and keep per-client focus
+//! local to each connection. Sessions survive detach/reattach.
 
 pub mod pane;
 pub mod session;
@@ -11,17 +12,21 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use stitch_mux_core::layout_leaves;
 use stitch_mux_protocol::{
     Attach, CaptureRequest, Command, CommandRequest, CommandResponse, Connection,
     DEFAULT_SERVER_CAPABILITIES, Endpoint, EndpointError, ErrorCode, ErrorInfo, Frame, FrameError,
-    FrameWriter, Hello, HelloAck, InputEvent, MessageKind, PROTOCOL_VERSION, ResizeRequest, Stream,
-    ViewMode, capabilities, decode_message,
+    FrameWriter, Hello, HelloAck, InputEvent, Layout, MessageKind, PROTOCOL_VERSION, ResizeRequest,
+    Stream, ViewMode, capabilities, decode_message,
 };
 use thiserror::Error;
 use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::task::JoinHandle;
 
-pub use pane::{PaneError, PaneRuntime, PaneUpdate};
+pub use pane::{PaneError, PaneRuntime, PaneSpec, PaneUpdate};
 pub use session::{Session, SessionError, SessionRegistry};
+
+type Writer = FrameWriter<tokio::io::WriteHalf<Stream>>;
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -175,7 +180,10 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
     });
 
     let mut attached: Option<Arc<Session>> = None;
-    let mut updates: Option<broadcast::Receiver<Arc<PaneUpdate>>> = None;
+    let mut focus: Option<u64> = None;
+    let mut update_rx: Option<mpsc::UnboundedReceiver<Arc<PaneUpdate>>> = None;
+    let mut update_tasks: Vec<JoinHandle<()>> = Vec::new();
+    let mut layout_rx: Option<broadcast::Receiver<Arc<Layout>>> = None;
     let mut failure: Option<ServerError> = None;
     loop {
         let event = tokio::select! {
@@ -187,14 +195,38 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                 }
                 None => break,
             },
-            update = next_update(updates.as_mut()) => match update {
+            update = next_update(update_rx.as_mut()) => match update {
                 Some(update) => Event::Update(update),
                 None => break,
+            },
+            layout = next_layout(layout_rx.as_mut()) => match layout {
+                Some(Ok(_)) => Event::Layout,
+                Some(Err(broadcast::error::RecvError::Lagged(_))) => {
+                    if let Some(session) = attached.as_ref()
+                        && let Err(err) = send_session_state(&mut writer, session, focus).await
+                    {
+                        failure = Some(err);
+                        break;
+                    }
+                    continue;
+                }
+                Some(Err(broadcast::error::RecvError::Closed)) | None => break,
             },
         };
         match event {
             Event::Frame(frame) => {
-                match handle_frame(frame, &state, &mut attached, &mut updates, &mut writer).await {
+                match handle_frame(
+                    frame,
+                    &state,
+                    &mut attached,
+                    &mut focus,
+                    &mut update_rx,
+                    &mut update_tasks,
+                    &mut layout_rx,
+                    &mut writer,
+                )
+                .await
+                {
                     Ok(true) => break,
                     Ok(false) => {}
                     Err(err) => {
@@ -209,9 +241,26 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                     break;
                 }
             }
+            Event::Layout => {
+                let Some(session) = attached.as_ref() else {
+                    continue;
+                };
+                if let Some(id) = focus {
+                    focus = session.next_focus(id);
+                } else {
+                    focus = session.visible_pane_ids().first().copied();
+                }
+                if let Err(err) = send_session_state(&mut writer, session, focus).await {
+                    failure = Some(err);
+                    break;
+                }
+            }
         }
     }
 
+    for task in &update_tasks {
+        task.abort();
+    }
     if let Some(session) = attached {
         state.detach(session.id);
     }
@@ -225,15 +274,48 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
 enum Event {
     Frame(Frame),
     Update(Arc<PaneUpdate>),
+    Layout,
 }
 
 async fn next_update(
-    mut receiver: Option<&mut broadcast::Receiver<Arc<PaneUpdate>>>,
+    receiver: Option<&mut mpsc::UnboundedReceiver<Arc<PaneUpdate>>>,
 ) -> Option<Arc<PaneUpdate>> {
-    match receiver.as_mut() {
-        Some(receiver) => receiver.recv().await.ok(),
+    match receiver {
+        Some(receiver) => receiver.recv().await,
         None => std::future::pending().await,
     }
+}
+
+async fn next_layout(
+    receiver: Option<&mut broadcast::Receiver<Arc<Layout>>>,
+) -> Option<Result<Arc<Layout>, broadcast::error::RecvError>> {
+    match receiver {
+        Some(receiver) => Some(receiver.recv().await),
+        None => std::future::pending().await,
+    }
+}
+
+async fn send_session_state(
+    writer: &mut Writer,
+    session: &Session,
+    focus: Option<u64>,
+) -> Result<(), ServerError> {
+    let layout = session.layout(focus);
+    // Layout first, then a full snapshot for every pane it contains.
+    writer.send(MessageKind::Layout, &layout).await?;
+    for geometry in &layout.panes {
+        if let Some(pane) = session.pane(geometry.pane_id) {
+            writer
+                .send(MessageKind::PaneSnapshot, &pane.snapshot())
+                .await?;
+        }
+    }
+    if let Some(pane_id) = focus {
+        writer
+            .send(MessageKind::Focus, &stitch_mux_protocol::Focus { pane_id })
+            .await?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -241,8 +323,11 @@ async fn handle_frame(
     frame: Frame,
     state: &Arc<ServerState>,
     attached: &mut Option<Arc<Session>>,
-    updates: &mut Option<broadcast::Receiver<Arc<PaneUpdate>>>,
-    writer: &mut FrameWriter<tokio::io::WriteHalf<Stream>>,
+    focus: &mut Option<u64>,
+    update_rx: &mut Option<mpsc::UnboundedReceiver<Arc<PaneUpdate>>>,
+    update_tasks: &mut Vec<JoinHandle<()>>,
+    layout_rx: &mut Option<broadcast::Receiver<Arc<Layout>>>,
+    writer: &mut Writer,
 ) -> Result<bool, ServerError> {
     match frame.kind {
         MessageKind::Ping => {
@@ -264,23 +349,36 @@ async fn handle_frame(
                 send_error(writer, ErrorCode::NotFound, "session not found").await?;
                 return Ok(false);
             };
-            // Subscribe before snapshotting: updates produced in the gap stay
+            // Subscribe before snapshotting; updates produced in the gap stay
             // queued and are replayed after the full state.
-            *updates = Some(session.pane.subscribe());
+            let (update_tx, rx) = mpsc::unbounded_channel::<Arc<PaneUpdate>>();
+            for pane in session.panes() {
+                let mut pane_rx = pane.subscribe();
+                let update_tx = update_tx.clone();
+                let task = tokio::spawn(async move {
+                    while let Ok(update) = pane_rx.recv().await {
+                        if update_tx.send(update).is_err() {
+                            break;
+                        }
+                    }
+                });
+                update_tasks.push(task);
+            }
+            drop(update_tx);
+            *update_rx = Some(rx);
+            *layout_rx = Some(session.subscribe_layout());
             let clients = state.attach(session.id);
+            *focus = session.visible_pane_ids().first().copied();
             *attached = Some(Arc::clone(&session));
             writer
                 .send(MessageKind::Attached, &session.attached(clients))
                 .await?;
-            writer.send(MessageKind::Layout, &session.layout()).await?;
-            writer
-                .send(MessageKind::PaneSnapshot, &session.pane.snapshot())
-                .await?;
+            send_session_state(writer, &session, *focus).await?;
         }
         MessageKind::Input => {
             let event: InputEvent = decode_message(&frame)?;
             if let Some(session) = attached.as_ref() {
-                route_input(session, event);
+                route_input(session, *focus, event);
             }
         }
         MessageKind::ResizeRequest => {
@@ -299,34 +397,63 @@ async fn handle_frame(
             }
         }
         MessageKind::FocusRequest => {
-            let focus: stitch_mux_protocol::FocusRequest = decode_message(&frame)?;
+            let request: stitch_mux_protocol::FocusRequest = decode_message(&frame)?;
+            let valid = attached
+                .as_ref()
+                .is_some_and(|session| session.visible_pane_ids().contains(&request.pane_id));
+            if !valid {
+                send_error(writer, ErrorCode::NotFound, "pane not found").await?;
+                return Ok(false);
+            }
+            *focus = Some(request.pane_id);
             writer
                 .send(
                     MessageKind::Focus,
                     &stitch_mux_protocol::Focus {
-                        pane_id: focus.pane_id,
+                        pane_id: request.pane_id,
                     },
                 )
                 .await?;
         }
+        MessageKind::SetLayout => {
+            let request: stitch_mux_protocol::SetLayout = decode_message(&frame)?;
+            let Some(session) = attached.as_ref() else {
+                send_error(writer, ErrorCode::NotFound, "no session attached").await?;
+                return Ok(false);
+            };
+            match session.set_layout(request.root, request.base_revision) {
+                Ok(layout) => writer.send(MessageKind::Layout, &layout).await?,
+                Err(SessionError::StaleLayout { expected, current }) => {
+                    send_error(
+                        writer,
+                        ErrorCode::Busy,
+                        format!("layout revision {expected} is stale; current is {current}"),
+                    )
+                    .await?;
+                    writer
+                        .send(MessageKind::Layout, &session.layout(*focus))
+                        .await?;
+                }
+                Err(err) => {
+                    send_error(writer, session_error_code(&err), err.to_string()).await?;
+                }
+            }
+        }
         MessageKind::Resync => {
             if let Some(session) = attached.as_ref() {
-                writer
-                    .send(MessageKind::PaneSnapshot, &session.pane.snapshot())
-                    .await?;
+                send_session_state(writer, session, *focus).await?;
             }
         }
         MessageKind::CaptureRequest => {
             let request: CaptureRequest = decode_message(&frame)?;
-            let response = attached.as_ref().map(|session| {
-                session
-                    .pane
-                    .capture(request.start, request.lines, request.format)
-            });
+            let response = attached
+                .as_ref()
+                .and_then(|session| session.pane(request.pane_id))
+                .map(|pane| pane.capture(request.start, request.lines, request.format));
             if let Some(response) = response {
                 writer.send(MessageKind::CaptureResponse, &response).await?;
             } else {
-                send_error(writer, ErrorCode::NotFound, "no session attached").await?;
+                send_error(writer, ErrorCode::NotFound, "pane not found").await?;
             }
         }
         MessageKind::Detach => return Ok(true),
@@ -334,13 +461,8 @@ async fn handle_frame(
             let info: ErrorInfo = decode_message(&frame)?;
             tracing::debug!("client error: {:?}: {}", info.code, info.message);
         }
-        MessageKind::SetLayout | MessageKind::Clipboard | MessageKind::SubscribeEvents => {
-            send_error(
-                writer,
-                ErrorCode::Unsupported,
-                "this message arrives after M1",
-            )
-            .await?;
+        MessageKind::Clipboard | MessageKind::SubscribeEvents => {
+            send_error(writer, ErrorCode::Unsupported, "this message arrives later").await?;
         }
         other => {
             send_error(
@@ -354,8 +476,13 @@ async fn handle_frame(
     Ok(false)
 }
 
-fn route_input(session: &Session, event: InputEvent) {
-    let pane = &session.pane;
+fn route_input(session: &Session, focus: Option<u64>, event: InputEvent) {
+    let Some(pane_id) = focus else {
+        return;
+    };
+    let Some(pane) = session.pane(pane_id) else {
+        return;
+    };
     match event {
         InputEvent::Text(text) => pane.write(text.into_bytes()),
         InputEvent::Paste(text) => {
@@ -367,15 +494,15 @@ fn route_input(session: &Session, event: InputEvent) {
             pane.write(bytes);
         }
         InputEvent::Bytes(bytes) => pane.write(bytes),
-        InputEvent::Key(key) => pane.write(pane.encode_key(&key)),
+        InputEvent::Key(key) => {
+            let bytes = pane.encode_key(&key);
+            pane.write(bytes);
+        }
         InputEvent::Focus(_) | InputEvent::Mouse(_) => {}
     }
 }
 
-async fn send_update(
-    writer: &mut FrameWriter<tokio::io::WriteHalf<Stream>>,
-    update: &PaneUpdate,
-) -> Result<(), ServerError> {
+async fn send_update(writer: &mut Writer, update: &PaneUpdate) -> Result<(), ServerError> {
     match update {
         PaneUpdate::Snapshot(snapshot) => {
             writer.send(MessageKind::PaneSnapshot, snapshot).await?;
@@ -388,6 +515,15 @@ async fn send_update(
         }
     }
     Ok(())
+}
+
+fn session_error_code(error: &SessionError) -> ErrorCode {
+    match error {
+        SessionError::PaneNotFound(_) | SessionError::NotFound(_) => ErrorCode::NotFound,
+        SessionError::StaleLayout { .. } => ErrorCode::Busy,
+        SessionError::AlreadyExists(_) | SessionError::LastPane => ErrorCode::Busy,
+        _ => ErrorCode::Internal,
+    }
 }
 
 async fn handle_command(request: CommandRequest, state: &Arc<ServerState>) -> CommandResponse {
@@ -425,7 +561,7 @@ async fn handle_command(request: CommandRequest, state: &Arc<ServerState>) -> Co
                 Ok(session) => response
                     .sessions
                     .push(session.info(state.count(session.id))),
-                Err(err) => set_error(&mut response, ErrorCode::Busy, err),
+                Err(err) => set_error(&mut response, session_error_code(&err), err),
             }
         }
         Command::EnsureSession {
@@ -456,14 +592,113 @@ async fn handle_command(request: CommandRequest, state: &Arc<ServerState>) -> Co
                 Ok(session) => response
                     .sessions
                     .push(session.info(state.count(session.id))),
-                Err(err) => set_error(&mut response, ErrorCode::Internal, err),
+                Err(err) => set_error(&mut response, session_error_code(&err), err),
             }
         }
         Command::ListSessions => response.sessions = state.infos().await,
+        Command::ListPanes { session } => {
+            let info = state.registry.lock().await.get(&session).map(|session| {
+                let count = state.count(session.id);
+                session.info(count)
+            });
+            match info {
+                Some(info) => response.panes = info.panes,
+                None => set_error(&mut response, ErrorCode::NotFound, "session not found"),
+            }
+        }
         Command::KillSession { name } => {
             let result = state.registry.lock().await.kill(&name).await;
             if let Err(err) = result {
-                set_error(&mut response, ErrorCode::NotFound, err);
+                set_error(&mut response, session_error_code(&err), err);
+            }
+        }
+        Command::SplitPane {
+            pane_id,
+            axis,
+            ratio_bps,
+        } => {
+            let session = state.registry.lock().await.find_by_pane(pane_id);
+            match session {
+                Some(session) => match session.split(pane_id, axis, ratio_bps).await {
+                    Ok(layout) => response.layout = Some(layout),
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
+            }
+            response.sessions = state.infos().await;
+        }
+        Command::ClosePane { pane_id } => {
+            let registry = state.registry.lock().await;
+            let session = registry.find_by_pane(pane_id);
+            let name = registry.names().into_iter().find(|name| {
+                registry
+                    .get(name)
+                    .is_some_and(|found| session.as_ref().is_some_and(|s| s.id == found.id))
+            });
+            drop(registry);
+            match session {
+                Some(session) => match session.close(pane_id).await {
+                    Ok(Some(layout)) => response.layout = Some(layout),
+                    Ok(None) => {
+                        if let Some(name) = name {
+                            let _ = state.registry.lock().await.kill(&name).await;
+                        }
+                    }
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
+            }
+            response.sessions = state.infos().await;
+        }
+        Command::ZoomPane { session, pane_id } => {
+            let target = state.registry.lock().await.get(&session);
+            match target {
+                Some(target) => match target.zoom(pane_id) {
+                    Ok(layout) => response.layout = Some(layout),
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "session not found"),
+            }
+        }
+        Command::ResizeSession {
+            session,
+            cols,
+            rows,
+        } => {
+            let target = state.registry.lock().await.get(&session);
+            match target {
+                Some(target) => {
+                    target.resize(cols, rows);
+                    response.sessions = state.infos().await;
+                }
+                None => set_error(&mut response, ErrorCode::NotFound, "session not found"),
+            }
+        }
+        Command::SetLayout {
+            base_revision,
+            root,
+        } => {
+            let session = state.registry.lock().await.find_by_pane(
+                layout_leaves(&root)
+                    .first()
+                    .copied()
+                    .map(stitch_mux_core::PaneId::get)
+                    .unwrap_or(0),
+            );
+            match session {
+                Some(session) => match session.set_layout(root, base_revision) {
+                    Ok(layout) => response.layout = Some(layout),
+                    Err(SessionError::StaleLayout { expected, current }) => {
+                        set_error(
+                            &mut response,
+                            ErrorCode::Busy,
+                            format!("layout revision {expected} is stale; current is {current}"),
+                        );
+                        response.layout = Some(session.layout(None));
+                    }
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
             }
         }
         Command::Capture {
@@ -474,20 +709,42 @@ async fn handle_command(request: CommandRequest, state: &Arc<ServerState>) -> Co
         } => {
             let registry = state.registry.lock().await;
             let capture = registry
-                .names()
-                .into_iter()
-                .filter_map(|name| registry.get(&name))
-                .find(|session| session.pane.id == pane_id)
-                .map(|session| session.pane.capture(start, lines, format));
+                .find_by_pane(pane_id)
+                .and_then(|session| session.pane(pane_id))
+                .map(|pane| pane.capture(start, lines, format));
             match capture {
                 Some(capture) => response.capture = Some(capture),
+                None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
+            }
+        }
+        Command::SendText { pane_id, text } => {
+            let pane = state
+                .registry
+                .lock()
+                .await
+                .find_by_pane(pane_id)
+                .and_then(|session| session.pane(pane_id));
+            match pane {
+                Some(pane) => pane.write(text.into_bytes()),
+                None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
+            }
+        }
+        Command::SendKeys { pane_id, bytes } => {
+            let pane = state
+                .registry
+                .lock()
+                .await
+                .find_by_pane(pane_id)
+                .and_then(|session| session.pane(pane_id));
+            match pane {
+                Some(pane) => pane.write(bytes),
                 None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
             }
         }
         other => set_error(
             &mut response,
             ErrorCode::Unsupported,
-            format!("{other:?} arrives after M1"),
+            format!("{other:?} is not implemented yet"),
         ),
     }
     response
@@ -504,7 +761,7 @@ fn set_error(response: &mut CommandResponse, code: ErrorCode, message: impl std:
 async fn send_error<W>(
     writer: &mut FrameWriter<W>,
     code: ErrorCode,
-    message: &str,
+    message: impl AsRef<str>,
 ) -> Result<(), ServerError>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -514,7 +771,7 @@ where
             MessageKind::Error,
             &ErrorInfo {
                 code,
-                message: message.to_owned(),
+                message: message.as_ref().to_owned(),
             },
         )
         .await?;

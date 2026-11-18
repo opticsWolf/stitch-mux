@@ -638,8 +638,8 @@ enum Command {
     DetachClient { client_id: u64 },
     SplitPane { pane_id: u64, axis: SplitAxis, ratio_bps: u16 },
     ClosePane { pane_id: u64 },
-    ZoomPane { pane_id: Option<u64> }, // None unzooms
-    ResizeSession { cols: u16, rows: u16 },
+    ZoomPane { session: String, pane_id: Option<u64> }, // None unzooms
+    ResizeSession { session: String, cols: u16, rows: u16 },
     SendText { pane_id: u64, text: String },
     SendKeys { pane_id: u64, bytes: Vec<u8> },
     Run {
