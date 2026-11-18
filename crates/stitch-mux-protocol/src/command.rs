@@ -1,8 +1,8 @@
 //! Control-command DTOs shared by the CLI and the daemon.
 
 use crate::dto::{
-    ActionArgs, ActionInfo, CaptureResponse, ClientInfo, ErrorInfo, Keymap, PaneInfo, RunResult,
-    SessionInfo, WaitResult, WaitTarget,
+    ActionArgs, ActionInfo, CaptureResponse, ClientInfo, ErrorInfo, Keymap, Layout, PaneInfo,
+    RunResult, SessionInfo, WaitResult, WaitTarget,
 };
 use serde::{Deserialize, Serialize};
 use stitch_mux_core::{CaptureFormat, LayoutNode};
@@ -70,6 +70,10 @@ pub enum Command {
     },
     ClosePane {
         pane_id: u64,
+    },
+    ZoomPane {
+        /// `None` unzooms; `Some(pane_id)` makes that pane fill the viewport.
+        pane_id: Option<u64>,
     },
     ResizeSession {
         cols: u16,
@@ -154,6 +158,9 @@ pub struct CommandResponse {
     pub panes: Vec<PaneInfo>,
     #[serde(default)]
     pub capture: Option<CaptureResponse>,
+    /// Fresh authoritative layout when a `SetLayout` base revision was stale.
+    #[serde(default)]
+    pub layout: Option<Layout>,
     #[serde(default)]
     pub run: Option<RunResult>,
     #[serde(default)]

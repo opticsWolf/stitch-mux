@@ -169,6 +169,7 @@ fn all_fixtures() -> Vec<(MessageKind, String)> {
                     rows: 24,
                     status_rows: 1,
                     focus: Some(7),
+                    root: LayoutNode::leaf(stitch_mux_core::PaneId::new(7)),
                     panes: vec![PaneGeometry {
                         pane_id: 7,
                         outer: Rect::new(0, 0, 80, 23),
@@ -387,6 +388,21 @@ fn all_fixtures() -> Vec<(MessageKind, String)> {
                         category: Some("pane".into()),
                         args_schema: None,
                     }],
+                    layout: Some(Layout {
+                        session_id: 1,
+                        revision: 5,
+                        cols: 80,
+                        rows: 24,
+                        status_rows: 1,
+                        focus: Some(7),
+                        root: LayoutNode::leaf(stitch_mux_core::PaneId::new(7)),
+                        panes: vec![PaneGeometry {
+                            pane_id: 7,
+                            outer: Rect::new(0, 0, 80, 23),
+                            content: Rect::new(1, 1, 78, 21),
+                            title: "sh".into(),
+                        }],
+                    }),
                     wait: Some(WaitResult {
                         target: WaitTarget::Pane { pane_id: 7 },
                         exit_code: Some(0),
@@ -436,7 +452,7 @@ const EXPECTED: [(u8, &str); 27] = [
     ),
     (
         5,
-        "534d01000500170000009701045018010791940794000050179401014e15a27368",
+        "534d010005001f0000009801045018010781a46c656166910791940794000050179401014e15a27368",
     ),
     (
         6,
@@ -474,7 +490,7 @@ const EXPECTED: [(u8, &str); 27] = [
     (24, "534d0100180011000000920191ad6c6973745f73657373696f6e73"),
     (
         25,
-        "534d01001900570000009b01c3c0919c01a464656d6f5018010001010102950000000000919807a27368c0c392a574696c6564c001c0c09090c0c09381a470616e65910700c29195aa70616e652e73706c6974a553706c6974c0a470616e65c0c0",
+        "534d01001900760000009c01c3c0919c01a464656d6f5018010001010102950000000000919807a27368c0c392a574696c6564c001c0c09090c09801055018010781a46c656166910791940794000050179401014e15a27368c09381a470616e65910700c29195aa70616e652e73706c6974a553706c6974c0a470616e65c0c0",
     ),
     (26, "534d01001a000800000093a464656d6fc228"),
     (
@@ -487,6 +503,13 @@ const EXPECTED: [(u8, &str); 27] = [
 fn every_message_kind_has_a_stable_encoding() {
     let fixtures = all_fixtures();
     assert_eq!(fixtures.len(), EXPECTED.len());
+    if std::env::var_os("STITCH_MUX_REGEN_GOLDEN").is_some() {
+        println!("const EXPECTED: [(u8, &str); {}] = [", fixtures.len());
+        for (kind, hex) in &fixtures {
+            println!("    ({}, \"{}\"),", kind.as_u8(), hex);
+        }
+        println!("];");
+    }
     for ((kind, hex), (expected_kind, expected_hex)) in fixtures.iter().zip(EXPECTED.iter()) {
         assert_eq!(kind.as_u8(), *expected_kind);
         assert_eq!(hex, expected_hex, "wrong encoding for {kind:?}");

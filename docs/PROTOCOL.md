@@ -197,6 +197,7 @@ struct Layout {
     rows: u16,
     status_rows: u16,
     focus: Option<PaneId>,       // focus for THIS client
+    root: LayoutNode,            // server-owned binary split tree
     panes: Vec<PaneGeometry>,
 }
 
@@ -219,8 +220,10 @@ struct Rect {
 and hit testing. The terminal compositor uses `outer` and draws the border/title
 inside it. The GUI may draw its own chrome within `outer`.
 
-`focus` is **per client**. Two attached clients can have different active panes
-while sharing the same layout.
+`root` is the authoritative binary split tree. Clients may request a new tree
+with `SetLayout`, but only the daemon applies it; `revision` increments on every
+accepted change. `focus` is **per client**. Two attached clients can have
+different active panes while sharing the same layout.
 
 ### 6.4 `PaneSnapshot`
 
@@ -635,6 +638,7 @@ enum Command {
     DetachClient { client_id: u64 },
     SplitPane { pane_id: u64, axis: SplitAxis, ratio_bps: u16 },
     ClosePane { pane_id: u64 },
+    ZoomPane { pane_id: Option<u64> }, // None unzooms
     ResizeSession { cols: u16, rows: u16 },
     SendText { pane_id: u64, text: String },
     SendKeys { pane_id: u64, bytes: Vec<u8> },
@@ -700,6 +704,7 @@ struct CommandResponse {
     clients: Vec<ClientInfo>,
     panes: Vec<PaneInfo>,
     capture: Option<CaptureResponse>,
+    layout: Option<Layout>,      // fresh layout when a SetLayout base was stale
     run: Option<RunResult>,
     wait: Option<WaitResult>,
     actions: Vec<ActionInfo>,

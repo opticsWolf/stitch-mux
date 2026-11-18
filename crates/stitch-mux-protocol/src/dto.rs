@@ -6,7 +6,8 @@
 use crate::frame::{Frame, FrameError, MessageKind, decode_message};
 use serde::{Deserialize, Serialize};
 use stitch_mux_core::{
-    ActivitySummary, Attrs, CaptureFormat, Cell, Color, Cursor, Modes, ProgramStatus, Rect, Row,
+    ActivitySummary, Attrs, CaptureFormat, Cell, Color, Cursor, LayoutNode, Modes, ProgramStatus,
+    Rect, Row,
 };
 
 pub type ActionArgs = serde_json::Value;
@@ -75,6 +76,7 @@ pub struct Layout {
     pub rows: u16,
     pub status_rows: u16,
     pub focus: Option<u64>,
+    pub root: LayoutNode,
     pub panes: Vec<PaneGeometry>,
 }
 
