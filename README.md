@@ -2,9 +2,9 @@
 
 A terminal multiplexer built on top of [`stitch-pty`](../stitch-pty).
 
-> **Status: M1 one-pane GUI session with detach/reattach implemented.** A real
-> child survives GUI close and abrupt GUI process kill; reattach restores the
-> layout and full screen. M2 adds multi-pane layout and per-client focus.
+> **Status: M2 tiled GUI workspace implemented.** Sessions own a server-validated
+> binary split layout with per-client focus; children survive GUI close and
+> reattach restores geometry, zoom, and this client's focused pane.
 
 ## Why another multiplexer?
 
@@ -119,7 +119,7 @@ stitch-mux/
     └── stitch-mux-py/         # PyO3 control SDK + PySide6 adapter (later)
 ```
 
-## Quickstart (M1)
+## Quickstart (M2)
 
 ```sh
 # Terminal 1: local daemon
@@ -127,14 +127,20 @@ cargo run -p stitch-mux -- server --foreground
 
 # Terminal 2: a detached child that survives client exits
 cargo run -p stitch-mux -- new -s demo -- sh
+cargo run -p stitch-mux -- ls         # shows pane IDs
+cargo run -p stitch-mux -- split -t 101 --axis columns
+cargo run -p stitch-mux -- zoom -s demo -t 101
+cargo run -p stitch-mux -- zoom -s demo   # unzoom
 cargo run -p stitch-mux -- gui        # pick "demo"
-cargo run -p stitch-mux -- ls
+cargo run -p stitch-mux -- close -t 102
 cargo run -p stitch-mux -- kill -t demo
 ```
 
 On Windows use `cmd.exe` instead of `sh`. `stitch-mux gui -s demo` skips the
-picker. The egui adapter is a disposable reference; the protocol and client
-state are toolkit-neutral.
+picker. In the GUI, click a pane to focus it, use `Ctrl+Arrow` to move focus,
+drag a splitter to change its ratio, and use the status bar to split, close,
+zoom, and detach. The egui adapter is a disposable reference; the protocol and
+client state are toolkit-neutral.
 
 ## Documentation map
 

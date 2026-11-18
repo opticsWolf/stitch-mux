@@ -1,22 +1,25 @@
 //! Disposable egui reference adapter.
 //!
-//! This crate proves the structured protocol and detach/reattach loop. The
-//! product surface is toolkit-independent in `stitch-mux-client`.
+//! This crate proves the structured protocol, tiled layout, per-client focus,
+//! and detach/reattach loop. The product surface is toolkit-independent in
+//! `stitch-mux-client`.
 
 use std::error::Error;
 
 use eframe::egui;
 use stitch_mux_client::{ClientSession, Outbound, SessionView, command, size_from_pixels};
-use stitch_mux_core::{Color, Size};
+use stitch_mux_core::{Color, Direction, LayoutNode, PaneId, Rect, Size, SplitAxis};
 use stitch_mux_protocol::{
-    Command, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, InputEvent, KeyCode, KeyEvent,
-    KeyEventKind, ViewMode,
+    Command, CommandRequest, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, InputEvent, KeyCode,
+    KeyEvent, KeyEventKind, Layout, PaneGeometry, SessionInfo, ViewMode,
 };
 use tokio::sync::watch;
 
 const CELL_W: f32 = 8.4;
 const CELL_H: f32 = 18.0;
 const FONT_SIZE: f32 = 14.0;
+const STATUS_H: f32 = 30.0;
+const BORDER_PX: f32 = 2.0;
 
 /// Launch the reference GUI. `session` may be omitted to show the picker.
 pub fn run(endpoint: Endpoint, session: Option<String>) -> Result<(), Box<dyn Error>> {
@@ -38,11 +41,7 @@ pub fn run(endpoint: Endpoint, session: Option<String>) -> Result<(), Box<dyn Er
             .unwrap_or_else(|| "list sessions failed".into())
             .into());
     }
-    let sessions: Vec<String> = response
-        .sessions
-        .into_iter()
-        .map(|info| info.name)
-        .collect();
+    let sessions = response.sessions;
 
     let options = eframe::NativeOptions::default();
     eframe::run_native(
@@ -57,12 +56,13 @@ pub fn run(endpoint: Endpoint, session: Option<String>) -> Result<(), Box<dyn Er
 
 struct MuxApp {
     endpoint: Endpoint,
-    sessions: Vec<String>,
+    sessions: Vec<SessionInfo>,
     selected: String,
     client: Option<ClientSession>,
     view_rx: Option<watch::Receiver<SessionView>>,
     handle: tokio::runtime::Handle,
     last_size: Size,
+    next_request_id: u64,
     error: Option<String>,
 }
 
@@ -70,11 +70,11 @@ impl MuxApp {
     fn new(
         endpoint: Endpoint,
         session: Option<String>,
-        sessions: Vec<String>,
+        sessions: Vec<SessionInfo>,
         handle: tokio::runtime::Handle,
     ) -> Self {
         let selected = session
-            .or_else(|| sessions.first().cloned())
+            .or_else(|| sessions.first().map(|info| info.name.clone()))
             .unwrap_or_default();
         let mut app = Self {
             endpoint,
@@ -84,6 +84,7 @@ impl MuxApp {
             view_rx: None,
             handle,
             last_size: Size::new(80, 24),
+            next_request_id: 1,
             error: None,
         };
         if !selected.is_empty() {
@@ -123,36 +124,37 @@ impl MuxApp {
             client.send(outbound);
         }
     }
+
+    fn send_command(&mut self, command: Command) {
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        self.send(Outbound::Command(CommandRequest {
+            request_id,
+            command,
+        }));
+    }
+
+    fn refresh_sessions(&mut self) {
+        match self
+            .handle
+            .block_on(command(&self.endpoint, Command::ListSessions))
+        {
+            Ok(response) => {
+                if response.ok {
+                    self.sessions = response.sessions;
+                } else {
+                    self.error = response.error.map(|err| err.message);
+                }
+            }
+            Err(err) => self.error = Some(err.to_string()),
+        }
+    }
 }
 
 impl eframe::App for MuxApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if self.client.is_none() {
-            ui.heading("stitch-mux");
-            if self.sessions.is_empty() {
-                ui.label("No sessions. Run `stitch-mux new -s demo -- sh` first.");
-            } else {
-                ui.label("Pick a session:");
-                for name in self.sessions.clone() {
-                    if ui.button(&name).clicked() {
-                        self.attach(&name);
-                    }
-                }
-            }
-            if let Some(error) = &self.error {
-                ui.colored_label(egui::Color32::RED, error);
-            }
-            if ui.button("Refresh").clicked() {
-                match self
-                    .handle
-                    .block_on(command(&self.endpoint, Command::ListSessions))
-                {
-                    Ok(response) => {
-                        self.sessions = response.sessions.into_iter().map(|s| s.name).collect();
-                    }
-                    Err(err) => self.error = Some(err.to_string()),
-                }
-            }
+            self.picker_ui(ui);
             return;
         }
 
@@ -173,12 +175,70 @@ impl eframe::App for MuxApp {
             }));
         }
 
-        draw_panes(ui, &view);
+        let grid = egui::Rect::from_min_size(
+            ui.available_rect_before_wrap().min,
+            egui::vec2(available.x, (available.y - STATUS_H).max(CELL_H)),
+        );
+        let actions = draw_panes(ui, &view, grid);
+        for pane_id in actions.focus {
+            self.send(Outbound::Focus(pane_id));
+        }
+        for (_, root) in actions.ratios {
+            self.send_command(Command::SetLayout {
+                base_revision: view.layout_revision,
+                root,
+            });
+        }
+        self.status_ui(ui, &view);
+        handle_input(ui, self.client.as_ref());
+    }
 
+    fn on_exit(&mut self) {
+        if let Some(client) = self.client.take() {
+            client.send(Outbound::Detach);
+        }
+    }
+}
+
+impl MuxApp {
+    fn picker_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("stitch-mux");
+        if self.sessions.is_empty() {
+            ui.label("No sessions. Run `stitch-mux new -s demo -- sh` first.");
+        } else {
+            ui.label("Pick a session:");
+            for info in self.sessions.clone() {
+                let panes = info
+                    .panes
+                    .iter()
+                    .map(|pane| format!("{} {}", pane.title, pane.id))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let label = format!(
+                    "{} — {} pane(s), {} client(s), working {}\n{}",
+                    info.name, info.pane_count, info.attached_clients, info.activity.working, panes
+                );
+                if ui.button(label).clicked() {
+                    self.attach(&info.name);
+                }
+            }
+        }
+        if let Some(error) = &self.error {
+            ui.colored_label(egui::Color32::RED, error);
+        }
+        if ui.button("Refresh").clicked() {
+            self.refresh_sessions();
+        }
+    }
+
+    fn status_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) {
         ui.horizontal(|ui| {
             ui.label(format!("session: {}", view.name));
             ui.label(format!("{:?}", view.connection));
-            ui.label(format!("{}x{}", view.size.cols, view.size.rows));
+            ui.label(format!(
+                "{}x{} r{}",
+                view.size.cols, view.size.rows, view.layout_revision
+            ));
             ui.label(format!(
                 "clients: {}  working: {}  bell: {}",
                 view.attached_clients,
@@ -195,6 +255,41 @@ impl eframe::App for MuxApp {
             if let Some(exit) = &view.exit {
                 ui.label(format!("child: {}", exit.reason));
             }
+
+            let focused = view.focus;
+            if ui.button("Split |").clicked()
+                && let Some(pane_id) = focused
+            {
+                self.send_command(Command::SplitPane {
+                    pane_id,
+                    axis: SplitAxis::Columns,
+                    ratio_bps: 5000,
+                });
+            }
+            if ui.button("Split —").clicked()
+                && let Some(pane_id) = focused
+            {
+                self.send_command(Command::SplitPane {
+                    pane_id,
+                    axis: SplitAxis::Rows,
+                    ratio_bps: 5000,
+                });
+            }
+            if ui.button("Close").clicked()
+                && let Some(pane_id) = focused
+            {
+                self.send_command(Command::ClosePane { pane_id });
+            }
+            let zoomed = view
+                .layout
+                .as_ref()
+                .is_some_and(|layout| matches!(layout.root, LayoutNode::Leaf { .. }));
+            if ui.button(if zoomed { "Unzoom" } else { "Zoom" }).clicked() {
+                self.send_command(Command::ZoomPane {
+                    session: view.name.clone(),
+                    pane_id: if zoomed { None } else { focused },
+                });
+            }
             if ui.button("Detach").clicked()
                 && let Some(client) = self.client.take()
             {
@@ -202,71 +297,112 @@ impl eframe::App for MuxApp {
                 self.handle.spawn(async move { client.detach().await });
             }
         });
-
-        handle_input(ui, &self.handle, self.client.as_ref());
-    }
-
-    fn on_exit(&mut self) {
-        if let Some(client) = self.client.take() {
-            client.send(Outbound::Detach);
-        }
     }
 }
 
-fn draw_panes(ui: &mut egui::Ui, view: &SessionView) {
-    let rect = ui.available_rect_before_wrap();
-    let height = (ui.available_height() - 28.0).max(CELL_H);
-    let rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), height));
+struct DrawActions {
+    focus: Vec<u64>,
+    ratios: Vec<(u16, LayoutNode)>,
+}
+
+fn draw_panes(ui: &mut egui::Ui, view: &SessionView, grid: egui::Rect) -> DrawActions {
+    let mut actions = DrawActions {
+        focus: Vec::new(),
+        ratios: Vec::new(),
+    };
     let painter = ui.painter();
-    painter.rect_filled(rect, 0.0, egui::Color32::from_gray(16));
+    painter.rect_filled(grid, 0.0, egui::Color32::from_gray(12));
 
     let Some(layout) = view.layout.as_ref() else {
         painter.text(
-            rect.center(),
+            grid.center(),
             egui::Align2::CENTER_CENTER,
             "waiting for layout…",
             egui::FontId::proportional(16.0),
             egui::Color32::GRAY,
         );
-        return;
+        return actions;
     };
+    let cols = layout.cols.max(1);
+    let rows = layout.rows.max(1);
+    let cell_w = grid.width() / f32::from(cols);
+    let cell_h = grid.height() / f32::from(rows);
 
+    let mut click_commands = Vec::new();
     for geometry in &layout.panes {
+        let outer = cell_rect(grid, geometry.outer, cell_w, cell_h);
+        let focused = view.focus == Some(geometry.pane_id);
+        let border = if focused {
+            egui::Color32::from_rgb(96, 165, 250)
+        } else {
+            egui::Color32::from_gray(60)
+        };
+        painter.rect_filled(outer, 0.0, egui::Color32::from_gray(16));
+        painter.rect_stroke(
+            outer.shrink(BORDER_PX / 2.0),
+            0.0,
+            egui::Stroke::new(BORDER_PX, border),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            outer.min + egui::vec2(4.0, 1.0),
+            egui::Align2::LEFT_TOP,
+            &geometry.title,
+            egui::FontId::proportional(11.0),
+            if focused {
+                egui::Color32::from_rgb(160, 210, 255)
+            } else {
+                egui::Color32::GRAY
+            },
+        );
+
+        let response = ui.interact(
+            outer,
+            egui::Id::unique(format!("stitch-mux-pane-{}", geometry.pane_id)),
+            egui::Sense::click(),
+        );
+        if response.clicked() {
+            click_commands.push(geometry.pane_id);
+        }
+
         let Some(snapshot) = view
             .pane(geometry.pane_id)
             .and_then(|pane| pane.snapshot.as_ref())
         else {
             continue;
         };
+        let content = cell_rect(grid, geometry.content, cell_w, cell_h);
         for (y, row) in snapshot.cells.iter().enumerate() {
-            let mut line = String::new();
-            for cell in &row.cells {
-                if cell.width > 0 {
-                    line.push_str(&cell.text);
-                }
-            }
-            let origin = rect.min + egui::vec2(6.0, 4.0 + y as f32 * CELL_H);
+            let line: String = row
+                .cells
+                .iter()
+                .filter(|cell| cell.width > 0)
+                .map(|cell| cell.text.as_str())
+                .collect();
             let color = row
                 .cells
                 .first()
                 .map(|cell| color32(cell.fg))
                 .unwrap_or(egui::Color32::LIGHT_GRAY);
+            let origin = content.min + egui::vec2(0.0, y as f32 * cell_h);
+            let max_chars = usize::from(geometry.content.cols);
+            let shown: String = line.chars().take(max_chars).collect();
             painter.text(
                 origin,
                 egui::Align2::LEFT_TOP,
-                line,
-                egui::FontId::monospace(FONT_SIZE),
+                shown,
+                egui::FontId::monospace(FONT_SIZE.min(cell_h)),
                 color,
             );
         }
         if snapshot.cursor.visible {
             let cursor_rect = egui::Rect::from_min_size(
-                rect.min
+                content.min
                     + egui::vec2(
-                        6.0 + snapshot.cursor.x as f32 * CELL_W,
-                        4.0 + snapshot.cursor.y as f32 * CELL_H,
+                        f32::from(snapshot.cursor.x) * cell_w,
+                        f32::from(snapshot.cursor.y) * cell_h,
                     ),
-                egui::vec2(CELL_W, CELL_H),
+                egui::vec2(cell_w, cell_h),
             );
             painter.rect_filled(
                 cursor_rect,
@@ -275,6 +411,144 @@ fn draw_panes(ui: &mut egui::Ui, view: &SessionView) {
             );
         }
     }
+    actions.focus = click_commands;
+    actions.ratios = draw_splitters(ui, layout, grid, cell_w, cell_h);
+    actions
+}
+
+fn draw_splitters(
+    ui: &mut egui::Ui,
+    layout: &Layout,
+    grid: egui::Rect,
+    cell_w: f32,
+    cell_h: f32,
+) -> Vec<(u16, LayoutNode)> {
+    let mut ratios = Vec::new();
+    let mut splits = Vec::new();
+    collect_splits(
+        &layout.root,
+        &layout.panes,
+        grid,
+        cell_w,
+        cell_h,
+        &mut splits,
+    );
+    for (index, (axis, strip, node)) in splits.into_iter().enumerate() {
+        let response = ui.interact(
+            strip,
+            egui::Id::unique(format!("stitch-mux-split-{index}")),
+            egui::Sense::drag(),
+        );
+        if response.hovered() || response.dragged() {
+            ui.painter().rect_filled(
+                strip,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(96, 165, 250, 140),
+            );
+        }
+        if response.dragged()
+            && let Some(pos) = ui.input(|input| input.pointer.latest_pos())
+        {
+            let ratio = match axis {
+                SplitAxis::Columns => (pos.x - strip.min.x) / strip.width().max(1.0),
+                SplitAxis::Rows => (pos.y - strip.min.y) / strip.height().max(1.0),
+            };
+            let ratio_bps = (ratio.clamp(0.01, 0.99) * 10_000.0) as u16;
+            ratios.push((ratio_bps, set_ratio(&layout.root, &node, ratio_bps)));
+        }
+    }
+    ratios
+}
+
+fn collect_splits(
+    node: &LayoutNode,
+    geometries: &[PaneGeometry],
+    grid: egui::Rect,
+    cell_w: f32,
+    cell_h: f32,
+    out: &mut Vec<(SplitAxis, egui::Rect, LayoutNode)>,
+) {
+    let LayoutNode::Split {
+        axis,
+        first,
+        second,
+        ..
+    } = node
+    else {
+        return;
+    };
+    let first_bounds = node_bounds(first, geometries, grid, cell_w, cell_h);
+    let second_bounds = node_bounds(second, geometries, grid, cell_w, cell_h);
+    if let (Some(first), Some(second)) = (first_bounds, second_bounds) {
+        let union = first.union(second);
+        let strip = match axis {
+            SplitAxis::Columns => egui::Rect::from_min_size(
+                egui::pos2(first.max.x - 2.0, union.min.y),
+                egui::vec2(4.0, union.height()),
+            ),
+            SplitAxis::Rows => egui::Rect::from_min_size(
+                egui::pos2(union.min.x, first.max.y - 2.0),
+                egui::vec2(union.width(), 4.0),
+            ),
+        };
+        out.push((*axis, strip, node.clone()));
+    }
+    collect_splits(first, geometries, grid, cell_w, cell_h, out);
+    collect_splits(second, geometries, grid, cell_w, cell_h, out);
+}
+
+fn node_bounds(
+    node: &LayoutNode,
+    geometries: &[PaneGeometry],
+    grid: egui::Rect,
+    cell_w: f32,
+    cell_h: f32,
+) -> Option<egui::Rect> {
+    match node {
+        LayoutNode::Leaf { pane_id } => geometries
+            .iter()
+            .find(|geometry| geometry.pane_id == *pane_id)
+            .map(|geometry| cell_rect(grid, geometry.outer, cell_w, cell_h)),
+        LayoutNode::Split { first, second, .. } => {
+            let first = node_bounds(first, geometries, grid, cell_w, cell_h)?;
+            let second = node_bounds(second, geometries, grid, cell_w, cell_h)?;
+            Some(first.union(second))
+        }
+    }
+}
+
+fn set_ratio(root: &LayoutNode, target: &LayoutNode, ratio_bps: u16) -> LayoutNode {
+    if root == target
+        && let LayoutNode::Split {
+            axis,
+            first,
+            second,
+            ..
+        } = root
+    {
+        return LayoutNode::split(*axis, ratio_bps, (**first).clone(), (**second).clone());
+    }
+    match root {
+        LayoutNode::Leaf { pane_id } => LayoutNode::leaf(PaneId::new(*pane_id)),
+        LayoutNode::Split {
+            axis,
+            ratio_bps: current,
+            first,
+            second,
+        } => LayoutNode::split(
+            *axis,
+            *current,
+            set_ratio(first, target, ratio_bps),
+            set_ratio(second, target, ratio_bps),
+        ),
+    }
+}
+
+fn cell_rect(grid: egui::Rect, cell: Rect, cell_w: f32, cell_h: f32) -> egui::Rect {
+    egui::Rect::from_min_size(
+        grid.min + egui::vec2(f32::from(cell.x) * cell_w, f32::from(cell.y) * cell_h),
+        egui::vec2(f32::from(cell.cols) * cell_w, f32::from(cell.rows) * cell_h),
+    )
 }
 
 fn color32(color: Color) -> egui::Color32 {
@@ -285,11 +559,7 @@ fn color32(color: Color) -> egui::Color32 {
     }
 }
 
-fn handle_input(
-    ui: &mut egui::Ui,
-    handle: &tokio::runtime::Handle,
-    client: Option<&ClientSession>,
-) {
+fn handle_input(ui: &mut egui::Ui, client: Option<&ClientSession>) {
     let Some(client) = client else {
         return;
     };
@@ -318,6 +588,19 @@ fn handle_input(
                 modifiers,
                 ..
             } => {
+                if modifiers.ctrl {
+                    let direction = match key {
+                        egui::Key::ArrowLeft => Some(Direction::Left),
+                        egui::Key::ArrowRight => Some(Direction::Right),
+                        egui::Key::ArrowUp => Some(Direction::Up),
+                        egui::Key::ArrowDown => Some(Direction::Down),
+                        _ => None,
+                    };
+                    if let Some(direction) = direction {
+                        client.send(Outbound::FocusDirection(direction));
+                        continue;
+                    }
+                }
                 let Some(code) = map_key(key) else {
                     continue;
                 };
@@ -348,9 +631,6 @@ fn handle_input(
             _ => {}
         }
     }
-    // Keep the runtime handle used by the event loop explicit; attach and
-    // detach both run on it.
-    let _ = handle;
 }
 
 fn map_key(key: egui::Key) -> Option<KeyCode> {

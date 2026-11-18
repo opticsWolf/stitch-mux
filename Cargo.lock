@@ -3213,6 +3213,7 @@ dependencies = [
  "clap",
  "serde_json",
  "stitch-mux-client",
+ "stitch-mux-core",
  "stitch-mux-gui-egui",
  "stitch-mux-protocol",
  "stitch-mux-server",

@@ -6,7 +6,7 @@ This is the **operating protocol** for turning the design in
 document: update it in the **same commit** as the work it describes. It is not
 the wire protocol; that contract lives in [PROTOCOL.md](PROTOCOL.md).
 
-Last updated: **2026-11-18** — M0 and M1 complete, M2 server work in progress.
+Last updated: **2026-11-18** — M0, M1, and M2 complete, M3 ready.
 
 ## 1. Standing rules
 
@@ -178,6 +178,7 @@ Before marking a task Ready for review:
 | 2026-11-18 | The daemon owns the split tree and its revision; clients send intent | A stale `SetLayout` must never corrupt geometry | Rejected requests return `Busy` plus a fresh `Layout` |
 | 2026-11-18 | Broadcast layouts carry no focus; each connection adds its own focus | Focus is per client, but layout changes are session-wide | Every layout push is followed by a per-client `Focus` frame |
 | 2026-11-18 | Zoom uses `visible_pane_ids`, not all session panes | Reattach while zoomed must focus the pane actually on screen | Hidden panes stay alive but receive no input |
+| 2026-11-18 | GUI splitters send `SetLayout` with the current base revision | A drag is an intent, not a local mutation; stale drags must be rejected | The daemon answers with a fresh `Layout`, which `SessionView` applies |
 
 ## 9. Current status
 
@@ -185,7 +186,7 @@ Before marking a task Ready for review:
 |---|---|---|
 | M0 — workspace, core, protocol, client skeleton | **Done** | `3b6bcca`; 30 tests; fmt/clippy/test/doc green; CLI `ping` verified on Windows named pipe |
 | M1 — one-pane GUI session with detach/reattach | **Done** | 35 tests; real-child echo, capture, resize, detach/reattach test; CLI `new`/`ls`/`kill`/`gui` smoke; abrupt GUI kill leaves child alive and clears attached count |
-| M2 — multi-pane GUI layout and per-client focus | **In progress** | Server split/close/zoom/focus and revision guard implemented; 2 real-child layout tests pass; GUI chrome and CLI commands next |
+| M2 — multi-pane GUI layout and per-client focus | **Done** | 42 tests; real-child split/focus/zoom/stale-revision/close test; CLI `new`/`split`/`ls`/`zoom`/`close`/`kill` smoke; 8-second GUI smoke leaves children alive with `attached_clients: 0` |
 | M3 — multiple clients, backpressure | Backlog | Depends on M2 layout revisions |
 | M4 — terminal ANSI compatibility | Backlog | Structured path first |
 | M5 — Qt/PySide6 + optional GPUI | Backlog | Second-toolkit proof, no protocol changes allowed |

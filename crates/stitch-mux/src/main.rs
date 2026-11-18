@@ -1,12 +1,13 @@
 //! stitch-mux command-line entry point.
 //!
-//! M1 surface: daemon, session lifecycle, and the reference GUI launcher.
+//! M2 surface: daemon, session/pane lifecycle, layout control, and the reference GUI launcher.
 
 use clap::{Parser, Subcommand};
 use std::error::Error;
 use std::process::ExitCode;
 
 use stitch_mux_client::{ClientError, ClientSession, Outbound, command as send_control};
+use stitch_mux_core::SplitAxis;
 use stitch_mux_protocol::{
     Command, CommandResponse, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, MessageKind, ViewMode,
 };
@@ -55,10 +56,31 @@ enum Commands {
     },
     /// List sessions as JSON.
     Ls,
-    /// Kill a session and its child.
+    /// Kill a session and all of its children.
     Kill {
         #[arg(short = 't', long = "target")]
         target: String,
+    },
+    /// Split a pane into two tiled panes.
+    Split {
+        #[arg(short = 't', long = "target", value_name = "PANE_ID")]
+        target: u64,
+        #[arg(long, value_enum, default_value = "columns")]
+        axis: CliSplitAxis,
+        #[arg(long, default_value_t = 5000)]
+        ratio: u16,
+    },
+    /// Close one pane and collapse its split.
+    Close {
+        #[arg(short = 't', long = "target", value_name = "PANE_ID")]
+        target: u64,
+    },
+    /// Zoom one pane, or pass no target to unzoom.
+    Zoom {
+        #[arg(short = 's', long = "session", default_value = "default")]
+        session: String,
+        #[arg(short = 't', long = "target", value_name = "PANE_ID")]
+        target: Option<u64>,
     },
     /// Launch the disposable egui reference GUI.
     Gui {
@@ -70,6 +92,21 @@ enum Commands {
         #[arg(short = 's', long = "session", default_value = "default")]
         session: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum CliSplitAxis {
+    Columns,
+    Rows,
+}
+
+impl From<CliSplitAxis> for SplitAxis {
+    fn from(value: CliSplitAxis) -> Self {
+        match value {
+            CliSplitAxis::Columns => Self::Columns,
+            CliSplitAxis::Rows => Self::Rows,
+        }
+    }
 }
 
 fn endpoint(cli: &Cli) -> Result<Endpoint, Box<dyn Error>> {
@@ -239,6 +276,34 @@ async fn run(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
                 &endpoint,
                 Command::KillSession {
                     name: target.clone(),
+                },
+            )
+            .await
+        }
+        Commands::Split {
+            target,
+            axis,
+            ratio,
+        } => {
+            send_command(
+                &endpoint,
+                Command::SplitPane {
+                    pane_id: *target,
+                    axis: (*axis).into(),
+                    ratio_bps: *ratio,
+                },
+            )
+            .await
+        }
+        Commands::Close { target } => {
+            send_command(&endpoint, Command::ClosePane { pane_id: *target }).await
+        }
+        Commands::Zoom { session, target } => {
+            send_command(
+                &endpoint,
+                Command::ZoomPane {
+                    session: session.clone(),
+                    pane_id: *target,
                 },
             )
             .await
