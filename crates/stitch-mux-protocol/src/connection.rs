@@ -4,6 +4,8 @@ use crate::frame::{
     Frame, FrameDecoder, FrameError, MessageKind, decode_message, decode_render, encode_message,
     encode_render,
 };
+use std::collections::VecDeque;
+
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -13,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub struct FrameReader<R> {
     io: R,
     decoder: FrameDecoder,
+    pending: VecDeque<Frame>,
 }
 
 /// Write half of a split framed connection.
@@ -25,17 +28,39 @@ where
     R: AsyncRead + Unpin,
 {
     pub fn new(io: R) -> Self {
+        Self::with_decoder(io, FrameDecoder::new())
+    }
+
+    /// Keep frames and bytes already buffered by a handshake decoder.
+    pub fn with_decoder(io: R, decoder: FrameDecoder) -> Self {
         Self {
             io,
-            decoder: FrameDecoder::new(),
+            decoder,
+            pending: VecDeque::new(),
+        }
+    }
+
+    fn with_pending(io: R, decoder: FrameDecoder, pending: VecDeque<Frame>) -> Self {
+        Self {
+            io,
+            decoder,
+            pending,
         }
     }
 
     pub async fn recv_frame(&mut self) -> Result<Frame, FrameError> {
+        if let Some(frame) = self.pending.pop_front() {
+            return Ok(frame);
+        }
         let mut chunk = [0_u8; 8192];
         loop {
-            if let Some(frame) = self.decoder.push(&[])?.into_iter().next() {
-                return Ok(frame);
+            let frames = self.decoder.push(&[])?;
+            if !frames.is_empty() {
+                self.pending.extend(frames);
+                return Ok(self
+                    .pending
+                    .pop_front()
+                    .expect("at least one decoded frame"));
             }
             let n = self.io.read(&mut chunk).await?;
             if n == 0 {
@@ -44,8 +69,13 @@ where
                     "local endpoint closed mid-frame",
                 )));
             }
-            if let Some(frame) = self.decoder.push(&chunk[..n])?.into_iter().next() {
-                return Ok(frame);
+            let frames = self.decoder.push(&chunk[..n])?;
+            if !frames.is_empty() {
+                self.pending.extend(frames);
+                return Ok(self
+                    .pending
+                    .pop_front()
+                    .expect("at least one decoded frame"));
             }
         }
     }
@@ -97,6 +127,7 @@ where
 pub struct Connection<S> {
     io: S,
     decoder: FrameDecoder,
+    pending: VecDeque<Frame>,
 }
 
 impl<S> Connection<S>
@@ -107,6 +138,7 @@ where
         Self {
             io,
             decoder: FrameDecoder::new(),
+            pending: VecDeque::new(),
         }
     }
 
@@ -138,10 +170,18 @@ where
     }
 
     pub async fn recv_frame(&mut self) -> Result<Frame, FrameError> {
+        if let Some(frame) = self.pending.pop_front() {
+            return Ok(frame);
+        }
         let mut chunk = [0_u8; 8192];
         loop {
-            if let Some(frame) = self.decoder.push(&[])?.into_iter().next() {
-                return Ok(frame);
+            let frames = self.decoder.push(&[])?;
+            if !frames.is_empty() {
+                self.pending.extend(frames);
+                return Ok(self
+                    .pending
+                    .pop_front()
+                    .expect("at least one decoded frame"));
             }
             let n = self.io.read(&mut chunk).await?;
             if n == 0 {
@@ -151,8 +191,12 @@ where
                 )));
             }
             let frames = self.decoder.push(&chunk[..n])?;
-            if let Some(frame) = frames.into_iter().next() {
-                return Ok(frame);
+            if !frames.is_empty() {
+                self.pending.extend(frames);
+                return Ok(self
+                    .pending
+                    .pop_front()
+                    .expect("at least one decoded frame"));
             }
         }
     }
@@ -189,8 +233,16 @@ where
         FrameReader<tokio::io::ReadHalf<S>>,
         FrameWriter<tokio::io::WriteHalf<S>>,
     ) {
-        let (read, write) = tokio::io::split(self.io);
-        (FrameReader::new(read), FrameWriter::new(write))
+        let Self {
+            io,
+            decoder,
+            pending,
+        } = self;
+        let (read, write) = tokio::io::split(io);
+        (
+            FrameReader::with_pending(read, decoder, pending),
+            FrameWriter::new(write),
+        )
     }
 }
 
@@ -220,6 +272,20 @@ mod tests {
         let got: Hello = b.recv(MessageKind::Hello).await.unwrap();
         assert_eq!(got, hello);
         assert_eq!(V, 1);
+    }
+
+    #[tokio::test]
+    async fn split_preserves_frames_buffered_by_the_handshake() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut a = Connection::new(client);
+        let mut b = Connection::new(server);
+        a.send(MessageKind::Ping, &1_u8).await.unwrap();
+        a.send(MessageKind::Ping, &2_u8).await.unwrap();
+        let _: u8 = b.recv(MessageKind::Ping).await.unwrap();
+        let (mut reader, _writer) = b.split();
+        let frame = reader.recv_frame().await.unwrap();
+        assert_eq!(frame.kind, MessageKind::Ping);
+        assert_eq!(decode_message::<u8>(&frame).unwrap(), 2);
     }
 
     #[tokio::test]

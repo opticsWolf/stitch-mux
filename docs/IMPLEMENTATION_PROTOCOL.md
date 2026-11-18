@@ -179,6 +179,7 @@ Before marking a task Ready for review:
 | 2026-11-18 | Broadcast layouts carry no focus; each connection adds its own focus | Focus is per client, but layout changes are session-wide | Every layout push is followed by a per-client `Focus` frame |
 | 2026-11-18 | Zoom uses `visible_pane_ids`, not all session panes | Reattach while zoomed must focus the pane actually on screen | Hidden panes stay alive but receive no input |
 | 2026-11-18 | GUI splitters send `SetLayout` with the current base revision | A drag is an intent, not a local mutation; stale drags must be rejected | The daemon answers with a fresh `Layout`, which `SessionView` applies |
+| 2026-11-18 | Preserve decoder state and pending frames when splitting a connection | Handshake reads can coalesce `HelloAck` with the first attach frames; discarding them stalls clients | `Connection::split` hands both to `FrameReader`; regression fixture covers it |
 
 ## 9. Current status
 
