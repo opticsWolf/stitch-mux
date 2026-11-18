@@ -53,6 +53,7 @@ pub struct ResolvedPane {
 pub enum LayoutError {
     InvalidRatio(u16),
     DuplicatePane(u64),
+    PaneNotFound(u64),
     ImpossibleSplit {
         axis: SplitAxis,
         available: u16,
@@ -65,6 +66,7 @@ impl fmt::Display for LayoutError {
         match self {
             Self::InvalidRatio(value) => write!(f, "invalid split ratio {value} bps"),
             Self::DuplicatePane(id) => write!(f, "pane {id} appears more than once"),
+            Self::PaneNotFound(id) => write!(f, "pane {id} is not in the layout"),
             Self::ImpossibleSplit {
                 axis,
                 available,
@@ -178,6 +180,130 @@ fn resolve_inner(
             resolve_inner(second, second_area, minimum, border, out)
         }
     }
+}
+
+/// All pane IDs in left-to-right tree order.
+pub fn leaves(root: &LayoutNode) -> Vec<PaneId> {
+    fn collect(root: &LayoutNode, out: &mut Vec<PaneId>) {
+        match root {
+            LayoutNode::Leaf { pane_id } => out.push(PaneId::new(*pane_id)),
+            LayoutNode::Split { first, second, .. } => {
+                collect(first, out);
+                collect(second, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    collect(root, &mut out);
+    out
+}
+
+/// Whether a pane participates in this layout.
+pub fn contains(root: &LayoutNode, pane_id: PaneId) -> bool {
+    leaves(root).contains(&pane_id)
+}
+
+/// Deterministic first leaf, used after a focused pane closes.
+pub fn first_leaf(root: &LayoutNode) -> Option<PaneId> {
+    leaves(root).into_iter().next()
+}
+
+/// Replace one leaf with a split; `new_pane_id` must not already be present.
+pub fn split_leaf(
+    root: &LayoutNode,
+    pane_id: PaneId,
+    new_pane_id: PaneId,
+    axis: SplitAxis,
+    ratio_bps: u16,
+) -> Result<LayoutNode, LayoutError> {
+    if !(1..=9999).contains(&ratio_bps) {
+        return Err(LayoutError::InvalidRatio(ratio_bps));
+    }
+    if contains(root, new_pane_id) {
+        return Err(LayoutError::DuplicatePane(new_pane_id.get()));
+    }
+    fn rebuild(
+        root: &LayoutNode,
+        pane_id: PaneId,
+        new_pane_id: PaneId,
+        axis: SplitAxis,
+        ratio_bps: u16,
+        changed: &mut bool,
+    ) -> Result<LayoutNode, LayoutError> {
+        match root {
+            LayoutNode::Leaf { pane_id: id } if *id == pane_id.get() => {
+                *changed = true;
+                Ok(LayoutNode::split(
+                    axis,
+                    ratio_bps,
+                    LayoutNode::leaf(pane_id),
+                    LayoutNode::leaf(new_pane_id),
+                ))
+            }
+            LayoutNode::Leaf { pane_id } => Ok(LayoutNode::leaf(PaneId::new(*pane_id))),
+            LayoutNode::Split {
+                axis,
+                ratio_bps,
+                first,
+                second,
+            } => Ok(LayoutNode::split(
+                *axis,
+                *ratio_bps,
+                rebuild(first, pane_id, new_pane_id, *axis, *ratio_bps, changed)?,
+                rebuild(second, pane_id, new_pane_id, *axis, *ratio_bps, changed)?,
+            )),
+        }
+    }
+    let mut changed = false;
+    let next = rebuild(root, pane_id, new_pane_id, axis, ratio_bps, &mut changed)?;
+    if !changed {
+        return Err(LayoutError::PaneNotFound(pane_id.get()));
+    }
+    validate(&next)?;
+    Ok(next)
+}
+
+/// Remove a leaf, collapsing its sibling upward. `None` means the last pane
+/// closed.
+pub fn close_leaf(root: &LayoutNode, pane_id: PaneId) -> Result<Option<LayoutNode>, LayoutError> {
+    fn rebuild(
+        root: &LayoutNode,
+        pane_id: PaneId,
+        changed: &mut bool,
+    ) -> Result<Option<LayoutNode>, LayoutError> {
+        match root {
+            LayoutNode::Leaf { pane_id: id } if *id == pane_id.get() => {
+                *changed = true;
+                Ok(None)
+            }
+            LayoutNode::Leaf { pane_id } => Ok(Some(LayoutNode::leaf(PaneId::new(*pane_id)))),
+            LayoutNode::Split {
+                axis,
+                ratio_bps,
+                first,
+                second,
+            } => {
+                let first = rebuild(first, pane_id, changed)?;
+                let second = rebuild(second, pane_id, changed)?;
+                Ok(match (first, second) {
+                    (Some(first), Some(second)) => {
+                        Some(LayoutNode::split(*axis, *ratio_bps, first, second))
+                    }
+                    (Some(node), None) | (None, Some(node)) => Some(node),
+                    (None, None) => None,
+                })
+            }
+        }
+    }
+    let mut changed = false;
+    let next = rebuild(root, pane_id, &mut changed)?;
+    if !changed {
+        return Err(LayoutError::PaneNotFound(pane_id.get()));
+    }
+    if let Some(next) = &next {
+        validate(next)?;
+    }
+    Ok(next)
 }
 
 /// Pick the pane whose outer rectangle contains a cell.
@@ -296,6 +422,50 @@ mod tests {
         let leaf = LayoutNode::leaf(PaneId::new(1));
         let panes = resolve(&leaf, Rect::new(0, 0, 1, 1), Size::new(20, 5), 1).unwrap();
         assert_eq!(panes[0].content.cols, 0);
+    }
+
+    #[test]
+    fn edits_nested_trees_without_leaving_holes() {
+        let mut root = tree();
+        root = split_leaf(
+            &root,
+            PaneId::new(3),
+            PaneId::new(4),
+            SplitAxis::Columns,
+            2500,
+        )
+        .unwrap();
+        assert_eq!(leaves(&root).len(), 4);
+        root = close_leaf(&root, PaneId::new(1)).unwrap().unwrap();
+        assert_eq!(
+            leaves(&root),
+            vec![PaneId::new(2), PaneId::new(3), PaneId::new(4)]
+        );
+        assert_eq!(first_leaf(&root), Some(PaneId::new(2)));
+        assert!(!contains(&root, PaneId::new(1)));
+        assert_eq!(
+            close_leaf(&root, PaneId::new(99)),
+            Err(LayoutError::PaneNotFound(99))
+        );
+        let single = LayoutNode::leaf(PaneId::new(1));
+        assert_eq!(close_leaf(&single, PaneId::new(1)).unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_impossible_tree_edits() {
+        let root = LayoutNode::leaf(PaneId::new(1));
+        assert_eq!(
+            split_leaf(&root, PaneId::new(1), PaneId::new(2), SplitAxis::Rows, 0,),
+            Err(LayoutError::InvalidRatio(0))
+        );
+        assert_eq!(
+            split_leaf(&root, PaneId::new(1), PaneId::new(1), SplitAxis::Rows, 5000,),
+            Err(LayoutError::DuplicatePane(1))
+        );
+        assert_eq!(
+            split_leaf(&root, PaneId::new(7), PaneId::new(2), SplitAxis::Rows, 5000,),
+            Err(LayoutError::PaneNotFound(7))
+        );
     }
 
     #[test]
