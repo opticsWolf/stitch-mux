@@ -2,10 +2,11 @@
 
 A terminal multiplexer built on top of [`stitch-pty`](../stitch-pty).
 
-> **Status: M3 multi-client session work in progress.** The daemon now keeps a
-> client registry, sizes sessions to the smallest attached client, and supports
-> `ListClients`, `DetachClient`, session rename, and typed shutdown. Bounded
-> client queues and GUI reconnect are next.
+> **Status: M3 multi-client sessions implemented.** The daemon keeps a client
+> registry, sizes sessions to the smallest attached client, bounds and coalesces
+> each client's updates, and exposes `ListClients`, `DetachClient`, session
+> rename, and typed shutdown. The reference GUI retries lost sessions with
+> backoff and never silently recreates them.
 
 ## Why another multiplexer?
 

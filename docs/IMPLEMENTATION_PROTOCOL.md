@@ -6,7 +6,7 @@ This is the **operating protocol** for turning the design in
 document: update it in the **same commit** as the work it describes. It is not
 the wire protocol; that contract lives in [PROTOCOL.md](PROTOCOL.md).
 
-Last updated: **2026-11-18** — M0–M2 complete, M3 client work in progress.
+Last updated: **2026-11-19** — M0, M1, M2, and M3 complete, M4 ready.
 
 ## 1. Standing rules
 
@@ -194,7 +194,7 @@ Before marking a task Ready for review:
 | M0 — workspace, core, protocol, client skeleton | **Done** | `3b6bcca`; 30 tests; fmt/clippy/test/doc green; CLI `ping` verified on Windows named pipe |
 | M1 — one-pane GUI session with detach/reattach | **Done** | 35 tests; real-child echo, capture, resize, detach/reattach test; CLI `new`/`ls`/`kill`/`gui` smoke; abrupt GUI kill leaves child alive and clears attached count |
 | M2 — multi-pane GUI layout and per-client focus | **Done** | 42 tests; real-child split/focus/zoom/stale-revision/close test; CLI `new`/`split`/`ls`/`zoom`/`close`/`kill` smoke; 8-second GUI smoke leaves children alive with `attached_clients: 0` |
-| M3 — multiple clients, backpressure | **In progress** | Registry, smallest-client sizing, control commands, bounded coalescing with typed `Busy`, CLI client control, and GUI lost/retry UX land; final gates and CI pending |
+| M3 — multiple clients, backpressure | **Done** | 51 tests; real-endpoint tests for two-client focus/size/detach, registry commands and typed shutdown, and a 10 MB stalled-client `Busy` disconnect; CLI `clients`/`rename`/`shutdown` smoke; GUI survives daemon loss |
 | M4 — terminal ANSI compatibility | Backlog | Structured path first |
 | M5 — Qt/PySide6 + optional GPUI | Backlog | Second-toolkit proof, no protocol changes allowed |
 | M6 — hardening / v0.1 | Backlog | Release checklist in `IMPLEMENTATION_PLAN.md` §7 |
