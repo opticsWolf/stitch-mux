@@ -3,15 +3,19 @@
 //! There is no TCP listener. The endpoint is the single-instance lock: a
 //! successful bind means this daemon owns the session surface.
 
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
+
+#[cfg(windows)]
+use std::hash::{DefaultHasher, Hash, Hasher};
+#[cfg(windows)]
+use std::sync::Arc;
 
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+#[cfg(windows)]
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,7 +84,7 @@ fn platform_endpoint(value: &str) -> Endpoint {
 
 #[cfg(unix)]
 async fn bind_unix(path: &PathBuf) -> Result<Listener, EndpointError> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 
     if let Some(parent) = path.parent() {
         tokio::fs::DirBuilder::new()
