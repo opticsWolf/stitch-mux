@@ -126,6 +126,8 @@ stitch-mux/
 - [Automation](docs/AUTOMATION.md) — local CLI, event stream, and agent skill.
 - [Implementation plan](docs/IMPLEMENTATION_PLAN.md) — milestones and order of
   work.
+- [Implementation protocol](docs/IMPLEMENTATION_PROTOCOL.md) — living operating
+  rules, gates, decision log, and status.
 - [Reference evaluation](docs/REFERENCES.md) — what to borrow and what not to
   borrow from rmux, Zellij, WezTerm, and Rex.
 

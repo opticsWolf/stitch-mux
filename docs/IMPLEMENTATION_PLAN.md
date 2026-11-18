@@ -5,6 +5,10 @@ This is the execution plan for the architecture in
 the toolkit adapter design in [FRONTENDS.md](FRONTENDS.md), and the local
 automation/agent interface in [AUTOMATION.md](AUTOMATION.md).
 
+Execution follows the living [IMPLEMENTATION_PROTOCOL.md](IMPLEMENTATION_PROTOCOL.md):
+branch rules, mandatory gates, decision log, and current status are updated in
+the same commit as the work.
+
 The priorities are explicit:
 
 1. **GUI is the primary frontend.**
