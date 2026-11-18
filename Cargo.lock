@@ -3291,6 +3291,8 @@ version = "0.1.0-dev"
 [[package]]
 name = "stitch-pty"
 version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3dc4f1339de37345a62828bd5ce4fff2f783577bba67aa05ac5e53f79d83b603"
 dependencies = [
  "async-trait",
  "bitflags 2.13.2",

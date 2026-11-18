@@ -174,6 +174,7 @@ Before marking a task Ready for review:
 | 2026-11-18 | `PaneRuntime` owns `HistoryScreen`, Kitty flags, and the snapshot/delta stream | `PtySession` stays transport-only; reattach needs one authoritative screen | Frontends never parse ANSI or encode keys themselves |
 | 2026-11-18 | Split framed connections into reader and writer halves | A cancelled `recv_frame` in `select!` loses partially decoded bytes | Reader task owns the framed decoder; pushes and commands share one writer |
 | 2026-11-18 | `ResizeEvent` carries only `cols`/`rows` | `ResizeRequest` also carries pixel dimensions; the DTO shapes differ on the wire | Server sends the event DTO, not the request DTO, to avoid decode failures |
+| 2026-11-18 | Consume `stitch-pty` 0.15.0 from crates.io, not a sibling path | CI checks out only `stitch-mux`; a `../stitch-pty` path dep cannot resolve there | Local and CI builds use the same published API |
 
 ## 9. Current status
 
