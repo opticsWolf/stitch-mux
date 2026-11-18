@@ -46,7 +46,7 @@ pub enum SessionError {
 
 pub struct Session {
     pub id: u64,
-    pub name: String,
+    name: StdMutex<String>,
     cols: AtomicU16,
     rows: AtomicU16,
     pub created_at_unix_ms: u64,
@@ -62,7 +62,7 @@ impl Session {
     pub fn attached(&self, clients: u32) -> Attached {
         Attached {
             session_id: self.id,
-            session_name: self.name.clone(),
+            session_name: self.name(),
             view_mode: stitch_mux_protocol::ViewMode::Structured,
             cols: self.cols.load(Ordering::Relaxed),
             rows: self.rows.load(Ordering::Relaxed),
@@ -71,6 +71,21 @@ impl Session {
             layout_revision: self.revision.load(Ordering::Relaxed),
             activity: ActivitySummary::default(),
         }
+    }
+
+    pub fn name(&self) -> String {
+        self.name.lock().expect("session name").clone()
+    }
+
+    pub fn rename(&self, new_name: &str) {
+        *self.name.lock().expect("session name") = new_name.to_owned();
+    }
+
+    pub fn size(&self) -> Size {
+        Size::new(
+            self.cols.load(Ordering::Relaxed),
+            self.rows.load(Ordering::Relaxed),
+        )
     }
 
     pub fn root(&self) -> LayoutNode {
@@ -137,6 +152,7 @@ impl Session {
             cols: self.cols.load(Ordering::Relaxed),
             rows: self.rows.load(Ordering::Relaxed),
             status_rows: 0,
+            attached_clients: 0,
             focus,
             root: self.effective_root(),
             panes: geometry,
@@ -193,8 +209,16 @@ impl Session {
         }
     }
 
+    /// Resize only when the canonical size actually changed.
+    ///
+    /// Attach/detach recomputation runs often; a no-op must not burn a layout
+    /// revision or resize every PTY.
     pub fn resize(&self, cols: u16, rows: u16) {
-        if cols == 0 || rows == 0 {
+        if cols == 0
+            || rows == 0
+            || (cols == self.cols.load(Ordering::Relaxed)
+                && rows == self.rows.load(Ordering::Relaxed))
+        {
             return;
         }
         self.cols.store(cols, Ordering::Relaxed);
@@ -360,7 +384,7 @@ impl Session {
             .collect();
         SessionInfo {
             id: self.id,
-            name: self.name.clone(),
+            name: self.name(),
             cols: self.cols.load(Ordering::Relaxed),
             rows: self.rows.load(Ordering::Relaxed),
             pane_count: infos.len() as u32,
@@ -442,7 +466,7 @@ impl SessionRegistry {
         let (layout_tx, _) = broadcast::channel(LAYOUT_QUEUE);
         let session = Arc::new(Session {
             id: session_id,
-            name: name.to_owned(),
+            name: StdMutex::new(name.to_owned()),
             cols: AtomicU16::new(cols),
             rows: AtomicU16::new(rows),
             created_at_unix_ms: now_unix_ms(),
@@ -466,6 +490,22 @@ impl SessionRegistry {
         for pane in session.panes() {
             pane.kill().await;
         }
+        Ok(())
+    }
+
+    pub fn rename(&mut self, name: &str, new_name: &str) -> Result<(), SessionError> {
+        if name == new_name {
+            return Ok(());
+        }
+        if self.sessions.contains_key(new_name) {
+            return Err(SessionError::AlreadyExists(new_name.to_owned()));
+        }
+        let session = self
+            .sessions
+            .remove(name)
+            .ok_or_else(|| SessionError::NotFound(name.to_owned()))?;
+        session.rename(new_name);
+        self.sessions.insert(new_name.to_owned(), session);
         Ok(())
     }
 }

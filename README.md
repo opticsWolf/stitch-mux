@@ -2,9 +2,10 @@
 
 A terminal multiplexer built on top of [`stitch-pty`](../stitch-pty).
 
-> **Status: M2 tiled GUI workspace implemented.** Sessions own a server-validated
-> binary split layout with per-client focus; children survive GUI close and
-> reattach restores geometry, zoom, and this client's focused pane.
+> **Status: M3 multi-client session work in progress.** The daemon now keeps a
+> client registry, sizes sessions to the smallest attached client, and supports
+> `ListClients`, `DetachClient`, session rename, and typed shutdown. Bounded
+> client queues and GUI reconnect are next.
 
 ## Why another multiplexer?
 

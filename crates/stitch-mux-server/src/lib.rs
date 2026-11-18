@@ -12,15 +12,17 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use stitch_mux_core::layout_leaves;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use stitch_mux_core::{Size, layout_leaves};
 use stitch_mux_protocol::{
-    Attach, CaptureRequest, Command, CommandRequest, CommandResponse, Connection,
+    Attach, CaptureRequest, ClientInfo, Command, CommandRequest, CommandResponse, Connection,
     DEFAULT_SERVER_CAPABILITIES, Endpoint, EndpointError, ErrorCode, ErrorInfo, Frame, FrameError,
     FrameWriter, Hello, HelloAck, InputEvent, Layout, MessageKind, PROTOCOL_VERSION, ResizeRequest,
     Stream, ViewMode, capabilities, decode_message,
 };
 use thiserror::Error;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
 pub use pane::{PaneError, PaneRuntime, PaneSpec, PaneUpdate};
@@ -36,51 +38,174 @@ pub enum ServerError {
     Frame(#[from] FrameError),
 }
 
+/// One daemon-side view of a connected client. Control-only connections have
+/// no `session_id` and do not affect canonical session size.
+#[derive(Clone)]
+struct ClientRecord {
+    id: u64,
+    name: String,
+    view_mode: ViewMode,
+    session_id: Option<u64>,
+    cols: u16,
+    rows: u16,
+    focus: Option<u64>,
+    attached_at_unix_ms: u64,
+    detach: Arc<Notify>,
+}
+
+impl ClientRecord {
+    fn info(&self) -> ClientInfo {
+        ClientInfo {
+            id: self.id,
+            name: self.name.clone(),
+            view_mode: self.view_mode,
+            session_id: self.session_id,
+            cols: self.cols,
+            rows: self.rows,
+            focus: self.focus,
+            attached_at_unix_ms: self.attached_at_unix_ms,
+        }
+    }
+}
+
 pub struct ServerState {
     pub registry: Mutex<SessionRegistry>,
-    attached: StdMutex<BTreeMap<u64, u32>>,
+    clients: StdMutex<BTreeMap<u64, ClientRecord>>,
     next_client_id: AtomicU64,
+    shutdown_tx: watch::Sender<bool>,
 }
 
 impl Default for ServerState {
     fn default() -> Self {
+        let (shutdown_tx, _) = watch::channel(false);
         Self {
             registry: Mutex::new(SessionRegistry::new()),
-            attached: StdMutex::new(BTreeMap::new()),
+            clients: StdMutex::new(BTreeMap::new()),
             next_client_id: AtomicU64::new(1),
+            shutdown_tx,
         }
     }
 }
 
 impl ServerState {
-    fn next_client_id(&self) -> u64 {
-        self.next_client_id.fetch_add(1, Ordering::SeqCst)
+    fn register(&self, hello: &Hello) -> u64 {
+        let id = self.next_client_id.fetch_add(1, Ordering::SeqCst);
+        let record = ClientRecord {
+            id,
+            name: hello.client_name.clone(),
+            view_mode: hello.view_mode,
+            session_id: None,
+            cols: hello.cols,
+            rows: hello.rows,
+            focus: None,
+            attached_at_unix_ms: now_unix_ms(),
+            detach: Arc::new(Notify::new()),
+        };
+        self.clients
+            .lock()
+            .expect("client registry")
+            .insert(id, record);
+        id
     }
 
-    fn attach(&self, session_id: u64) -> u32 {
-        let mut attached = self.attached.lock().expect("attached map");
-        let count = attached.entry(session_id).or_insert(0);
-        *count += 1;
-        *count
-    }
-
-    fn detach(&self, session_id: u64) {
-        let mut attached = self.attached.lock().expect("attached map");
-        if let Some(count) = attached.get_mut(&session_id) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                attached.remove(&session_id);
-            }
+    fn set_attached(&self, client_id: u64, session_id: u64, focus: Option<u64>) {
+        if let Some(client) = self
+            .clients
+            .lock()
+            .expect("client registry")
+            .get_mut(&client_id)
+        {
+            client.session_id = Some(session_id);
+            client.focus = focus;
+            client.attached_at_unix_ms = now_unix_ms();
         }
     }
 
-    fn count(&self, session_id: u64) -> u32 {
-        self.attached
+    fn set_focus(&self, client_id: u64, focus: u64) {
+        if let Some(client) = self
+            .clients
             .lock()
-            .expect("attached map")
-            .get(&session_id)
-            .copied()
-            .unwrap_or(0)
+            .expect("client registry")
+            .get_mut(&client_id)
+        {
+            client.focus = Some(focus);
+        }
+    }
+
+    fn set_size(&self, client_id: u64, cols: u16, rows: u16) {
+        if let Some(client) = self
+            .clients
+            .lock()
+            .expect("client registry")
+            .get_mut(&client_id)
+        {
+            client.cols = cols;
+            client.rows = rows;
+        }
+    }
+
+    fn unregister(&self, client_id: u64) -> Option<ClientRecord> {
+        self.clients
+            .lock()
+            .expect("client registry")
+            .remove(&client_id)
+    }
+
+    fn detach_handle(&self, client_id: u64) -> Option<Arc<Notify>> {
+        self.clients
+            .lock()
+            .expect("client registry")
+            .get(&client_id)
+            .map(|client| Arc::clone(&client.detach))
+    }
+
+    fn count(&self, session_id: u64) -> u32 {
+        self.clients
+            .lock()
+            .expect("client registry")
+            .values()
+            .filter(|client| client.session_id == Some(session_id))
+            .count() as u32
+    }
+
+    fn client_infos(&self, session: Option<&Session>) -> Vec<ClientInfo> {
+        self.clients
+            .lock()
+            .expect("client registry")
+            .values()
+            .filter(|client| match session {
+                Some(session) => client.session_id == Some(session.id),
+                None => true,
+            })
+            .map(ClientRecord::info)
+            .collect()
+    }
+
+    /// Smallest attached viewport wins. Control-only clients are ignored.
+    fn canonical_size(&self, session_id: u64) -> Option<Size> {
+        let clients = self.clients.lock().expect("client registry");
+        let mut smallest: Option<Size> = None;
+        for client in clients.values().filter(|client| {
+            client.session_id == Some(session_id) && client.cols > 0 && client.rows > 0
+        }) {
+            let size = Size::new(client.cols, client.rows);
+            smallest = Some(match smallest {
+                None => size,
+                Some(current) => {
+                    Size::new(current.cols.min(size.cols), current.rows.min(size.rows))
+                }
+            });
+        }
+        smallest
+    }
+
+    /// Apply the smallest-client policy and return the resulting canonical size.
+    fn sync_size(&self, session: &Session) -> Option<Size> {
+        let size = self.canonical_size(session.id)?;
+        if size != session.size() {
+            session.resize(size.cols, size.rows);
+        }
+        Some(size)
     }
 
     async fn infos(&self) -> Vec<stitch_mux_protocol::SessionInfo> {
@@ -92,6 +217,20 @@ impl ServerState {
             .map(|session| session.info(self.count(session.id)))
             .collect()
     }
+
+    fn shutdown(&self) {
+        for client in self.clients.lock().expect("client registry").values() {
+            client.detach.notify_one();
+        }
+        let _ = self.shutdown_tx.send(true);
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// Bind the endpoint and serve connections until the process is stopped.
@@ -104,14 +243,20 @@ pub async fn run_foreground(endpoint: Endpoint) -> Result<(), ServerError> {
 /// Serve an already-bound listener. Used by integration tests and the CLI.
 pub async fn serve(listener: stitch_mux_protocol::Listener) -> Result<(), ServerError> {
     let state = Arc::new(ServerState::default());
+    let mut shutdown = state.shutdown_tx.subscribe();
     loop {
-        let stream = listener.accept().await?;
-        let state = Arc::clone(&state);
-        tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, state).await {
-                tracing::debug!("client connection ended: {err}");
+        tokio::select! {
+            accepted = listener.accept() => {
+                let stream = accepted?;
+                let state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    if let Err(err) = handle_connection(stream, state).await {
+                        tracing::debug!("client connection ended: {err}");
+                    }
+                });
             }
-        });
+            _ = shutdown.changed() => break Ok(()),
+        }
     }
 }
 
@@ -147,7 +292,10 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
         return Ok(());
     }
     let sessions = state.registry.lock().await.len() as u32;
-    let _client_id = state.next_client_id();
+    let client_id = state.register(&hello);
+    let detach = state
+        .detach_handle(client_id)
+        .expect("client was just registered");
     connection
         .send(
             MessageKind::HelloAck,
@@ -187,6 +335,7 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
     let mut failure: Option<ServerError> = None;
     loop {
         let event = tokio::select! {
+            _ = detach.notified() => Event::DetachedByControl,
             incoming = frame_rx.recv() => match incoming {
                 Some(Ok(frame)) => Event::Frame(frame),
                 Some(Err(err)) => {
@@ -203,7 +352,7 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                 Some(Ok(_)) => Event::Layout,
                 Some(Err(broadcast::error::RecvError::Lagged(_))) => {
                     if let Some(session) = attached.as_ref()
-                        && let Err(err) = send_session_state(&mut writer, session, focus).await
+                        && let Err(err) = send_session_state(&mut writer, session, focus, &state).await
                     {
                         failure = Some(err);
                         break;
@@ -217,6 +366,7 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
             Event::Frame(frame) => {
                 match handle_frame(
                     frame,
+                    client_id,
                     &state,
                     &mut attached,
                     &mut focus,
@@ -241,6 +391,10 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                     break;
                 }
             }
+            Event::DetachedByControl => {
+                send_error(&mut writer, ErrorCode::Busy, "detached by control client").await?;
+                break;
+            }
             Event::Layout => {
                 let Some(session) = attached.as_ref() else {
                     continue;
@@ -250,7 +404,7 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                 } else {
                     focus = session.visible_pane_ids().first().copied();
                 }
-                if let Err(err) = send_session_state(&mut writer, session, focus).await {
+                if let Err(err) = send_session_state(&mut writer, session, focus, &state).await {
                     failure = Some(err);
                     break;
                 }
@@ -261,8 +415,10 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
     for task in &update_tasks {
         task.abort();
     }
-    if let Some(session) = attached {
-        state.detach(session.id);
+    state.unregister(client_id);
+    if let Some(session) = attached.as_ref() {
+        state.sync_size(session);
+        session.publish_layout();
     }
     reader_task.abort();
     match failure {
@@ -275,6 +431,7 @@ enum Event {
     Frame(Frame),
     Update(Arc<PaneUpdate>),
     Layout,
+    DetachedByControl,
 }
 
 async fn next_update(
@@ -295,12 +452,18 @@ async fn next_layout(
     }
 }
 
+fn with_attached_count(state: &ServerState, mut layout: Layout) -> Layout {
+    layout.attached_clients = state.count(layout.session_id);
+    layout
+}
+
 async fn send_session_state(
     writer: &mut Writer,
     session: &Session,
     focus: Option<u64>,
+    state: &ServerState,
 ) -> Result<(), ServerError> {
-    let layout = session.layout(focus);
+    let layout = with_attached_count(state, session.layout(focus));
     // Layout first, then a full snapshot for every pane it contains.
     writer.send(MessageKind::Layout, &layout).await?;
     for geometry in &layout.panes {
@@ -321,6 +484,7 @@ async fn send_session_state(
 #[allow(clippy::too_many_arguments)]
 async fn handle_frame(
     frame: Frame,
+    client_id: u64,
     state: &Arc<ServerState>,
     attached: &mut Option<Arc<Session>>,
     focus: &mut Option<u64>,
@@ -367,13 +531,16 @@ async fn handle_frame(
             drop(update_tx);
             *update_rx = Some(rx);
             *layout_rx = Some(session.subscribe_layout());
-            let clients = state.attach(session.id);
             *focus = session.visible_pane_ids().first().copied();
+            state.set_attached(client_id, session.id, *focus);
+            state.sync_size(&session);
+            session.publish_layout();
+            let clients = state.count(session.id);
             *attached = Some(Arc::clone(&session));
             writer
                 .send(MessageKind::Attached, &session.attached(clients))
                 .await?;
-            send_session_state(writer, &session, *focus).await?;
+            send_session_state(writer, &session, *focus, state).await?;
         }
         MessageKind::Input => {
             let event: InputEvent = decode_message(&frame)?;
@@ -384,13 +551,14 @@ async fn handle_frame(
         MessageKind::ResizeRequest => {
             let request: ResizeRequest = decode_message(&frame)?;
             if let Some(session) = attached.as_ref() {
-                session.resize(request.cols, request.rows);
+                state.set_size(client_id, request.cols, request.rows);
+                let size = state.sync_size(session).unwrap_or(session.size());
                 writer
                     .send(
                         MessageKind::ResizeEvent,
                         &stitch_mux_protocol::ResizeEvent {
-                            cols: request.cols,
-                            rows: request.rows,
+                            cols: size.cols,
+                            rows: size.rows,
                         },
                     )
                     .await?;
@@ -406,6 +574,7 @@ async fn handle_frame(
                 return Ok(false);
             }
             *focus = Some(request.pane_id);
+            state.set_focus(client_id, request.pane_id);
             writer
                 .send(
                     MessageKind::Focus,
@@ -422,7 +591,11 @@ async fn handle_frame(
                 return Ok(false);
             };
             match session.set_layout(request.root, request.base_revision) {
-                Ok(layout) => writer.send(MessageKind::Layout, &layout).await?,
+                Ok(layout) => {
+                    writer
+                        .send(MessageKind::Layout, &with_attached_count(state, layout))
+                        .await?;
+                }
                 Err(SessionError::StaleLayout { expected, current }) => {
                     send_error(
                         writer,
@@ -431,7 +604,10 @@ async fn handle_frame(
                     )
                     .await?;
                     writer
-                        .send(MessageKind::Layout, &session.layout(*focus))
+                        .send(
+                            MessageKind::Layout,
+                            &with_attached_count(state, session.layout(*focus)),
+                        )
                         .await?;
                 }
                 Err(err) => {
@@ -441,7 +617,7 @@ async fn handle_frame(
         }
         MessageKind::Resync => {
             if let Some(session) = attached.as_ref() {
-                send_session_state(writer, session, *focus).await?;
+                send_session_state(writer, session, *focus, state).await?;
             }
         }
         MessageKind::CaptureRequest => {
@@ -620,7 +796,7 @@ async fn handle_command(request: CommandRequest, state: &Arc<ServerState>) -> Co
             let session = state.registry.lock().await.find_by_pane(pane_id);
             match session {
                 Some(session) => match session.split(pane_id, axis, ratio_bps).await {
-                    Ok(layout) => response.layout = Some(layout),
+                    Ok(layout) => response.layout = Some(with_attached_count(state, layout)),
                     Err(err) => set_error(&mut response, session_error_code(&err), err),
                 },
                 None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
@@ -638,7 +814,7 @@ async fn handle_command(request: CommandRequest, state: &Arc<ServerState>) -> Co
             drop(registry);
             match session {
                 Some(session) => match session.close(pane_id).await {
-                    Ok(Some(layout)) => response.layout = Some(layout),
+                    Ok(Some(layout)) => response.layout = Some(with_attached_count(state, layout)),
                     Ok(None) => {
                         if let Some(name) = name {
                             let _ = state.registry.lock().await.kill(&name).await;
@@ -654,7 +830,7 @@ async fn handle_command(request: CommandRequest, state: &Arc<ServerState>) -> Co
             let target = state.registry.lock().await.get(&session);
             match target {
                 Some(target) => match target.zoom(pane_id) {
-                    Ok(layout) => response.layout = Some(layout),
+                    Ok(layout) => response.layout = Some(with_attached_count(state, layout)),
                     Err(err) => set_error(&mut response, session_error_code(&err), err),
                 },
                 None => set_error(&mut response, ErrorCode::NotFound, "session not found"),
@@ -687,14 +863,14 @@ async fn handle_command(request: CommandRequest, state: &Arc<ServerState>) -> Co
             );
             match session {
                 Some(session) => match session.set_layout(root, base_revision) {
-                    Ok(layout) => response.layout = Some(layout),
+                    Ok(layout) => response.layout = Some(with_attached_count(state, layout)),
                     Err(SessionError::StaleLayout { expected, current }) => {
                         set_error(
                             &mut response,
                             ErrorCode::Busy,
                             format!("layout revision {expected} is stale; current is {current}"),
                         );
-                        response.layout = Some(session.layout(None));
+                        response.layout = Some(with_attached_count(state, session.layout(None)));
                     }
                     Err(err) => set_error(&mut response, session_error_code(&err), err),
                 },
@@ -741,6 +917,27 @@ async fn handle_command(request: CommandRequest, state: &Arc<ServerState>) -> Co
                 None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
             }
         }
+        Command::ListClients { session } => {
+            let target = state.registry.lock().await.get(&session);
+            match target {
+                Some(target) => response.clients = state.client_infos(Some(&target)),
+                None => set_error(&mut response, ErrorCode::NotFound, "session not found"),
+            }
+        }
+        Command::DetachClient { client_id } => match state.detach_handle(client_id) {
+            Some(handle) => handle.notify_one(),
+            None => set_error(&mut response, ErrorCode::NotFound, "client not found"),
+        },
+        Command::RenameSession { name, new_name } => {
+            let result = state.registry.lock().await.rename(&name, &new_name);
+            match result {
+                Ok(()) => response.sessions = state.infos().await,
+                Err(err) => set_error(&mut response, session_error_code(&err), err),
+            }
+        }
+        Command::Shutdown => {
+            state.shutdown();
+        }
         other => set_error(
             &mut response,
             ErrorCode::Unsupported,
@@ -785,9 +982,43 @@ mod tests {
     #[test]
     fn server_state_starts_empty() {
         let state = ServerState::default();
-        assert_eq!(state.next_client_id(), 1);
+        assert!(state.clients.lock().expect("clients").is_empty());
         let registry = state.registry.blocking_lock();
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn smallest_attached_client_determines_canonical_size() {
+        let state = ServerState::default();
+        let first = state.register(&Hello {
+            protocol_version: PROTOCOL_VERSION,
+            client_name: "first".into(),
+            client_instance: "a".into(),
+            view_mode: ViewMode::Structured,
+            cols: 120,
+            rows: 40,
+            pixel_width: 0,
+            pixel_height: 0,
+            capabilities: 1,
+        });
+        let second = state.register(&Hello {
+            protocol_version: PROTOCOL_VERSION,
+            client_name: "second".into(),
+            client_instance: "b".into(),
+            view_mode: ViewMode::Structured,
+            cols: 70,
+            rows: 20,
+            pixel_width: 0,
+            pixel_height: 0,
+            capabilities: 1,
+        });
+        state.set_attached(first, 1, Some(1));
+        state.set_attached(second, 1, Some(2));
+        assert_eq!(state.canonical_size(1), Some(Size::new(70, 20)));
+        state.unregister(second);
+        assert_eq!(state.canonical_size(1), Some(Size::new(120, 40)));
+        state.unregister(first);
+        assert_eq!(state.canonical_size(1), None);
     }
 }

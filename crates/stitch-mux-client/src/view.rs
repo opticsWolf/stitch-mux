@@ -132,6 +132,7 @@ impl SessionView {
         self.layout_revision = layout.revision;
         self.size = Size::new(layout.cols, layout.rows);
         self.status_rows = layout.status_rows;
+        self.attached_clients = layout.attached_clients;
         self.focus = layout.focus;
         let visible: std::collections::BTreeSet<u64> =
             layout.panes.iter().map(|pane| pane.pane_id).collect();
@@ -201,6 +202,19 @@ impl SessionView {
 
     pub fn mark_disconnected(&mut self) {
         self.connection = ConnectionState::Disconnected;
+        self.layout = None;
+        self.panes.clear();
+        self.needs_resync = true;
+    }
+
+    /// Mark the session lost without discarding a typed error already received
+    /// from the daemon (for example `Busy` from `DetachClient`).
+    pub fn mark_lost_preserving_error(&mut self, reason: impl Into<String>) {
+        if self.error.is_none() {
+            self.mark_lost(reason);
+            return;
+        }
+        self.connection = ConnectionState::Lost;
         self.layout = None;
         self.panes.clear();
         self.needs_resync = true;
@@ -370,6 +384,7 @@ mod tests {
             cols: 80,
             rows: 24,
             status_rows: 0,
+            attached_clients: 1,
             focus: Some(1),
             root: stitch_mux_core::LayoutNode::leaf(stitch_mux_core::PaneId::new(1)),
             panes: vec![stitch_mux_protocol::PaneGeometry {
@@ -381,6 +396,23 @@ mod tests {
         });
         assert!(view.pane(1).is_some());
         assert!(view.pane(2).is_none());
+    }
+
+    #[test]
+    fn lost_connection_preserves_a_typed_daemon_error() {
+        let mut view = SessionView {
+            error: Some(ErrorInfo {
+                code: stitch_mux_protocol::ErrorCode::Busy,
+                message: "detached by control client".into(),
+            }),
+            ..Default::default()
+        };
+        view.mark_lost_preserving_error("io error");
+        assert_eq!(view.connection, ConnectionState::Lost);
+        assert_eq!(
+            view.error.as_ref().map(|error| error.code),
+            Some(stitch_mux_protocol::ErrorCode::Busy)
+        );
     }
 
     #[test]

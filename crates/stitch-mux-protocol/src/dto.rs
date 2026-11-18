@@ -75,6 +75,8 @@ pub struct Layout {
     pub cols: u16,
     pub rows: u16,
     pub status_rows: u16,
+    #[serde(default)]
+    pub attached_clients: u32,
     pub focus: Option<u64>,
     pub root: LayoutNode,
     pub panes: Vec<PaneGeometry>,

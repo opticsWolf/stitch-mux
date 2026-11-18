@@ -180,6 +180,9 @@ Before marking a task Ready for review:
 | 2026-11-18 | Zoom uses `visible_pane_ids`, not all session panes | Reattach while zoomed must focus the pane actually on screen | Hidden panes stay alive but receive no input |
 | 2026-11-18 | GUI splitters send `SetLayout` with the current base revision | A drag is an intent, not a local mutation; stale drags must be rejected | The daemon answers with a fresh `Layout`, which `SessionView` applies |
 | 2026-11-18 | Preserve decoder state and pending frames when splitting a connection | Handshake reads can coalesce `HelloAck` with the first attach frames; discarding them stalls clients | `Connection::split` hands both to `FrameReader`; regression fixture covers it |
+| 2026-11-18 | The daemon keeps one client registry with view mode, size, focus, and attach time | Canonical sizing and `DetachClient` need one authoritative record, not per-connection counters | Registry entries exist from handshake through EOF; `ClientInfo` exposes them |
+| 2026-11-18 | Smallest attached client determines canonical size; no-op resizes do not bump revision | Multiple viewports must agree on one PTY geometry without churn | Attach/detach publish a layout so every client sees the new `attached_clients` count |
+| 2026-11-18 | Preserve a typed daemon error when the socket closes | `DetachClient`'s `Busy` frame is followed immediately by EOF | `mark_lost_preserving_error` keeps the typed error and still marks the view lost |
 
 ## 9. Current status
 

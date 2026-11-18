@@ -162,7 +162,9 @@ async fn echo_detach_reattach_resize_and_capture() {
         view.pane(pane_id).is_some()
     })
     .await;
-    assert_eq!(reattached.view().size, Size::new(60, 20));
+    // The smallest attached client sets the canonical size; the reattaching
+    // 80x24 client is now the only one, so the session grows back to it.
+    assert_eq!(reattached.view().size, Size::new(80, 24));
     // The echo may have moved into bounded history after the resize; capture
     // is the authoritative check that the child's screen survived.
     let restored = command(

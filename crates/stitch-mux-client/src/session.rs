@@ -197,7 +197,13 @@ impl ClientSession {
                         }
                         let _ = view_tx.send_replace(view.clone());
                     }
-                    Event::Closed => break,
+                    Event::Closed => {
+                        if view.connection != crate::view::ConnectionState::Disconnected {
+                            view.mark_lost_preserving_error("daemon closed the connection");
+                            let _ = view_tx.send_replace(view.clone());
+                        }
+                        break;
+                    }
                 }
             }
             reader_task.abort();
@@ -306,7 +312,7 @@ fn publish_error(
     error: impl Into<FrameError>,
 ) {
     let frame_error: FrameError = error.into();
-    view.mark_lost(frame_error.to_string());
+    view.mark_lost_preserving_error(frame_error.to_string());
     let _ = view_tx.send_replace(view.clone());
 }
 
@@ -387,6 +393,7 @@ mod tests {
             cols: 80,
             rows: 24,
             status_rows: 0,
+            attached_clients: 1,
             focus: Some(1),
             root: stitch_mux_core::LayoutNode::split(
                 stitch_mux_core::SplitAxis::Columns,

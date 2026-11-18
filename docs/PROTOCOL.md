@@ -196,6 +196,7 @@ struct Layout {
     cols: u16,
     rows: u16,
     status_rows: u16,
+    attached_clients: u32,       // registry count at broadcast time
     focus: Option<PaneId>,       // focus for THIS client
     root: LayoutNode,            // server-owned binary split tree
     panes: Vec<PaneGeometry>,
@@ -461,8 +462,10 @@ struct ResizeEvent {
 }
 ```
 
-The server recomputes the canonical size, re-resolves the layout, resizes every
-PTY, and updates every `HistoryScreen`. A structured client receives a new
+The server recomputes the canonical size from the **smallest attached client**
+on attach, detach, and resize, then re-resolves the layout, resizes every PTY,
+and updates every `HistoryScreen`. The result is the `cols`/`rows`/`attached_clients`
+in `Attached`, `ResizeEvent`, and `Layout`. A structured client receives a new
 `Layout` and full `PaneSnapshot`s; a terminal client receives a full `Render`.
 Clients larger than the canonical size leave unused space; smaller clients crop
 from the top-left in v1.
