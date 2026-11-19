@@ -328,7 +328,7 @@ async fn split_focus_zoom_close_and_revision_guard() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn impossible_layouts_are_rejected() {
-    let (endpoint, socket_path) = test_endpoint("invalid");
+    let (endpoint, socket_path) = test_endpoint("bad");
     let listener = endpoint.bind().await.expect("bind endpoint");
     let server = tokio::spawn(async move { stitch_mux_server::serve(listener).await });
     let (program, args) = shell();
