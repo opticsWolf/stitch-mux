@@ -32,6 +32,35 @@ fn nanos() -> u128 {
         .as_nanos()
 }
 
+/// Accept any valid CPR reply. The row reported by a fresh PTY can differ
+/// between CI runners; the contract is that the daemon answers the query.
+fn contains_cpr_reply(hex: &str) -> bool {
+    let bytes = hex.as_bytes();
+    for start in 0..bytes.len().saturating_sub(8) {
+        if !hex[start..].starts_with("1b5b") {
+            continue;
+        }
+        let rest = &hex[start + 4..];
+        let Some(semicolon) = rest.find("3b") else {
+            continue;
+        };
+        let row = &rest[..semicolon];
+        let after = &rest[semicolon + 2..];
+        let Some(terminator) = after.rfind("52") else {
+            continue;
+        };
+        let column = &after[..terminator];
+        if !row.is_empty()
+            && !column.is_empty()
+            && row.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && column.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn hello() -> Hello {
     Hello {
         protocol_version: stitch_mux_protocol::PROTOCOL_VERSION,
@@ -44,6 +73,13 @@ fn hello() -> Hello {
         pixel_height: 0,
         capabilities: DEFAULT_CLIENT_CAPABILITIES,
     }
+}
+
+#[test]
+fn recognizes_a_cursor_position_report() {
+    assert!(contains_cpr_reply("prefix1b5b313b3152suffix"));
+    assert!(contains_cpr_reply("1b5b323b313552"));
+    assert!(!contains_cpr_reply("1b5b6e"));
 }
 
 #[tokio::test]
@@ -77,9 +113,10 @@ async fn cursor_position_query_reaches_the_child() {
     let client = ClientSession::attach(&endpoint, "queries", hello())
         .await
         .expect("attach");
+    let mut screen = String::new();
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            let text = client
+            screen = client
                 .view()
                 .pane(pane_id)
                 .and_then(|pane| pane.snapshot.as_ref())
@@ -97,15 +134,15 @@ async fn cursor_position_query_reaches_the_child() {
                         .join("\n")
                 })
                 .unwrap_or_default();
-            // ESC [ 1 ; 1 R as hex, proving the daemon replied to the child.
-            if text.contains("1b5b313b3152") {
+            // ESC [ row ; col R as hex, proving the daemon replied.
+            if contains_cpr_reply(&screen) {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await
-    .expect("cursor-position reply");
+    .unwrap_or_else(|_| panic!("cursor-position reply; screen={screen:?}"));
 
     client.detach().await;
     server.abort();

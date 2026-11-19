@@ -203,6 +203,7 @@ Before marking a task Ready for review:
 | 2026-11-19 | The ANSI compositor keeps one previous grid per terminal connection | Full repaints on every keystroke would defeat terminal compatibility | `AnsiCompositor` emits bounded cursor-addressed diffs, forces full frames on attach/geometry/`Resync`, and clips to 300x100 |
 | 2026-11-19 | The terminal frontend writes bytes but never encodes keys or parses ANSI | Key encoding belongs to the focused pane's `HistoryScreen`; a second emulator would break reattach fidelity | `stitch-mux-terminal` maps host keys to `InputEvent` and paints server frames in sequence; a skipped frame requests `Resync` |
 | 2026-11-19 | The conformance corpus is synthetic and deterministic | vim/less/htop are not guaranteed on every CI runner | `tests/conformance.rs` drives real snapshots through the compositor for bash/zsh, vim, less, htop/top, and git log patterns; `docs/CONFORMANCE.md` records the interactive pass |
+| 2026-11-19 | The DSR end-to-end assertion accepts any CPR row/column | macOS reported a different cursor position than Linux while the daemon still answered the query | `tests/queries.rs` matches `ESC [ row ; col R` by shape and keeps the screen in the timeout diagnostic |
 
 ## 9. Current status
 
