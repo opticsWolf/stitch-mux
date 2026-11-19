@@ -405,7 +405,7 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                 Some(Err(broadcast::error::RecvError::Lagged(_))) => {
                     if let Some(session) = attached.as_ref()
                         && let Err(err) =
-                            send_session_state(&mut writer, session, focus, &state, view_mode, &mut compositor).await
+                            send_session_state(&mut writer, session, focus, &state, view_mode, &mut compositor, &mut coalescer).await
                     {
                         failure = Some(err);
                         break;
@@ -497,7 +497,11 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                 }
             }
             Event::DetachedByControl => {
-                send_error(&mut writer, ErrorCode::Busy, "detached by control client").await?;
+                // Do not use `?` here: an early return would skip the cleanup
+                // below and leave a dead client in the registry, which would
+                // pin the canonical session size to it forever.
+                let _ =
+                    send_error(&mut writer, ErrorCode::Busy, "detached by control client").await;
                 break;
             }
             Event::Layout => {
@@ -519,6 +523,7 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                     &state,
                     view_mode,
                     &mut compositor,
+                    &mut coalescer,
                 )
                 .await
                 {
@@ -625,6 +630,7 @@ async fn send_session_state(
     state: &ServerState,
     view_mode: ViewMode,
     compositor: &mut AnsiCompositor,
+    coalescer: &mut client_updates::UpdateCoalescer,
 ) -> Result<(), ServerError> {
     let layout = with_attached_count(state, session.layout(focus));
     writer.send(MessageKind::Layout, &layout).await?;
@@ -632,9 +638,9 @@ async fn send_session_state(
         ViewMode::Structured => {
             for geometry in &layout.panes {
                 if let Some(pane) = session.pane(geometry.pane_id) {
-                    writer
-                        .send(MessageKind::PaneSnapshot, &pane.snapshot())
-                        .await?;
+                    let snapshot = pane.snapshot();
+                    writer.send(MessageKind::PaneSnapshot, &snapshot).await?;
+                    coalescer.seed(snapshot.pane_id, snapshot.seq);
                 }
             }
         }
@@ -761,7 +767,10 @@ async fn handle_frame(
             writer
                 .send(MessageKind::Attached, &session.attached(clients, view_mode))
                 .await?;
-            send_session_state(writer, &session, *focus, state, view_mode, compositor).await?;
+            send_session_state(
+                writer, &session, *focus, state, view_mode, compositor, coalescer,
+            )
+            .await?;
         }
         MessageKind::Input => {
             let event: InputEvent = decode_message(&frame)?;
@@ -843,7 +852,10 @@ async fn handle_frame(
         MessageKind::Resync => {
             if let Some(session) = attached.as_ref() {
                 compositor.invalidate();
-                send_session_state(writer, session, *focus, state, view_mode, compositor).await?;
+                send_session_state(
+                    writer, session, *focus, state, view_mode, compositor, coalescer,
+                )
+                .await?;
             }
         }
         MessageKind::CaptureRequest => {

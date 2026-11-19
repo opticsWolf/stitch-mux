@@ -327,12 +327,21 @@ struct Modes {
 renderer must skip it. The server still counts it as a grid column so pane
 geometry and PTY sizes agree.
 
+Rows are derived from a viewport diff, not from the terminal parser's
+dirty-row set: a scroll shifts every row up and only marks the new bottom row,
+so a dirty-set delta would leave a client with stale rows. `PaneDelta.seq` is
+the pane's authoritative update sequence, except that the daemon rewrites it to
+stay contiguous for each coalescing client. A snapshot (`PaneSnapshot.seq`)
+resets that client's sequence, and the daemon seeds the rewritten sequence from
+the snapshot before sending any delta, so a client never sees a gap after
+attach, `Resync`, or a layout change.
+
 ### 6.5 `PaneDelta`
 
 ```rust
 struct PaneDelta {
     pane_id: u64,
-    seq: u64,                    // must be > the last applied seq
+    seq: u64,                    // must be > the last applied seq (see below)
     rows: Vec<RowUpdate>,        // changed rows only
     cursor: Cursor,
     modes: Modes,

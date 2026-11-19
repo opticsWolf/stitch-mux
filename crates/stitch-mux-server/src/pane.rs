@@ -72,6 +72,10 @@ struct PaneState {
     bell: bool,
     last_activity_unix_ms: u64,
     queries: QueryScanner,
+    /// Viewport rows as they were last published. The parser's dirty-row set
+    /// only names rows that were written, not rows that shifted when the
+    /// screen scrolled, so deltas are computed by comparing viewports.
+    last_viewport: Vec<Vec<(String, String, String, u8)>>,
 }
 
 /// Minimal terminal-query responder.
@@ -216,6 +220,7 @@ impl PaneRuntime {
             session: Arc::clone(&session),
             spec: spec.clone(),
             state: Mutex::new(PaneState {
+                last_viewport: screen.styled_range(screen.history_size(), screen.lines()),
                 screen,
                 seq: 0,
                 program: spec.program.clone(),
@@ -370,6 +375,9 @@ impl PaneRuntime {
         }
         let mut state = self.lock_state();
         state.screen.resize(rows as usize, cols as usize);
+        state.last_viewport = state
+            .screen
+            .styled_range(state.screen.history_size(), state.screen.lines());
         let seq = state.seq + 1;
         state.seq = seq;
         let snapshot = snapshot_from(&state, self.id, seq);
@@ -438,23 +446,16 @@ impl PaneRuntime {
         let _ = self.updates.send(Arc::new(update));
     }
 
-    fn publish_delta(&self, dirty: Vec<usize>, events: &[TermEvent]) {
+    /// `_dirty` is drained only to keep the parser set bounded; the delta rows
+    /// come from a viewport diff so scroll-shifted rows are never dropped.
+    fn publish_delta(&self, _dirty: Vec<usize>, events: &[TermEvent]) {
         let mut state = self.lock_state();
         state.seq += 1;
         state.last_activity_unix_ms = now_unix_ms();
         let seq = state.seq;
         let screen = &state.screen;
         let visible = screen.styled_range(screen.history_size(), screen.lines());
-        let rows = dirty
-            .into_iter()
-            .filter_map(|index| {
-                visible.get(index).map(|line| RowUpdate {
-                    row: index as u16,
-                    cells: cells_from_row(line),
-                    wrapped: false,
-                })
-            })
-            .collect();
+        let rows = changed_rows(&state.last_viewport, &visible);
         for event in events {
             // Title/cwd/alt-screen changes are already applied to the screen
             // by the parser and are read back below.
@@ -463,6 +464,7 @@ impl PaneRuntime {
             }
         }
         let bell = std::mem::take(&mut state.bell);
+        state.last_viewport = visible;
         let delta = common_fields(&state, self.id, seq);
         drop(state);
         self.publish(PaneUpdate::Delta(PaneDelta {
@@ -559,6 +561,28 @@ fn now_unix_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Rows whose styled content differs from the previously published viewport.
+///
+/// The parser's dirty-row set only names rows that were written directly, so a
+/// scroll (which shifts every row up and only marks the new bottom row) would
+/// leave the client with stale rows. Diffing the viewport is the only way to
+/// keep a cell-delta client correct.
+fn changed_rows(
+    previous: &[Vec<(String, String, String, u8)>],
+    visible: &[Vec<(String, String, String, u8)>],
+) -> Vec<RowUpdate> {
+    visible
+        .iter()
+        .enumerate()
+        .filter(|(index, line)| previous.get(*index) != Some(*line))
+        .map(|(index, line)| RowUpdate {
+            row: index as u16,
+            cells: cells_from_row(line),
+            wrapped: false,
+        })
+        .collect()
+}
+
 fn cells_from_row(line: &[(String, String, String, u8)]) -> Vec<Cell> {
     let mut cells = Vec::with_capacity(line.len());
     let mut previous_wide = false;
@@ -582,9 +606,29 @@ fn cells_from_row(line: &[(String, String, String, u8)]) -> Vec<Cell> {
     cells
 }
 
+/// `stitch-pty` stores SGR colors as names for the 16 ANSI colors and as
+/// `rrggbb` for everything else. Keep the 16 names as indexed colors so
+/// structured frontends and the ANSI projection stay colored.
 fn parse_color(value: &str) -> Color {
-    if value == "default" || value.is_empty() {
-        return Color::Default;
+    match value {
+        "default" | "" => return Color::Default,
+        "black" => return Color::Indexed(0),
+        "red" => return Color::Indexed(1),
+        "green" => return Color::Indexed(2),
+        "brown" => return Color::Indexed(3),
+        "blue" => return Color::Indexed(4),
+        "magenta" => return Color::Indexed(5),
+        "cyan" => return Color::Indexed(6),
+        "white" => return Color::Indexed(7),
+        "brightblack" => return Color::Indexed(8),
+        "brightred" => return Color::Indexed(9),
+        "brightgreen" => return Color::Indexed(10),
+        "brightbrown" => return Color::Indexed(11),
+        "brightblue" => return Color::Indexed(12),
+        "brightmagenta" => return Color::Indexed(13),
+        "brightcyan" => return Color::Indexed(14),
+        "brightwhite" => return Color::Indexed(15),
+        _ => {}
     }
     if value.len() == 6
         && let Ok(rgb) = u32::from_str_radix(value, 16)
@@ -606,7 +650,33 @@ mod tests {
     fn parses_ansi_colors() {
         assert_eq!(parse_color("default"), Color::Default);
         assert_eq!(parse_color("ff8000"), Color::Rgb(255, 128, 0));
-        assert_eq!(parse_color("white"), Color::Default);
+        assert_eq!(parse_color("white"), Color::Indexed(7));
+        assert_eq!(parse_color("red"), Color::Indexed(1));
+        assert_eq!(parse_color("brightcyan"), Color::Indexed(14));
+        assert_eq!(parse_color("not-a-color"), Color::Default);
+    }
+
+    #[test]
+    fn scrolled_rows_are_reported_even_though_the_parser_only_marks_the_bottom() {
+        let row = |text: &str| vec![(text.to_owned(), "default".into(), "default".into(), 0)];
+        let previous = vec![row("a"), row("b"), row("c"), row("d")];
+        // One line scrolled off: the parser reports only row 3 as dirty.
+        let visible = vec![row("b"), row("c"), row("d"), row("e")];
+        let updates = changed_rows(&previous, &visible);
+        assert_eq!(
+            updates.iter().map(|update| update.row).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(updates[0].cells[0].text, "b");
+        assert_eq!(updates[3].cells[0].text, "e");
+
+        // A no-op repaint reports nothing.
+        assert!(changed_rows(&visible, &visible).is_empty());
+
+        // A viewport of a different height does not panic and reports the tail.
+        let shorter = vec![row("c"), row("d")];
+        let updates = changed_rows(&previous, &shorter);
+        assert_eq!(updates.len(), 2);
     }
 
     #[test]

@@ -252,15 +252,15 @@ pub fn split_leaf(
             }
             LayoutNode::Leaf { pane_id } => Ok(LayoutNode::leaf(PaneId::new(*pane_id))),
             LayoutNode::Split {
-                axis,
-                ratio_bps,
+                axis: parent_axis,
+                ratio_bps: parent_ratio,
                 first,
                 second,
             } => Ok(LayoutNode::split(
-                *axis,
-                *ratio_bps,
-                rebuild(first, pane_id, new_pane_id, *axis, *ratio_bps, changed)?,
-                rebuild(second, pane_id, new_pane_id, *axis, *ratio_bps, changed)?,
+                *parent_axis,
+                *parent_ratio,
+                rebuild(first, pane_id, new_pane_id, axis, ratio_bps, changed)?,
+                rebuild(second, pane_id, new_pane_id, axis, ratio_bps, changed)?,
             )),
         }
     }
@@ -459,6 +459,62 @@ mod tests {
         );
         let single = LayoutNode::leaf(PaneId::new(1));
         assert_eq!(close_leaf(&single, PaneId::new(1)).unwrap(), None);
+    }
+
+    #[test]
+    fn nested_splits_use_the_requested_axis() {
+        // Pane 1 lives inside a Rows split. Splitting it along Columns must
+        // add a Columns node, not inherit the parent's axis.
+        let root = split_leaf(
+            &tree(),
+            PaneId::new(1),
+            PaneId::new(4),
+            SplitAxis::Columns,
+            4000,
+        )
+        .unwrap();
+        let LayoutNode::Split { first, .. } = root else {
+            panic!("root split");
+        };
+        let LayoutNode::Split {
+            axis, first: inner, ..
+        } = first.as_ref()
+        else {
+            panic!("rows split on the left");
+        };
+        assert_eq!(*axis, SplitAxis::Rows, "the enclosing axis must not change");
+        let LayoutNode::Split {
+            axis: inner_axis,
+            ratio_bps: inner_ratio,
+            ..
+        } = inner.as_ref()
+        else {
+            panic!("new columns split");
+        };
+        assert_eq!(*inner_axis, SplitAxis::Columns);
+        assert_eq!(*inner_ratio, 4000);
+
+        // Pane 3 is a top-level leaf under a Columns split; a Rows split must
+        // likewise keep its own axis.
+        let root = split_leaf(
+            &tree(),
+            PaneId::new(3),
+            PaneId::new(5),
+            SplitAxis::Rows,
+            6000,
+        )
+        .unwrap();
+        let LayoutNode::Split { second, .. } = root else {
+            panic!("root split");
+        };
+        let LayoutNode::Split {
+            axis, ratio_bps, ..
+        } = second.as_ref()
+        else {
+            panic!("new rows split");
+        };
+        assert_eq!(*axis, SplitAxis::Rows);
+        assert_eq!(*ratio_bps, 6000);
     }
 
     #[test]

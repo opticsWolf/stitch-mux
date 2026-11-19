@@ -4,12 +4,13 @@
 //! and detach/reattach loop. The product surface is toolkit-independent in
 //! `stitch-mux-client`.
 
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 use stitch_mux_client::{ClientSession, Outbound, SessionView, command, size_from_pixels};
-use stitch_mux_core::{Color, Direction, LayoutNode, PaneId, Rect, Size, SplitAxis};
+use stitch_mux_core::{Color, Direction, LayoutNode, PaneId, Rect, Row, Size, SplitAxis};
 use stitch_mux_protocol::{
     Command, CommandRequest, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, InputEvent, KeyCode,
     KeyEvent, KeyEventKind, Layout, PaneGeometry, SessionInfo, ViewMode,
@@ -19,8 +20,11 @@ use tokio::sync::watch;
 const CELL_W: f32 = 8.4;
 const CELL_H: f32 = 18.0;
 const FONT_SIZE: f32 = 14.0;
-const STATUS_H: f32 = 30.0;
 const BORDER_PX: f32 = 2.0;
+/// Rows retained by the disposable GUI while it is attached. The daemon owns
+/// the authoritative scrollback; this is only enough for wheel scrolling in a
+/// reference adapter.
+const MAX_LOCAL_SCROLLBACK: usize = 1000;
 const INITIAL_RETRY: Duration = Duration::from_millis(500);
 const MAX_RETRY: Duration = Duration::from_secs(8);
 
@@ -57,6 +61,15 @@ pub fn run(endpoint: Endpoint, session: Option<String>) -> Result<(), Box<dyn Er
     .map_err(|err| -> Box<dyn Error> { Box::new(err) })
 }
 
+#[derive(Clone, Debug, Default)]
+struct PaneScroll {
+    seq: u64,
+    scrollback_len: u64,
+    visible: Vec<Row>,
+    history: VecDeque<Row>,
+    offset: usize,
+}
+
 struct MuxApp {
     endpoint: Endpoint,
     sessions: Vec<SessionInfo>,
@@ -75,6 +88,9 @@ struct MuxApp {
     /// stale revision on every mouse frame would make the daemon reject all
     /// but the first resize.
     split_drag: Option<(u64, LayoutNode)>,
+    /// Structured rows that have scrolled off each pane while this GUI was
+    /// attached, plus the user's wheel offset.
+    pane_scroll: HashMap<u64, PaneScroll>,
 }
 
 impl MuxApp {
@@ -101,6 +117,7 @@ impl MuxApp {
             next_retry: None,
             lost_session: None,
             split_drag: None,
+            pane_scroll: HashMap::new(),
         };
         if !selected.is_empty() {
             app.attach(&selected);
@@ -207,6 +224,44 @@ impl MuxApp {
         }));
     }
 
+    /// Keep a bounded local copy of rows that scroll off the visible screen.
+    /// The daemon remains authoritative; a fresh snapshot resets this cache.
+    fn sync_scroll(&mut self, view: &SessionView) {
+        self.pane_scroll
+            .retain(|pane_id, _| view.panes.contains_key(pane_id));
+        for (pane_id, pane) in &view.panes {
+            let Some(snapshot) = pane.snapshot.as_ref() else {
+                continue;
+            };
+            let state = self.pane_scroll.entry(*pane_id).or_default();
+            if state.seq > snapshot.seq || state.scrollback_len > snapshot.scrollback_len {
+                *state = PaneScroll::default();
+            }
+            if state.visible.is_empty() {
+                state.seq = snapshot.seq;
+                state.scrollback_len = snapshot.scrollback_len;
+                state.visible = snapshot.cells.clone();
+                continue;
+            }
+            if snapshot.seq == state.seq {
+                continue; // no new output since the last frame
+            }
+            // Lines that entered the daemon's scrollback are exactly the rows
+            // that left the top of the previous viewport.
+            let scrolled = (snapshot.scrollback_len - state.scrollback_len) as usize;
+            for row in state.visible.iter().take(scrolled) {
+                state.history.push_back(row.clone());
+            }
+            while state.history.len() > MAX_LOCAL_SCROLLBACK {
+                state.history.pop_front();
+            }
+            state.seq = snapshot.seq;
+            state.scrollback_len = snapshot.scrollback_len;
+            state.visible = snapshot.cells.clone();
+            state.offset = state.offset.min(state.history.len());
+        }
+    }
+
     fn refresh_sessions(&mut self) {
         match self
             .handle
@@ -234,6 +289,10 @@ impl eframe::App for MuxApp {
         let Some(receiver) = self.view_rx.as_mut() else {
             return;
         };
+        // egui only repaints on input by default. A terminal must keep painting
+        // while the daemon streams output, otherwise a busy pane freezes until
+        // the user moves the mouse.
+        ui.ctx().request_repaint_after(Duration::from_millis(16));
         let view = receiver.borrow_and_update().clone();
         self.maybe_reconnect(&view);
         if view.connection == stitch_mux_client::ConnectionState::Lost {
@@ -241,8 +300,12 @@ impl eframe::App for MuxApp {
             return;
         }
 
-        let available = ui.available_size();
-        let next_size = size_from_pixels(available.x, available.y, CELL_W, CELL_H);
+        let detach = self.status_ui(ui, &view);
+        // The status bar is a real child of this layout, so the available rect
+        // is already the pane grid: subtracting STATUS_H here left a dead strip
+        // at the bottom and made the requested size disagree with the grid.
+        let grid = ui.available_rect_before_wrap();
+        let next_size = size_from_pixels(grid.width(), grid.height(), CELL_W, CELL_H);
         if next_size != self.last_size {
             self.last_size = next_size;
             self.send(Outbound::Resize(stitch_mux_protocol::ResizeRequest {
@@ -252,14 +315,8 @@ impl eframe::App for MuxApp {
                 pixel_height: 0,
             }));
         }
-
-        let detach = self.status_ui(ui, &view);
-        let area = ui.available_rect_before_wrap();
-        let grid = egui::Rect::from_min_size(
-            area.min,
-            egui::vec2(area.width(), (area.height() - STATUS_H).max(CELL_H)),
-        );
-        let actions = draw_panes(ui, &view, grid);
+        self.sync_scroll(&view);
+        let actions = draw_panes(ui, &view, grid, &mut self.pane_scroll);
         for action in actions.panes {
             match action {
                 PaneAction::Focus(pane_id) => self.send(Outbound::Focus(pane_id)),
@@ -423,7 +480,12 @@ struct DrawActions {
     drag: Option<SplitDrag>,
 }
 
-fn draw_panes(ui: &mut egui::Ui, view: &SessionView, grid: egui::Rect) -> DrawActions {
+fn draw_panes(
+    ui: &mut egui::Ui,
+    view: &SessionView,
+    grid: egui::Rect,
+    scroll: &mut HashMap<u64, PaneScroll>,
+) -> DrawActions {
     let mut actions = DrawActions {
         panes: Vec::new(),
         drag: None,
@@ -523,6 +585,13 @@ fn draw_panes(ui: &mut egui::Ui, view: &SessionView, grid: egui::Rect) -> DrawAc
                 .then(|| input.pointer.latest_pos())
                 .flatten()
         });
+        // Title-bar buttons sit on the foreground layer so pane content (which
+        // is painted afterwards and clipped to its own rect) can never hide
+        // them.
+        let button_painter = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::unique("stitch-mux-pane-buttons"),
+        ));
         let mut button_clicked = false;
         let mut button_x = title_rect.max.x;
         for (label, action) in buttons {
@@ -531,7 +600,7 @@ fn draw_panes(ui: &mut egui::Ui, view: &SessionView, grid: egui::Rect) -> DrawAc
                 egui::vec2(button_w, button_h),
             );
             let hovered = click_pos.is_some_and(|pos| rect.contains(pos));
-            ui.painter().rect_filled(
+            button_painter.rect_filled(
                 rect,
                 2.0,
                 if hovered {
@@ -540,7 +609,7 @@ fn draw_panes(ui: &mut egui::Ui, view: &SessionView, grid: egui::Rect) -> DrawAc
                     egui::Color32::from_gray(50)
                 },
             );
-            ui.painter().text(
+            button_painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 label,
@@ -554,10 +623,12 @@ fn draw_panes(ui: &mut egui::Ui, view: &SessionView, grid: egui::Rect) -> DrawAc
             button_x -= button_w;
         }
         let title_width = (button_x - title_rect.min.x - 4.0).max(0.0);
-        let title: String = format!("{} ({})", geometry.title, pane_id)
-            .chars()
-            .take((title_width / 6.0) as usize)
-            .collect();
+        let state = scroll.entry(pane_id).or_default();
+        let mut title = format!("{} ({})", geometry.title, pane_id);
+        if state.offset > 0 {
+            title.push_str(&format!(" ↑{}", state.offset));
+        }
+        let title: String = title.chars().take((title_width / 6.0) as usize).collect();
         ui.painter().text(
             title_rect.min + egui::vec2(3.0, 0.0),
             egui::Align2::LEFT_TOP,
@@ -584,7 +655,30 @@ fn draw_panes(ui: &mut egui::Ui, view: &SessionView, grid: egui::Rect) -> DrawAc
             continue;
         };
         let content = cell_rect(grid, geometry.content, cell_w, cell_h);
-        for (y, row) in snapshot.cells.iter().enumerate() {
+        let hover = ui.input(|input| input.pointer.hover_pos());
+        // egui reports a positive delta when the wheel moves the content down
+        // (scrolling up), which is the same direction as our history offset, so
+        // the sign is used as-is.
+        let wheel = ui.input(|input| input.smooth_scroll_delta.y);
+        if hover.is_some_and(|pos| content.contains(pos)) && wheel != 0.0 {
+            let max_offset = state.history.len() as f32;
+            state.offset = (state.offset as f32 + wheel / cell_h)
+                .round()
+                .clamp(0.0, max_offset) as usize;
+        }
+        let visible_rows = usize::from(geometry.content.rows).min(snapshot.cells.len());
+        let (start, end) = scroll_window_range(
+            state.history.len(),
+            snapshot.cells.len(),
+            state.offset,
+            visible_rows,
+        );
+        let old_clip = ui.clip_rect();
+        ui.set_clip_rect(content);
+        for (y, index) in (start..end).enumerate() {
+            let Some(row) = scroll_row(&state.history, &snapshot.cells, index) else {
+                continue;
+            };
             let line: String = row
                 .cells
                 .iter()
@@ -607,7 +701,7 @@ fn draw_panes(ui: &mut egui::Ui, view: &SessionView, grid: egui::Rect) -> DrawAc
                 color,
             );
         }
-        if snapshot.cursor.visible {
+        if state.offset == 0 && snapshot.cursor.visible {
             let cursor_rect = egui::Rect::from_min_size(
                 content.min
                     + egui::vec2(
@@ -621,6 +715,15 @@ fn draw_panes(ui: &mut egui::Ui, view: &SessionView, grid: egui::Rect) -> DrawAc
                 0.0,
                 egui::Color32::from_rgba_unmultiplied(120, 180, 255, 90),
             );
+        }
+        ui.set_clip_rect(old_clip);
+        if let Some((track, thumb)) =
+            scrollbar_rect(content, state.history.len(), state.offset, visible_rows)
+        {
+            ui.painter()
+                .rect_filled(track, 2.0, egui::Color32::from_gray(32));
+            ui.painter()
+                .rect_filled(thumb, 2.0, egui::Color32::from_rgb(96, 165, 250));
         }
     }
     actions.drag = draw_splitters(ui, layout, grid, cell_w, cell_h);
@@ -835,10 +938,42 @@ fn age_label_at(unix_ms: u64, now_ms: u64) -> String {
     }
 }
 
+/// The 16 base ANSI colors, used for named/indexed cells.
+const ANSI_PALETTE: [[u8; 3]; 16] = [
+    [0x00, 0x00, 0x00],
+    [0xcd, 0x00, 0x00],
+    [0x00, 0xcd, 0x00],
+    [0xcd, 0xcd, 0x00],
+    [0x00, 0x00, 0xee],
+    [0xcd, 0x00, 0xcd],
+    [0x00, 0xcd, 0xcd],
+    [0xe5, 0xe5, 0xe5],
+    [0x7f, 0x7f, 0x7f],
+    [0xff, 0x00, 0x00],
+    [0x00, 0xff, 0x00],
+    [0xff, 0xff, 0x00],
+    [0x5c, 0x5c, 0xff],
+    [0xff, 0x00, 0xff],
+    [0x00, 0xff, 0xff],
+    [0xff, 0xff, 0xff],
+];
+
 fn color32(color: Color) -> egui::Color32 {
     match color {
         Color::Default => egui::Color32::LIGHT_GRAY,
-        Color::Indexed(index) => egui::Color32::from_gray(60 + index.saturating_mul(6)),
+        Color::Indexed(index) => {
+            let [r, g, b] = if index < 16 {
+                ANSI_PALETTE[usize::from(index)]
+            } else if index < 232 {
+                let n = index - 16;
+                let level = |value: u8| if value == 0 { 0 } else { 55 + value * 40 };
+                [level(n / 36), level((n / 6) % 6), level(n % 6)]
+            } else {
+                let value = 8 + (index - 232) * 10;
+                [value, value, value]
+            };
+            egui::Color32::from_rgb(r, g, b)
+        }
         Color::Rgb(r, g, b) => egui::Color32::from_rgb(r, g, b),
     }
 }
@@ -885,7 +1020,17 @@ fn handle_input(ui: &mut egui::Ui, client: Option<&ClientSession>, grid: egui::R
                         continue;
                     }
                 }
-                let Some(code) = map_key(key) else {
+                // egui suppresses `Event::Text` while Ctrl/Alt/Cmd is held, so
+                // letters, digits, and punctuation must be sent as keys then.
+                // Shift-only typing stays on the text path to avoid duplicates.
+                let modified = modifiers.ctrl || modifiers.alt || modifiers.command;
+                let Some(code) = map_key(key).or_else(|| {
+                    if modified {
+                        map_modified_key(key)
+                    } else {
+                        None
+                    }
+                }) else {
                     continue;
                 };
                 let mut bits = 0u16;
@@ -948,6 +1093,127 @@ fn map_key(key: egui::Key) -> Option<KeyCode> {
         Key::F12 => Some(KeyCode::F(12)),
         _ => None,
     }
+}
+
+/// Letters, digits, and punctuation for modified key events. Unmodified
+/// printable keys come through `Event::Text` instead.
+fn map_modified_key(key: egui::Key) -> Option<KeyCode> {
+    use egui::Key;
+    let code = match key {
+        Key::A => 'a',
+        Key::B => 'b',
+        Key::C => 'c',
+        Key::D => 'd',
+        Key::E => 'e',
+        Key::F => 'f',
+        Key::G => 'g',
+        Key::H => 'h',
+        Key::I => 'i',
+        Key::J => 'j',
+        Key::K => 'k',
+        Key::L => 'l',
+        Key::M => 'm',
+        Key::N => 'n',
+        Key::O => 'o',
+        Key::P => 'p',
+        Key::Q => 'q',
+        Key::R => 'r',
+        Key::S => 's',
+        Key::T => 't',
+        Key::U => 'u',
+        Key::V => 'v',
+        Key::W => 'w',
+        Key::X => 'x',
+        Key::Y => 'y',
+        Key::Z => 'z',
+        Key::Num0 => '0',
+        Key::Num1 => '1',
+        Key::Num2 => '2',
+        Key::Num3 => '3',
+        Key::Num4 => '4',
+        Key::Num5 => '5',
+        Key::Num6 => '6',
+        Key::Num7 => '7',
+        Key::Num8 => '8',
+        Key::Num9 => '9',
+        Key::Space => ' ',
+        Key::Comma => ',',
+        Key::Period => '.',
+        Key::Minus => '-',
+        Key::Equals => '=',
+        Key::Plus => '+',
+        Key::Semicolon => ';',
+        Key::Quote => '\'',
+        Key::Backslash => '\\',
+        Key::Slash => '/',
+        Key::Backtick => '`',
+        Key::OpenBracket => '[',
+        Key::CloseBracket => ']',
+        Key::Pipe => '|',
+        Key::Colon => ':',
+        Key::Questionmark => '?',
+        Key::Exclamationmark => '!',
+        Key::OpenCurlyBracket => '{',
+        Key::CloseCurlyBracket => '}',
+        _ => return None,
+    };
+    Some(KeyCode::Char(code))
+}
+
+/// Half-open index range in `history ++ visible` for a wheel offset.
+fn scroll_window_range(
+    history_len: usize,
+    visible_len: usize,
+    offset: usize,
+    rows: usize,
+) -> (usize, usize) {
+    let total = history_len + visible_len;
+    if rows == 0 || total == 0 {
+        return (0, 0);
+    }
+    let rows = rows.min(total);
+    if offset == 0 {
+        let start = history_len.min(total - rows);
+        return (start, start + rows);
+    }
+    let end = total.saturating_sub(offset).clamp(rows, total);
+    (end - rows, end)
+}
+
+fn scroll_row<'a>(history: &'a VecDeque<Row>, visible: &'a [Row], index: usize) -> Option<&'a Row> {
+    if index < history.len() {
+        history.get(index)
+    } else {
+        visible.get(index - history.len())
+    }
+}
+
+fn scrollbar_rect(
+    content: egui::Rect,
+    history_len: usize,
+    offset: usize,
+    visible_len: usize,
+) -> Option<(egui::Rect, egui::Rect)> {
+    let total = history_len + visible_len;
+    if visible_len == 0 || total <= visible_len {
+        return None;
+    }
+    let track = egui::Rect::from_min_size(
+        egui::pos2(content.max.x - 4.0, content.min.y),
+        egui::vec2(4.0, content.height()),
+    );
+    let thumb_h = (track.height() * visible_len as f32 / total as f32)
+        .max(6.0)
+        .min(track.height());
+    let progress = (history_len.saturating_sub(offset)) as f32 / (total - visible_len) as f32;
+    let thumb = egui::Rect::from_min_size(
+        egui::pos2(
+            track.min.x,
+            track.min.y + (track.height() - thumb_h) * progress.clamp(0.0, 1.0),
+        ),
+        egui::vec2(track.width(), thumb_h),
+    );
+    Some((track, thumb))
 }
 
 #[cfg(test)]
@@ -1065,5 +1331,69 @@ mod tests {
                 unzoom: true
             }
         );
+    }
+
+    #[test]
+    fn scroll_window_clamps_offsets_and_visible_rows() {
+        assert_eq!(scroll_window_range(3, 5, 0, 5), (3, 8));
+        assert_eq!(scroll_window_range(3, 5, 2, 5), (1, 6));
+        assert_eq!(scroll_window_range(3, 5, 3, 5), (0, 5));
+        assert_eq!(scroll_window_range(3, 5, 99, 5), (0, 5));
+        assert_eq!(scroll_window_range(3, 5, 0, 2), (3, 5));
+
+        let history: VecDeque<Row> = VecDeque::from(vec![Row::default(); 2]);
+        let visible = vec![Row::default(); 3];
+        assert!(scroll_row(&history, &visible, 4).is_some());
+        assert!(scroll_row(&history, &visible, 5).is_none());
+    }
+
+    #[test]
+    fn modified_keys_reach_the_pane_instead_of_being_dropped() {
+        // egui suppresses Event::Text for these, so Ctrl-C and Alt-B must be
+        // mapped from the key event itself.
+        assert_eq!(map_modified_key(egui::Key::C), Some(KeyCode::Char('c')));
+        assert_eq!(map_modified_key(egui::Key::B), Some(KeyCode::Char('b')));
+        assert_eq!(map_modified_key(egui::Key::Num1), Some(KeyCode::Char('1')));
+        assert_eq!(
+            map_modified_key(egui::Key::Backslash),
+            Some(KeyCode::Char('\\'))
+        );
+        assert_eq!(map_modified_key(egui::Key::Space), Some(KeyCode::Char(' ')));
+        // Plain letters stay on the text path; mapping them here would double
+        // every typed character.
+        assert_eq!(map_key(egui::Key::C), None);
+        assert_eq!(map_key(egui::Key::Enter), Some(KeyCode::Enter));
+    }
+
+    #[test]
+    fn indexed_colors_use_the_ansi_palette() {
+        assert_eq!(color32(Color::Default), egui::Color32::LIGHT_GRAY);
+        assert_eq!(
+            color32(Color::Indexed(1)),
+            egui::Color32::from_rgb(0xcd, 0, 0)
+        );
+        assert_eq!(
+            color32(Color::Indexed(15)),
+            egui::Color32::from_rgb(0xff, 0xff, 0xff)
+        );
+        // 232 starts the grayscale ramp.
+        assert_eq!(
+            color32(Color::Indexed(232)),
+            egui::Color32::from_rgb(8, 8, 8)
+        );
+        assert_eq!(
+            color32(Color::Rgb(1, 2, 3)),
+            egui::Color32::from_rgb(1, 2, 3)
+        );
+    }
+
+    #[test]
+    fn scrollbar_appears_only_with_history_and_moves_with_offset() {
+        let content = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 50.0));
+        assert!(scrollbar_rect(content, 0, 0, 5).is_none());
+        let (track, bottom) = scrollbar_rect(content, 5, 0, 5).unwrap();
+        assert!(bottom.max.y > track.max.y - 8.0);
+        let (_, top) = scrollbar_rect(content, 5, 5, 5).unwrap();
+        assert_eq!(top.min.y, track.min.y);
     }
 }

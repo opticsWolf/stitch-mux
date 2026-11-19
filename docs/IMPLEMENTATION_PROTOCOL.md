@@ -6,7 +6,7 @@ This is the **operating protocol** for turning the design in
 document: update it in the **same commit** as the work it describes. It is not
 the wire protocol; that contract lives in [PROTOCOL.md](PROTOCOL.md).
 
-Last updated: **2026-11-19** — M0–M5 complete, M6 ready.
+Last updated: **2026-11-19** — M0–M5 complete, M6 ready; a post-M5 review fixed split axes, cell-delta viewport drift, per-client delta seeding, named ANSI colors, and egui input/repaint/grid geometry.
 
 ## 1. Standing rules
 
@@ -210,6 +210,13 @@ Before marking a task Ready for review:
 | 2026-11-19 | GPUI stays a boundary-only feature spike | GPUI 0.2.x is pre-1.0 and must not block v0.1 | `from_view(&SessionView)` proves no protocol changes; the real dependency is gated in `docs/GPUI-SPIKE.md` |
 | 2026-11-19 | Python tests run through maturin instead of the Rust test harness | The PyO3 harness needs a linkable Python DLL on Windows | `test = false` for the PyO3 crate; offscreen Qt and real-daemon SDK tests run under pytest in CI |
 | 2026-11-19 | The egui reference uses one stable keyboard focus id and absolute pane actions | Clicking a pane used to leave keyboard focus on a different widget, and the global split buttons obscured axis semantics | Pane clicks request `INPUT_FOCUS`; title bars carry explicit left/right and top/bottom split, close, and zoom actions; the status line owns session/activity state; splitter drags commit once on release with the drag-start revision |
+| 2026-11-19 | Nested splits keep the requested axis and ratio | `split_leaf` passed the enclosing split's axis/ratio into its recursive rebuild, so every split after the first reused the root axis regardless of the button pressed | `rebuild` keeps the parent split's axis/ratio and applies the requested pair only to the replaced leaf; `nested_splits_use_the_requested_axis` covers both directions |
+| 2026-11-19 | `PaneDelta` rows come from a viewport diff, not the parser dirty set | The parser marks only directly written rows, so a scroll shifted the viewport while the client kept stale rows; the GUI's "overflow" never matched the daemon screen | `PaneState.last_viewport` is compared with the new viewport on every publish; `changed_rows` unit tests cover a one-line scroll, no-op repaints, and a shorter viewport; `tests/viewport.rs` asserts the client tail equals `Capture` after scrolling |
+| 2026-11-19 | The per-client delta sequence is seeded from the attach snapshot | `UpdateCoalescer::last_sent` started empty while the client's `last_seq` was the snapshot sequence, so the first `snapshot.seq` deltas were discarded as stale after attach or `Resync` | `send_session_state` calls `UpdateCoalescer::seed` for each snapshot it sends; the seed unit test and `tests/viewport.rs::reattached_client_receives_new_output_immediately` prove the marker arrives |
+| 2026-11-19 | A client actor that exits publishes `Lost` | A write failure or a failed resync send broke the actor loop without an EOF event, leaving a frontend "Connected" to a dead session forever | After the loop, any non-detached exit publishes `mark_lost_preserving_error("connection closed")`; the terminal and GUI retry paths now always see the loss |
+| 2026-11-19 | Detach-by-control never skips connection cleanup | `send_error(...).await?` returned early, so `unregister`, `sync_size`, `publish_layout`, and reader-task abort were skipped and a dead client kept inflating `attached_clients` and pinning canonical size | The branch swallows the write error and breaks, so cleanup always runs |
+| 2026-11-19 | Named ANSI colors survive the protocol | `stitch-pty` stores the 16 base colors as names; `parse_color` only accepted `rrggbb`, so structured panes and the ANSI projection were monochrome | The 16 names map to `Color::Indexed(0..=15)`; the GUI maps indexed colors through the xterm palette; `parses_ansi_colors` covers names and rejects unknown strings |
+| 2026-11-19 | The egui reference repaints while output arrives and uses real status/grid geometry | egui only repaints on input, so a busy pane froze until the mouse moved; the grid also subtracted the status height twice, leaving a dead strip and a size that disagreed with the drawn grid | `ui()` requests a repaint every 16 ms while attached, the grid is the available rect after the status bar, and modified keys (Ctrl-C, Alt-b, punctuation) are mapped explicitly because egui suppresses their text events |
 
 ## 9. Current status
 

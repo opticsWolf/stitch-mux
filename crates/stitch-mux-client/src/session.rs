@@ -206,6 +206,13 @@ impl ClientSession {
                     }
                 }
             }
+            // A write failure or a failed resync send exits the loop without
+            // an EOF event. Publish the loss anyway: a frontend must never be
+            // left showing a "Connected" session that no longer exists.
+            if view.connection != crate::view::ConnectionState::Disconnected {
+                view.mark_lost_preserving_error("connection closed");
+                let _ = view_tx.send_replace(view.clone());
+            }
             reader_task.abort();
         });
 

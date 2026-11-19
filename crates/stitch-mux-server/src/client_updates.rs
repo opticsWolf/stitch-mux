@@ -133,6 +133,17 @@ impl UpdateCoalescer {
         }
     }
 
+    /// Record the sequence of a snapshot sent outside `flush` (attach, resync,
+    /// layout change). Without this the rewritten delta sequence restarts at 1
+    /// while the client's `last_seq` is the snapshot's, so it would discard
+    /// every delta until the two spaces meet again.
+    pub fn seed(&mut self, pane_id: u64, seq: u64) {
+        self.last_sent.insert(pane_id, seq);
+        // The snapshot supersedes any delta queued before it; `ordered` still
+        // holds those entries, and `flush` skips a delta without a pending row.
+        self.deltas.remove(&pane_id);
+    }
+
     /// Send all pending updates. Delta sequence numbers are made contiguous for
     /// this client so coalescing never looks like a protocol gap.
     pub async fn flush<W>(&mut self, writer: &mut FrameWriter<W>) -> Result<(), FrameError>
@@ -231,6 +242,28 @@ mod tests {
         assert_eq!(first.rows.len(), 2);
         assert_eq!(second.seq, 1);
         assert_eq!(second.rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn seeding_after_a_snapshot_keeps_the_client_sequence_contiguous() {
+        let (mut tx, mut rx) = tokio::io::duplex(16 * 1024);
+        let mut coalescer = UpdateCoalescer::default();
+        coalescer.add(delta(1, 30, 0));
+        coalescer.seed(1, 22);
+        coalescer.add(delta(1, 31, 1));
+        {
+            let mut writer = FrameWriter::new(&mut tx);
+            coalescer.flush(&mut writer).await.unwrap();
+        }
+        let mut reader = stitch_mux_protocol::FrameReader::new(&mut rx);
+        let frame = reader.recv_frame().await.unwrap();
+        let delta: PaneDelta = stitch_mux_protocol::decode_message(&frame).unwrap();
+        assert_eq!(
+            delta.seq, 23,
+            "delta must follow the attach snapshot sequence"
+        );
+        assert_eq!(delta.title, "title-31");
+        assert_eq!(delta.rows.len(), 1);
     }
 
     #[tokio::test]

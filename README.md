@@ -150,8 +150,12 @@ picker. In the GUI, click a pane to focus it, use `Ctrl+Arrow` to move focus,
 drag a splitter to change its ratio, and use each pane's title bar for
 left/right (`LR`), top/bottom (`TB`), close (`X`), and zoom (`Z`/`U`). The top
 status bar shows session size, revision, clients, activity, and bell state;
-`Detach` leaves the session alive. The egui adapter is a disposable reference;
-the protocol and client state are toolkit-neutral.
+`Detach` leaves the session alive. Ctrl-C, Alt-key, and punctuation keys are
+sent as semantic modified keys, and the pane keeps repainting while output
+arrives. Wheel-up shows a bounded local scrollback cache; the daemon still owns
+authoritative scrollback, so a burst that outpaces the UI can leave gaps until
+the viewport protocol lands. The egui adapter is a disposable reference; the
+protocol and client state are toolkit-neutral.
 
 The terminal view can be open at the same time as the GUI. It enters the
 alternate screen and restores it on detach. `Ctrl-]` is the local prefix:
