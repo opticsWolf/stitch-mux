@@ -6,7 +6,7 @@ This is the **operating protocol** for turning the design in
 document: update it in the **same commit** as the work it describes. It is not
 the wire protocol; that contract lives in [PROTOCOL.md](PROTOCOL.md).
 
-Last updated: **2026-11-19** — M0–M4 complete, M5 ready for review.
+Last updated: **2026-11-19** — M0–M5 complete, M6 ready.
 
 ## 1. Standing rules
 
@@ -219,7 +219,7 @@ Before marking a task Ready for review:
 | M2 — multi-pane GUI layout and per-client focus | **Done** | Real-child split/focus/zoom/stale-revision/close test; focus restores per client instance across detach/reattach; picker receives pane sizes and real last-activity timestamps; CLI `new`/`split`/`ls`/`zoom`/`close`/`kill` smoke; 8-second GUI smoke leaves children alive with `attached_clients: 0` |
 | M3 — multiple clients, backpressure | **Done** | 65 tests on Unix / 64 on Windows plus one release-only 10 MiB stress; real-endpoint tests for two-client focus/size/detach, focus restore, registry commands and typed shutdown, a two-client delta-pump test with repeated attach/detach, bounded-queue/coalescer unit tests, a deterministic typed `Busy` frame test, and an end-to-end stalled-socket `Busy` proof; `CommandResponse` payload cap covers captures; CLI `clients`/`rename`/`shutdown` smoke; GUI survives daemon loss |
 | M4 — terminal ANSI compatibility | **Done** | 82 tests on Unix / 79 on Windows plus one release-only 10 MiB stress; bounded server compositor emits full and diff ANSI frames, terminal adapter writes them without parsing or key encoding, real-endpoint test attaches terminal + structured clients and asserts identical layout geometry/output/detach, deterministic conformance corpus covers bash/zsh, vim, less, htop/top and git log patterns, and CLI `attach` replaces the M4 stub; main CI `44598420738` green on all nine jobs |
-| M5 — Qt/PySide6 + optional GPUI | Ready for review | PyO3 control SDK, PySide6 offscreen adapter, command-palette/activity hooks, parity checklist, licensing notes, and the boundary-only GPUI feature pass locally; awaiting cross-platform Rust CI plus the Linux Python/Qt job |
+| M5 — Qt/PySide6 + optional GPUI | **Done** | 83 tests on Unix / 80 on Windows plus 10 Python tests (including a real-daemon attach/input/resize/detach/reattach SDK test and offscreen Qt widget tests) and one release-only 10 MiB stress; PySide6 paints style runs from the same `SessionView`, maps keys/IME/mouse, shows activity and a `Ctrl+P` command-palette stub, and requires no protocol change; GPUI stays a feature-gated boundary spike; CI `44607326689` green on all ten jobs |
 | M6 — hardening / v0.1 | Backlog | Release checklist in `IMPLEMENTATION_PLAN.md` §7 |
 | M7–M12 — v0.2/v0.3 | Backlog | Only after v0.1 is published |
 
