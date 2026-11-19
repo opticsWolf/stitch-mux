@@ -57,11 +57,11 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn attached(&self, clients: u32) -> Attached {
+    pub fn attached(&self, clients: u32, view_mode: stitch_mux_protocol::ViewMode) -> Attached {
         Attached {
             session_id: self.id,
             session_name: self.name(),
-            view_mode: stitch_mux_protocol::ViewMode::Structured,
+            view_mode,
             cols: self.cols.load(Ordering::Relaxed),
             rows: self.rows.load(Ordering::Relaxed),
             status_rows: 0,

@@ -118,6 +118,19 @@ where
         self.send_frame(&encode_message(kind, value)?).await
     }
 
+    /// Send a Render frame with its compact binary prefix and raw ANSI bytes.
+    pub async fn send_render(
+        &mut self,
+        seq: u64,
+        cols: u16,
+        rows: u16,
+        full: bool,
+        ansi: &[u8],
+    ) -> Result<(), FrameError> {
+        self.send_frame(&encode_render(seq, cols, rows, full, ansi))
+            .await
+    }
+
     pub async fn shutdown(&mut self) -> Result<(), FrameError> {
         self.io.shutdown().await?;
         Ok(())

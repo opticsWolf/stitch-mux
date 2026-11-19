@@ -4,6 +4,7 @@
 //! bounded structured snapshots/deltas to attached clients, and keep per-client
 //! focus local to each connection. Sessions survive detach/reattach.
 
+pub mod ansi;
 pub mod client_updates;
 pub mod pane;
 pub mod session;
@@ -26,6 +27,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
+pub use ansi::AnsiCompositor;
 pub use pane::{PaneError, PaneRuntime, PaneSpec, PaneUpdate};
 pub use session::{Session, SessionError, SessionRegistry};
 
@@ -367,10 +369,12 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
         }
     });
 
+    let view_mode = hello.view_mode;
     let mut attached: Option<Arc<Session>> = None;
     let mut focus: Option<u64> = None;
     let mut update_rx: Option<client_updates::ClientUpdateQueue> = None;
     let mut coalescer = client_updates::UpdateCoalescer::default();
+    let mut compositor = AnsiCompositor::new();
     let mut update_tasks: Vec<JoinHandle<()>> = Vec::new();
     let mut layout_rx: Option<broadcast::Receiver<Arc<Layout>>> = None;
     let mut failure: Option<ServerError> = None;
@@ -400,7 +404,8 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                 Some(Ok(_)) => Event::Layout,
                 Some(Err(broadcast::error::RecvError::Lagged(_))) => {
                     if let Some(session) = attached.as_ref()
-                        && let Err(err) = send_session_state(&mut writer, session, focus, &state).await
+                        && let Err(err) =
+                            send_session_state(&mut writer, session, focus, &state, view_mode, &mut compositor).await
                     {
                         failure = Some(err);
                         break;
@@ -423,6 +428,8 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                     &mut update_tasks,
                     &mut layout_rx,
                     &mut writer,
+                    view_mode,
+                    &mut compositor,
                 )
                 .await
                 {
@@ -435,23 +442,57 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                 }
             }
             Event::Update(update) => {
-                coalescer.add(update);
-                if let Some(queue) = update_rx.as_mut() {
-                    for queued in queue.drain_batch() {
-                        coalescer.add(queued);
+                if view_mode == ViewMode::Terminal {
+                    // The compositor reads the current authoritative snapshots,
+                    // so coalesced cell messages would be wasted work.
+                    let mut exits = Vec::new();
+                    let mut accept = |item: Arc<PaneUpdate>| {
+                        if let PaneUpdate::Exit(exit) = item.as_ref() {
+                            exits.push(exit.clone());
+                        }
+                    };
+                    accept(update);
+                    if let Some(queue) = update_rx.as_mut() {
+                        for queued in queue.drain_batch() {
+                            accept(queued);
+                        }
                     }
-                }
-                match tokio::time::timeout(Duration::from_secs(2), coalescer.flush(&mut writer))
-                    .await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => {
+                    if let Err(err) = send_exit_frames(&mut writer, &exits).await {
                         failure = Some(ServerError::Frame(err));
                         break;
                     }
-                    Err(_) => {
-                        let _ = send_backpressure_error(&mut writer).await;
+                    if let Some(session) = attached.as_ref()
+                        && let Err(err) = send_terminal_update(
+                            &mut writer,
+                            session,
+                            focus,
+                            &state,
+                            &mut compositor,
+                        )
+                        .await
+                    {
+                        failure = Some(err);
                         break;
+                    }
+                } else {
+                    coalescer.add(update);
+                    if let Some(queue) = update_rx.as_mut() {
+                        for queued in queue.drain_batch() {
+                            coalescer.add(queued);
+                        }
+                    }
+                    match tokio::time::timeout(Duration::from_secs(2), coalescer.flush(&mut writer))
+                        .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => {
+                            failure = Some(ServerError::Frame(err));
+                            break;
+                        }
+                        Err(_) => {
+                            let _ = send_backpressure_error(&mut writer).await;
+                            break;
+                        }
                     }
                 }
             }
@@ -471,7 +512,16 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                 if let Some(id) = focus {
                     state.set_focus(client_id, id);
                 }
-                if let Err(err) = send_session_state(&mut writer, session, focus, &state).await {
+                if let Err(err) = send_session_state(
+                    &mut writer,
+                    session,
+                    focus,
+                    &state,
+                    view_mode,
+                    &mut compositor,
+                )
+                .await
+                {
                     failure = Some(err);
                     break;
                 }
@@ -524,26 +574,98 @@ fn with_attached_count(state: &ServerState, mut layout: Layout) -> Layout {
     layout
 }
 
+fn pane_snapshots(
+    session: &Session,
+    layout: &Layout,
+) -> BTreeMap<u64, stitch_mux_protocol::PaneSnapshot> {
+    layout
+        .panes
+        .iter()
+        .filter_map(|geometry| {
+            session
+                .pane(geometry.pane_id)
+                .map(|pane| (geometry.pane_id, pane.snapshot()))
+        })
+        .collect()
+}
+
+async fn send_exit_frames(
+    writer: &mut Writer,
+    exits: &[stitch_mux_protocol::SessionExit],
+) -> Result<(), FrameError> {
+    for exit in exits {
+        writer.send(MessageKind::Exit, exit).await?;
+    }
+    Ok(())
+}
+
+async fn send_render_frame(
+    writer: &mut Writer,
+    render: stitch_mux_protocol::Render,
+) -> Result<(), ServerError> {
+    writer
+        .send_render(
+            render.seq,
+            render.cols,
+            render.rows,
+            render.full,
+            &render.ansi,
+        )
+        .await?;
+    Ok(())
+}
+
+/// Publish a full authoritative state. Structured clients get geometry plus
+/// cell snapshots; terminal clients get geometry (for focus) plus one composed
+/// ANSI frame. A connection never receives both cell frames and Render frames.
 async fn send_session_state(
     writer: &mut Writer,
     session: &Session,
     focus: Option<u64>,
     state: &ServerState,
+    view_mode: ViewMode,
+    compositor: &mut AnsiCompositor,
 ) -> Result<(), ServerError> {
     let layout = with_attached_count(state, session.layout(focus));
-    // Layout first, then a full snapshot for every pane it contains.
     writer.send(MessageKind::Layout, &layout).await?;
-    for geometry in &layout.panes {
-        if let Some(pane) = session.pane(geometry.pane_id) {
-            writer
-                .send(MessageKind::PaneSnapshot, &pane.snapshot())
-                .await?;
+    match view_mode {
+        ViewMode::Structured => {
+            for geometry in &layout.panes {
+                if let Some(pane) = session.pane(geometry.pane_id) {
+                    writer
+                        .send(MessageKind::PaneSnapshot, &pane.snapshot())
+                        .await?;
+                }
+            }
+        }
+        ViewMode::Terminal => {
+            let attached = session.attached(layout.attached_clients, view_mode);
+            let snapshots = pane_snapshots(session, &layout);
+            let render = compositor.full(&attached, &layout, &snapshots);
+            send_render_frame(writer, render).await?;
         }
     }
     if let Some(pane_id) = focus {
         writer
             .send(MessageKind::Focus, &stitch_mux_protocol::Focus { pane_id })
             .await?;
+    }
+    Ok(())
+}
+
+/// Send the next incremental ANSI projection after pane updates or a resize.
+async fn send_terminal_update(
+    writer: &mut Writer,
+    session: &Session,
+    focus: Option<u64>,
+    state: &ServerState,
+    compositor: &mut AnsiCompositor,
+) -> Result<(), ServerError> {
+    let layout = with_attached_count(state, session.layout(focus));
+    let attached = session.attached(layout.attached_clients, ViewMode::Terminal);
+    let snapshots = pane_snapshots(session, &layout);
+    if let Some(render) = compositor.update(&attached, &layout, &snapshots) {
+        send_render_frame(writer, render).await?;
     }
     Ok(())
 }
@@ -560,6 +682,8 @@ async fn handle_frame(
     update_tasks: &mut Vec<JoinHandle<()>>,
     layout_rx: &mut Option<broadcast::Receiver<Arc<Layout>>>,
     writer: &mut Writer,
+    view_mode: ViewMode,
+    compositor: &mut AnsiCompositor,
 ) -> Result<bool, ServerError> {
     match frame.kind {
         MessageKind::Ping => {
@@ -633,10 +757,11 @@ async fn handle_frame(
             session.publish_layout();
             let clients = state.count(session.id);
             *attached = Some(Arc::clone(&session));
+            compositor.invalidate();
             writer
-                .send(MessageKind::Attached, &session.attached(clients))
+                .send(MessageKind::Attached, &session.attached(clients, view_mode))
                 .await?;
-            send_session_state(writer, &session, *focus, state).await?;
+            send_session_state(writer, &session, *focus, state, view_mode, compositor).await?;
         }
         MessageKind::Input => {
             let event: InputEvent = decode_message(&frame)?;
@@ -658,6 +783,10 @@ async fn handle_frame(
                         },
                     )
                     .await?;
+                if view_mode == ViewMode::Terminal {
+                    compositor.invalidate();
+                    send_terminal_update(writer, session, *focus, state, compositor).await?;
+                }
             }
         }
         MessageKind::FocusRequest => {
@@ -713,7 +842,8 @@ async fn handle_frame(
         }
         MessageKind::Resync => {
             if let Some(session) = attached.as_ref() {
-                send_session_state(writer, session, *focus, state).await?;
+                compositor.invalidate();
+                send_session_state(writer, session, *focus, state, view_mode, compositor).await?;
             }
         }
         MessageKind::CaptureRequest => {
