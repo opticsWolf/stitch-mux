@@ -55,6 +55,7 @@ fn scene(cols: u16, rows: u16, title: &str, alt_screen: bool) -> (Attached, Layo
             content: Rect::new(1, 1, cols - 2, rows - 2),
             title: title.into(),
         }],
+        zoomed_pane: None,
     };
     let snapshot = PaneSnapshot {
         pane_id: 101,

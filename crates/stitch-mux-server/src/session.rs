@@ -155,7 +155,7 @@ impl Session {
     }
 
     pub fn layout(&self, focus: Option<u64>) -> Layout {
-        let (root, revision, size) = {
+        let (root, revision, size, zoomed_pane) = {
             let state = self.layout.lock().expect("layout");
             (
                 state.effective(),
@@ -164,6 +164,9 @@ impl Session {
                     self.cols.load(Ordering::Relaxed),
                     self.rows.load(Ordering::Relaxed),
                 ),
+                state
+                    .zoom
+                    .filter(|pane_id| layout_contains(&state.root, PaneId::new(*pane_id))),
             )
         };
         let panes = self.panes.lock().expect("panes");
@@ -193,6 +196,7 @@ impl Session {
             focus,
             root,
             panes: geometry,
+            zoomed_pane,
         }
     }
 

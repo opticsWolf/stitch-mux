@@ -215,6 +215,11 @@ async fn split_focus_zoom_close_and_revision_guard() {
         zoom.layout.as_ref().map(|l| &l.root),
         Some(LayoutNode::Leaf { .. })
     ));
+    assert_eq!(
+        zoom.layout.as_ref().and_then(|l| l.zoomed_pane),
+        Some(second),
+        "a zoomed layout must say which pane it shows"
+    );
     wait_for("zoom reaches client", &client, |view| {
         view.layout
             .as_ref()
@@ -270,6 +275,7 @@ async fn split_focus_zoom_close_and_revision_guard() {
     .expect("unzoom");
     assert!(unzoom.ok, "{:?}", unzoom.error);
     let unzoomed = unzoom.layout.expect("unzoom layout");
+    assert_eq!(unzoomed.zoomed_pane, None);
     assert_eq!(unzoomed.panes.len(), 2);
     assert!(matches!(unzoomed.root, LayoutNode::Split { .. }));
     // A fresh attach observes the unzoomed layout without depending on a push

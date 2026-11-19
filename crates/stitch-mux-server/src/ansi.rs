@@ -569,6 +569,7 @@ mod tests {
                 content,
                 title: "sh".into(),
             }],
+            zoomed_pane: None,
         };
         let mut panes = BTreeMap::new();
         panes.insert(focus, snapshot(focus, content.cols, content.rows));

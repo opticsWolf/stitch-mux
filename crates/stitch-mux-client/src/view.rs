@@ -475,6 +475,7 @@ mod tests {
                 content: stitch_mux_core::Rect::new(1, 1, 78, 22),
                 title: "sh".into(),
             }],
+            zoomed_pane: None,
         });
         assert!(view.pane(1).is_some());
         assert!(view.pane(2).is_none());

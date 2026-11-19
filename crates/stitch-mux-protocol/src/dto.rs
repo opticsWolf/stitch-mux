@@ -82,6 +82,11 @@ pub struct Layout {
     pub focus: Option<u64>,
     pub root: LayoutNode,
     pub panes: Vec<PaneGeometry>,
+    /// Set while the session is zoomed on one pane. `root` is the zoom target
+    /// in that case, so a client cannot tell a zoomed session from a
+    /// single-pane one without this field.
+    #[serde(default)]
+    pub zoomed_pane: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

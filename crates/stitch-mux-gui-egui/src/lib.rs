@@ -507,10 +507,9 @@ fn draw_panes(
     let rows = layout.rows.max(1);
     let cell_w = grid.width() / f32::from(cols);
     let cell_h = grid.height() / f32::from(rows);
-    let zoomed_pane = match layout.root {
-        LayoutNode::Leaf { pane_id } => Some(pane_id),
-        LayoutNode::Split { .. } => None,
-    };
+    // A single-pane session also has a leaf root, so the daemon's explicit
+    // zoom marker is what distinguishes "zoomed" from "one pane".
+    let zoomed_pane = layout.zoomed_pane;
 
     for geometry in &layout.panes {
         let pane_id = geometry.pane_id;

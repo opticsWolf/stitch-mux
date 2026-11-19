@@ -461,6 +461,7 @@ mod tests {
                     title: "two".into(),
                 },
             ],
+            zoomed_pane: None,
         });
         assert_eq!(
             focus_in_direction(&view, Direction::Right),

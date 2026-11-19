@@ -203,6 +203,7 @@ struct Layout {
     focus: Option<PaneId>,       // focus for THIS client
     root: LayoutNode,            // server-owned binary split tree
     panes: Vec<PaneGeometry>,
+    zoomed_pane: Option<PaneId>, // set while zoomed; `root` is then one leaf
 }
 
 struct PaneGeometry {
@@ -228,6 +229,11 @@ inside it. The GUI may draw its own chrome within `outer`.
 with `SetLayout`, but only the daemon applies it; `revision` increments on every
 accepted change. `focus` is **per client**. Two attached clients can have
 different active panes while sharing the same layout.
+
+While a session is zoomed, `root` is a single leaf and `panes` has one entry, so
+`zoomed_pane` is the only way to tell a zoom from a one-pane session. Clients
+that ignore the field still render the correct screen; they only need it to
+offer the right unzoom affordance.
 
 ### 6.4 `PaneSnapshot`
 
