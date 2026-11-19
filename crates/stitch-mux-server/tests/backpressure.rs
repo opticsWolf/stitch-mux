@@ -46,11 +46,20 @@ fn hello(label: &str) -> Hello {
     }
 }
 
-fn shell() -> (&'static str, Vec<String>) {
+fn noisy_program() -> (&'static str, Vec<String>) {
+    // A child that emits output itself avoids shell parsing a multi-megabyte
+    // command line and exercises the same structured delta pipeline.
     if cfg!(windows) {
-        ("cmd.exe", vec!["/Q".into()])
+        (
+            "cmd.exe",
+            vec![
+                "/Q".into(),
+                "/C".into(),
+                "for /L %i in (1,1,500000) do @echo aaaaaaaaaaaaaaaaaaaa".into(),
+            ],
+        )
     } else {
-        ("sh", Vec::new())
+        ("sh", vec!["-c".into(), "yes aaaaaaaaaaaaaaaaaaaa".into()])
     }
 }
 
@@ -78,31 +87,13 @@ fn pane_has_a(view: &SessionView, pane_id: u64) -> bool {
         })
 }
 
-async fn flood_pane(endpoint: &Endpoint, pane_id: u64) {
-    // Short lines matter: canonical mode on macOS stops echoing a line once
-    // its line-length limit is hit. Ten rounds send about 9 MB in total.
-    let flood = format!("{}\n", "a".repeat(80)).repeat(11_000);
-    for _ in 0..10 {
-        let sent = command(
-            endpoint,
-            Command::SendText {
-                pane_id,
-                text: flood.clone(),
-            },
-        )
-        .await
-        .expect("flood response");
-        assert!(sent.ok, "{:?}", sent.error);
-    }
-}
-
 #[tokio::test]
 async fn ten_megabytes_and_repeated_attach_stay_responsive() {
     let (endpoint, socket) = test_endpoint();
     let listener = endpoint.bind().await.expect("bind");
     let server = tokio::spawn(stitch_mux_server::serve(listener));
 
-    let (program, args) = shell();
+    let (program, args) = noisy_program();
     let created = command(
         &endpoint,
         Command::NewSession {
@@ -131,7 +122,6 @@ async fn ten_megabytes_and_repeated_attach_stay_responsive() {
         wait_for(label, client, |view| view.pane(pane_id).is_some()).await;
     }
 
-    flood_pane(&endpoint, pane_id).await;
     wait_for("first client sees the flood", &first, |view| {
         pane_has_a(view, pane_id)
     })
