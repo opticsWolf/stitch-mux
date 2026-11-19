@@ -90,7 +90,10 @@ async fn bind_unix(path: &PathBuf) -> Result<Listener, EndpointError> {
 
     // A relative override such as `rel.sock` has an empty parent; binding it
     // in the current directory is still valid.
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         tokio::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
