@@ -490,6 +490,11 @@ command sets the size for headless use.
 
 ### 6.9 `SetLayout`
 
+Layout trees are nested values, so the daemon rejects any tree deeper than 256
+levels while decoding. A valid tiling layout never comes close; the limit keeps
+a hostile frame from exhausting the decoder's stack.
+
+
 ```rust
 struct SetLayout {
     base_revision: u64,

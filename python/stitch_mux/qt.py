@@ -11,7 +11,7 @@ import argparse
 import sys
 from typing import Any, Protocol
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QKeyEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,6 +25,10 @@ from PySide6.QtWidgets import (
 )
 
 from . import attach, list_sessions
+
+#: Rows of local scrollback kept per pane for the wheel. The daemon owns the
+#: authoritative screen; this adapter only replays what it already received.
+MAX_SCROLLBACK = 1000
 
 _ANSI_COLORS = [
     "#000000",
@@ -140,6 +144,37 @@ class ViewSignaler(QThread):
             self.msleep(self._interval_ms)
 
 
+def modified_key_code(key: int) -> str | None:
+    """Return the semantic key for a Ctrl/Alt chord.
+
+    Qt suppresses ``QKeyEvent.text()`` while Control/Alt/Meta is held, so
+    ``Ctrl-C`` and ``Alt-b`` never reached the pane. The daemon owns key
+    encoding, so forward the key plus its modifiers instead of raw bytes.
+    """
+    if Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
+        return chr(ord("a") + int(key) - int(Qt.Key.Key_A))
+    if Qt.Key.Key_0 <= key <= Qt.Key.Key_9:
+        return chr(ord("0") + int(key) - int(Qt.Key.Key_0))
+    # Some key synthesizers (and QTest) use the lowercase ASCII code.
+    if ord("a") <= key <= ord("z") or ord("0") <= key <= ord("9"):
+        return chr(key)
+    punctuation = {
+        Qt.Key.Key_Space: " ",
+        Qt.Key.Key_Minus: "-",
+        Qt.Key.Key_Equal: "=",
+        Qt.Key.Key_BracketLeft: "[",
+        Qt.Key.Key_BracketRight: "]",
+        Qt.Key.Key_Backslash: "\\",
+        Qt.Key.Key_Semicolon: ";",
+        Qt.Key.Key_Apostrophe: "'",
+        Qt.Key.Key_Comma: ",",
+        Qt.Key.Key_Period: ".",
+        Qt.Key.Key_Slash: "/",
+        Qt.Key.Key_QuoteLeft: "`",
+    }
+    return punctuation.get(key)
+
+
 class CellCanvas(QWidget):
     """Paints rows and style runs from a structured SessionView."""
 
@@ -153,6 +188,7 @@ class CellCanvas(QWidget):
         self.cell_width = 9.0
         self.cell_height = 18.0
         self._last_size = (0, 0)
+        self._scroll: dict[int, dict[str, Any]] = {}
         font = QFont("Cascadia Mono, DejaVu Sans Mono, Menlo, Consolas, monospace")
         font.setStyleHint(QFont.StyleHint.TypeWriter)
         font.setPointSize(12)
@@ -170,7 +206,84 @@ class CellCanvas(QWidget):
     @Slot(dict)
     def set_view(self, view: dict[str, Any]) -> None:
         self.view = view
+        self._sync_scroll(view)
         self.update()
+
+    def _sync_scroll(self, view: dict[str, Any]) -> None:
+        """Keep a bounded history of rows that left each pane's viewport."""
+        panes = view.get("panes") or {}
+        live = {int(key) for key in panes}
+        self._scroll = {
+            pane_id: state for pane_id, state in self._scroll.items() if pane_id in live
+        }
+        for key, pane in panes.items():
+            pane_id = int(key)
+            snapshot = pane.get("snapshot") or {}
+            cells = snapshot.get("cells") or []
+            if not cells:
+                continue
+            seq = int(snapshot.get("seq") or 0)
+            scrollback = int(snapshot.get("scrollback_len") or 0)
+            state = self._scroll.get(pane_id)
+            if (
+                state is None
+                or seq < state["seq"]
+                or scrollback < state["scrollback_len"]
+            ):
+                self._scroll[pane_id] = {
+                    "seq": seq,
+                    "scrollback_len": scrollback,
+                    "visible": cells,
+                    "history": [],
+                    "offset": 0,
+                }
+                continue
+            if seq == state["seq"]:
+                continue
+            scrolled = max(0, scrollback - state["scrollback_len"])
+            state["history"].extend(state["visible"][:scrolled])
+            del state["history"][:-MAX_SCROLLBACK]
+            state["seq"] = seq
+            state["scrollback_len"] = scrollback
+            state["visible"] = cells
+            state["offset"] = min(state["offset"], len(state["history"]))
+
+    def window_for(self, pane_id: int, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+        """Rows to paint: history above the viewport when scrolled up."""
+        rows = snapshot.get("cells") or []
+        height = len(rows)
+        state = self._scroll.get(pane_id)
+        if state is None or state["offset"] == 0:
+            return rows
+        offset = min(state["offset"], len(state["history"]))
+        combined = list(state["history"][-offset:]) + list(rows)
+        end = max(0, len(combined) - offset)
+        return combined[max(0, end - height) : end]
+
+    def _pane_at(self, position: QPointF) -> int | None:
+        x = position.x() / self.cell_width
+        y = position.y() / self.cell_height
+        for geometry, _pane in self._pane_views():
+            outer = geometry.get("outer") or {}
+            left = float(outer.get("x", 0))
+            top = float(outer.get("y", 0))
+            if (
+                left <= x < left + float(outer.get("cols", 0))
+                and top <= y < top + float(outer.get("rows", 0))
+            ):
+                return int(geometry["pane_id"])
+        return None
+
+    def _scroll_pane(self, pane_id: int, direction: int) -> bool:
+        state = self._scroll.get(pane_id)
+        if state is None or not state["history"]:
+            return False
+        limit = len(state["history"])
+        # Three rows per wheel notch, matching common terminal defaults.
+        step = 3 if direction > 0 else -3
+        state["offset"] = max(0, min(limit, state["offset"] + step))
+        self.update()
+        return True
 
     def _pane_views(self) -> list[tuple[dict[str, Any], dict[str, Any]]]:
         layout = self.view.get("layout") or {}
@@ -215,7 +328,16 @@ class CellCanvas(QWidget):
         snapshot = pane.get("snapshot") or {}
         origin_x = float(content.get("x", 0)) * self.cell_width
         origin_y = float(content.get("y", 0)) * self.cell_height
-        for row_index, row in enumerate(snapshot.get("cells") or []):
+        clip = QRectF(
+            origin_x,
+            origin_y,
+            float(content.get("cols", 0)) * self.cell_width,
+            float(content.get("rows", 0)) * self.cell_height,
+        )
+        painter.save()
+        painter.setClipRect(clip)
+        pane_id = int(geometry.get("pane_id") or 0)
+        for row_index, row in enumerate(self.window_for(pane_id, snapshot)):
             cells = row.get("cells") or []
             runs: list[tuple[tuple[Any, ...], str, int]] = []
             run_x = 0
@@ -244,7 +366,10 @@ class CellCanvas(QWidget):
                 apply_style(painter, key, "#d7dae0", "#0b1020")
                 painter.drawText(int(origin_x + col * self.cell_width), int(y), run_text)
 
-        if not active:
+        painter.restore()
+        if not active or self._scroll.get(pane_id, {}).get("offset", 0) > 0:
+            # While scrolled up the cursor position no longer matches the
+            # painted rows, so hide it instead of drawing at a stale spot.
             return
         cursor = snapshot.get("cursor") or {}
         if not cursor.get("visible", False):
@@ -305,9 +430,18 @@ class CellCanvas(QWidget):
         if Qt.Key.Key_F1 <= key <= Qt.Key.Key_F35:
             self.session.key(f"f{key - Qt.Key.Key_F1 + 1}", bits)
             return
+        reserved = (
+            Qt.KeyboardModifier.ControlModifier
+            | Qt.KeyboardModifier.AltModifier
+            | Qt.KeyboardModifier.MetaModifier
+        )
+        if modifiers & reserved:
+            code = modified_key_code(key)
+            if code is not None:
+                self.session.key(code, bits)
+            return
         text = event.text()
-        reserved = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
-        if text and not modifiers & reserved:
+        if text:
             self.session.input_text(text)
 
     def inputMethodEvent(self, event: Any) -> None:  # noqa: N802 - Qt API
@@ -317,18 +451,21 @@ class CellCanvas(QWidget):
     def mousePressEvent(self, event: Any) -> None:  # noqa: N802 - Qt API
         if self.session is None:
             return
-        x = event.position().x() / self.cell_width
-        y = event.position().y() / self.cell_height
-        for geometry, _pane in self._pane_views():
-            outer = geometry.get("outer") or {}
-            left = float(outer.get("x", 0))
-            top = float(outer.get("y", 0))
-            if (
-                left <= x < left + float(outer.get("cols", 0))
-                and top <= y < top + float(outer.get("rows", 0))
-            ):
-                self.session.focus(int(geometry["pane_id"]))
-                return
+        pane_id = self._pane_at(event.position())
+        if pane_id is not None:
+            self.session.focus(pane_id)
+
+    def wheelEvent(self, event: Any) -> None:  # noqa: N802 - Qt API
+        if self.session is None:
+            return
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+        pane_id = self._pane_at(event.position())
+        if pane_id is None:
+            return
+        self._scroll_pane(pane_id, 1 if delta > 0 else -1)
+        event.accept()
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt API
         cols = max(1, int(event.size().width() / self.cell_width))

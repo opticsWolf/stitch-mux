@@ -120,15 +120,25 @@ def test_canvas_maps_keys_and_focus(app: QApplication) -> None:
     canvas.keyPressEvent(
         QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Left, Qt.KeyboardModifier.NoModifier)
     )
+    # Ctrl chords carry no text event in Qt; they must reach the pane as a
+    # semantic key so the daemon can encode them for the child.
     canvas.keyPressEvent(
         QKeyEvent(
             QEvent.Type.KeyPress,
-            ord("a"),
+            Qt.Key.Key_A,
             Qt.KeyboardModifier.ControlModifier,
-            "a",
+            "",
         )
     )
-    assert session.keys == [("left", 0)]
+    canvas.keyPressEvent(
+        QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_B,
+            Qt.KeyboardModifier.AltModifier,
+            "",
+        )
+    )
+    assert session.keys == [("left", 0), ("a", 4), ("b", 2)]
     assert session.text == []
 
     plain = QKeyEvent(QEvent.Type.KeyPress, ord("b"), Qt.KeyboardModifier.NoModifier, "b")
@@ -197,3 +207,35 @@ def test_picker_lists_sessions(app: QApplication) -> None:
     picker.refresh()
     assert picker.list.count() == 1
     assert "demo" in picker.list.item(0).text()
+
+
+def test_canvas_scrolls_local_history_with_the_wheel(app: QApplication) -> None:
+    canvas = CellCanvas()
+    canvas._scroll[101] = {
+        "seq": 4,
+        "scrollback_len": 12,
+        "visible": [{"cells": []}],
+        "history": [{"cells": []}] * 6,
+        "offset": 0,
+    }
+    assert canvas._scroll_pane(101, 1) is True
+    assert canvas._scroll[101]["offset"] == 3
+    assert canvas._scroll_pane(101, 1) is True
+    assert canvas._scroll[101]["offset"] == 6
+    assert canvas._scroll_pane(101, -1) is True
+    assert canvas._scroll[101]["offset"] == 3
+
+    snapshot = {"cells": [{"cells": []}, {"cells": []}], "seq": 4}
+    window = canvas.window_for(101, snapshot)
+    assert len(window) == 2
+
+    # A pane without history stays at the bottom instead of scrolling.
+    canvas._scroll[202] = {
+        "seq": 1,
+        "scrollback_len": 0,
+        "visible": [],
+        "history": [],
+        "offset": 0,
+    }
+    assert canvas._scroll_pane(202, 1) is False
+    assert canvas._scroll[202]["offset"] == 0

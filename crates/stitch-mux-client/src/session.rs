@@ -3,6 +3,9 @@
 //! A frontend clones a watch receiver, renders `SessionView`, and sends
 //! `Outbound` messages. No UI toolkit is involved.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use stitch_mux_core::{Direction, PaneId, ResolvedPane, Size};
 use stitch_mux_protocol::{
     Attach, Command, CommandRequest, CommandResponse, Connection, Detach, Endpoint, ErrorInfo,
@@ -37,9 +40,17 @@ pub enum AttachState {
     Lost,
 }
 
+/// Outbound commands and input waiting for the connection task. Bounded so a
+/// paste flood or a stalled socket cannot grow the client without limit.
+const OUTBOUND_QUEUE: usize = 1024;
+/// Decoded frames waiting for the actor loop; awaiting applies backpressure to
+/// the socket instead of buffering arbitrary payloads.
+const INCOMING_FRAMES: usize = 32;
+
 pub struct ClientSession {
     view_rx: watch::Receiver<SessionView>,
-    outbound_tx: mpsc::UnboundedSender<Outbound>,
+    outbound_tx: mpsc::Sender<Outbound>,
+    dropped_outbound: Arc<AtomicU64>,
     task: JoinHandle<()>,
 }
 
@@ -55,23 +66,25 @@ impl ClientSession {
             connection: crate::view::ConnectionState::Connecting,
             ..Default::default()
         });
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Outbound>();
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Outbound>(OUTBOUND_QUEUE);
+        let dropped_outbound = Arc::new(AtomicU64::new(0));
         let session_name = session_name.to_owned();
 
         let task = tokio::spawn(async move {
             let (reader, mut writer) = connection.split();
-            let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Result<Frame, FrameError>>();
+            let (frame_tx, mut frame_rx) =
+                mpsc::channel::<Result<Frame, FrameError>>(INCOMING_FRAMES);
             let reader_task = tokio::spawn(async move {
                 let mut reader: FrameReader<tokio::io::ReadHalf<Stream>> = reader;
                 loop {
                     match reader.recv_frame().await {
                         Ok(frame) => {
-                            if frame_tx.send(Ok(frame)).is_err() {
+                            if frame_tx.send(Ok(frame)).await.is_err() {
                                 break;
                             }
                         }
                         Err(err) => {
-                            let _ = frame_tx.send(Err(err));
+                            let _ = frame_tx.send(Err(err)).await;
                             break;
                         }
                     }
@@ -219,6 +232,7 @@ impl ClientSession {
         Ok(Self {
             view_rx,
             outbound_tx,
+            dropped_outbound,
             task,
         })
     }
@@ -232,12 +246,27 @@ impl ClientSession {
     }
 
     pub fn send(&self, outbound: Outbound) {
-        let _ = self.outbound_tx.send(outbound);
+        self.offer(outbound);
+    }
+
+    fn offer(&self, outbound: Outbound) {
+        match self.outbound_tx.try_send(outbound) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.dropped_outbound.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+
+    /// Outbound frames dropped because the connection could not keep up.
+    pub fn dropped_outbound(&self) -> u64 {
+        self.dropped_outbound.load(Ordering::Relaxed)
     }
 
     /// Ask the daemon to detach, then wait for the actor to finish.
     pub async fn detach(self) {
-        let _ = self.outbound_tx.send(Outbound::Detach);
+        self.offer(Outbound::Detach);
         let _ = self.task.await;
     }
 }

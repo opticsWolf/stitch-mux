@@ -155,6 +155,13 @@ impl UpdateCoalescer {
         for update in self.ordered.drain(..) {
             match update.as_ref() {
                 PaneUpdate::Snapshot(snapshot) => {
+                    // A newer snapshot (attach, resync, layout change) may have
+                    // been written while this one waited in the queue. Sending
+                    // the older screen would roll the client back and leave the
+                    // following deltas relative to the wrong base.
+                    if snapshot.seq < self.last_sent.get(&snapshot.pane_id).copied().unwrap_or(0) {
+                        continue;
+                    }
                     self.last_sent.insert(snapshot.pane_id, snapshot.seq);
                     writer.send(MessageKind::PaneSnapshot, snapshot).await?;
                 }
@@ -264,6 +271,44 @@ mod tests {
         );
         assert_eq!(delta.title, "title-31");
         assert_eq!(delta.rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_queued_snapshot_never_rolls_back_a_newer_one() {
+        let (mut tx, mut rx) = tokio::io::duplex(16 * 1024);
+        let mut coalescer = UpdateCoalescer::default();
+        let stale = Arc::new(PaneUpdate::Snapshot(PaneSnapshot {
+            pane_id: 1,
+            seq: 11,
+            cols: 1,
+            rows: 1,
+            cells: vec![Row {
+                cells: Vec::new(),
+                wrapped: false,
+            }],
+            cursor: Cursor::default(),
+            modes: Modes::default(),
+            title: "stale".into(),
+            cwd: None,
+            foreground: None,
+            shell_marks: None,
+            program_status: None,
+            alt_screen: false,
+            scrollback_len: 0,
+            scrollback_bytes: 0,
+        }));
+        coalescer.add(Arc::clone(&stale));
+        // A newer snapshot (seq 13) was written directly by send_session_state.
+        coalescer.seed(1, 13);
+        coalescer.add(delta(1, 14, 0));
+        {
+            let mut writer = FrameWriter::new(&mut tx);
+            coalescer.flush(&mut writer).await.unwrap();
+        }
+        let mut reader = stitch_mux_protocol::FrameReader::new(&mut rx);
+        let frame = reader.recv_frame().await.unwrap();
+        let delta: PaneDelta = stitch_mux_protocol::decode_message(&frame).unwrap();
+        assert_eq!(delta.seq, 14, "the stale snapshot must be dropped");
     }
 
     #[tokio::test]

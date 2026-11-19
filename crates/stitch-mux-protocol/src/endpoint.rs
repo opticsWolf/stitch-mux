@@ -94,6 +94,14 @@ async fn bind_unix(path: &PathBuf) -> Result<Listener, EndpointError> {
             .mode(0o700)
             .create(parent)
             .await?;
+        // A directory owned by another user can be replaced between our bind
+        // and a client connect, which would redirect the socket. The default
+        // runtime directory is created by us; an explicit path in a shared,
+        // root-owned directory (for example /tmp) is still allowed.
+        let meta = std::fs::metadata(parent)?;
+        if !directory_owner_is_trusted(meta.uid(), unsafe { libc::geteuid() }) {
+            return Err(EndpointError::NotOwner);
+        }
     }
     if path.exists() {
         if tokio::net::UnixStream::connect(path).await.is_ok() {
@@ -110,6 +118,11 @@ async fn bind_unix(path: &PathBuf) -> Result<Listener, EndpointError> {
     Ok(Listener {
         inner: ListenerInner::Unix(listener),
     })
+}
+
+#[cfg(unix)]
+fn directory_owner_is_trusted(owner_uid: u32, effective_uid: u32) -> bool {
+    owner_uid == effective_uid || owner_uid == 0
 }
 
 #[cfg(unix)]
@@ -315,6 +328,14 @@ mod tests {
             Endpoint::from_override(r"\\.\pipe\custom"),
             Endpoint::Windows(_)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_endpoint_directory_must_not_be_owned_by_another_user() {
+        assert!(directory_owner_is_trusted(1000, 1000));
+        assert!(directory_owner_is_trusted(0, 1000), "/tmp is root-owned");
+        assert!(!directory_owner_is_trusted(1001, 1000));
     }
 
     #[cfg(unix)]

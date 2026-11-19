@@ -1,6 +1,7 @@
 use crate::geometry::{Rect, Size};
 use crate::ids::PaneId;
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -21,7 +22,12 @@ pub enum PanePlacement {
     Detached,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// Maximum accepted split nesting. A tiled layout never needs more than a few
+/// dozen levels; the cap exists because decoding is recursive and a hostile
+/// `SetLayout` frame could otherwise overflow a 2 MiB runtime thread stack.
+pub const MAX_LAYOUT_DEPTH: u32 = 256;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutNode {
     Leaf {
@@ -33,6 +39,71 @@ pub enum LayoutNode {
         first: Box<LayoutNode>,
         second: Box<LayoutNode>,
     },
+}
+
+thread_local! {
+    static LAYOUT_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+struct DepthGuard;
+
+impl DepthGuard {
+    fn enter<E: serde::de::Error>() -> Result<Self, E> {
+        LAYOUT_DEPTH.with(|cell| {
+            let depth = cell.get();
+            if depth >= MAX_LAYOUT_DEPTH {
+                return Err(E::custom("layout tree is nested too deeply"));
+            }
+            cell.set(depth + 1);
+            Ok(Self)
+        })
+    }
+}
+
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        LAYOUT_DEPTH.with(|cell| cell.set(cell.get().saturating_sub(1)));
+    }
+}
+
+impl<'de> Deserialize<'de> for LayoutNode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // The nested `Box<LayoutNode>` fields re-enter this impl, so the guard
+        // counts the whole tree and fails before the recursion gets deep.
+        let _guard = DepthGuard::enter::<D::Error>()?;
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Repr {
+            Leaf {
+                pane_id: u64,
+            },
+            Split {
+                axis: SplitAxis,
+                ratio_bps: u16,
+                first: Box<LayoutNode>,
+                second: Box<LayoutNode>,
+            },
+        }
+
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Leaf { pane_id } => Self::Leaf { pane_id },
+            Repr::Split {
+                axis,
+                ratio_bps,
+                first,
+                second,
+            } => Self::Split {
+                axis,
+                ratio_bps,
+                first,
+                second,
+            },
+        })
+    }
 }
 
 impl LayoutNode {
@@ -459,6 +530,39 @@ mod tests {
         );
         let single = LayoutNode::leaf(PaneId::new(1));
         assert_eq!(close_leaf(&single, PaneId::new(1)).unwrap(), None);
+    }
+
+    #[test]
+    fn layouts_deeper_than_the_limit_are_rejected() {
+        let mut node = LayoutNode::leaf(PaneId::new(1));
+        for depth in 0..(MAX_LAYOUT_DEPTH as u64 + 8) {
+            node = LayoutNode::split(
+                SplitAxis::Rows,
+                5000,
+                node,
+                LayoutNode::leaf(PaneId::new(depth + 2)),
+            );
+        }
+        let encoded = rmp_serde::to_vec(&node).expect("encode");
+        let decoded = rmp_serde::from_slice::<LayoutNode>(&encoded);
+        let err = decoded.expect_err("a deep tree must not decode");
+        assert!(
+            err.to_string().contains("nested too deeply"),
+            "unexpected error: {err}"
+        );
+
+        let mut shallow = LayoutNode::leaf(PaneId::new(1));
+        for depth in 0..8_u64 {
+            shallow = LayoutNode::split(
+                SplitAxis::Columns,
+                5000,
+                shallow,
+                LayoutNode::leaf(PaneId::new(depth + 2)),
+            );
+        }
+        let encoded = rmp_serde::to_vec(&shallow).expect("encode");
+        let round_trip: LayoutNode = rmp_serde::from_slice(&encoded).expect("decode");
+        assert_eq!(round_trip, shallow);
     }
 
     #[test]

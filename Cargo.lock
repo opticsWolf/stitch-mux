@@ -3382,6 +3382,7 @@ dependencies = [
 name = "stitch-mux-core"
 version = "0.1.0-dev"
 dependencies = [
+ "rmp-serde",
  "serde",
 ]
 

@@ -126,14 +126,14 @@ impl SessionView {
     }
 
     pub fn apply_layout(&mut self, layout: Layout) {
-        if layout.revision + 1 < self.layout_revision && self.layout.is_some() {
+        if layout.revision.saturating_add(1) < self.layout_revision && self.layout.is_some() {
             self.needs_resync = true;
             return;
         }
         if layout.revision < self.layout_revision {
             return; // older layout; keep the newer authoritative geometry
         }
-        if layout.revision > self.layout_revision + 1 && self.layout.is_some() {
+        if layout.revision > self.layout_revision.saturating_add(1) && self.layout.is_some() {
             self.needs_resync = true;
         }
         self.layout_revision = layout.revision;

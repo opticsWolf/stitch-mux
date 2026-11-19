@@ -33,6 +33,10 @@ pub use session::{Session, SessionError, SessionRegistry};
 
 type Writer = FrameWriter<tokio::io::WriteHalf<Stream>>;
 
+/// Decoded frames waiting for the connection's event loop. Bounded so a
+/// pipelining client cannot make the daemon buffer arbitrary payloads.
+const INCOMING_FRAMES: usize = 16;
+
 #[derive(Debug, Error)]
 pub enum ServerError {
     #[error(transparent)]
@@ -351,18 +355,21 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
         .await?;
 
     let (reader, mut writer) = connection.split();
-    let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Result<Frame, FrameError>>();
+    // Bounded: a client can pipeline frames, and an unbounded queue would hold
+    // every decoded payload in memory. Awaiting here stops reading the socket,
+    // which is the backpressure the bounded queue is meant to apply.
+    let (frame_tx, mut frame_rx) = mpsc::channel::<Result<Frame, FrameError>>(INCOMING_FRAMES);
     let reader_task = tokio::spawn(async move {
         let mut reader = reader;
         loop {
             match reader.recv_frame().await {
                 Ok(frame) => {
-                    if frame_tx.send(Ok(frame)).is_err() {
+                    if frame_tx.send(Ok(frame)).await.is_err() {
                         break;
                     }
                 }
                 Err(err) => {
-                    let _ = frame_tx.send(Err(err));
+                    let _ = frame_tx.send(Err(err)).await;
                     break;
                 }
             }

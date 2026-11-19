@@ -172,15 +172,44 @@ const KEYBOARD_FLAGS: KeyboardEnhancementFlags =
         .union(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
         .union(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS);
 
-fn restore_terminal(stdout: &mut io::Stdout) {
+fn restore_terminal(out: &mut impl io::Write) {
     let _ = execute!(
-        stdout,
+        out,
         PopKeyboardEnhancementFlags,
         DisableBracketedPaste,
         LeaveAlternateScreen,
         crossterm::cursor::Show
     );
     let _ = crossterm::terminal::disable_raw_mode();
+}
+
+/// Restores the host terminal when the process unwinds.
+///
+/// A panic in the attach loop used to leave the terminal in raw mode and on the
+/// alternate screen, which hides the panic message and breaks the shell. The
+/// guard restores on every exit path, including unwinding.
+struct TerminalGuard<W: io::Write> {
+    out: W,
+    armed: bool,
+}
+
+impl<W: io::Write> TerminalGuard<W> {
+    fn new(out: W) -> Self {
+        Self { out, armed: true }
+    }
+
+    fn restore(&mut self) {
+        if self.armed {
+            restore_terminal(&mut self.out);
+            self.armed = false;
+        }
+    }
+}
+
+impl<W: io::Write> Drop for TerminalGuard<W> {
+    fn drop(&mut self) {
+        self.restore();
+    }
 }
 
 /// Attach a real terminal to a named session and run until detach or loss.
@@ -201,8 +230,9 @@ pub async fn run(endpoint: Endpoint, session_name: &str) -> Result<(), TerminalE
     // and the daemon still encodes keys for the focused pane.
     let _ = execute!(stdout, PushKeyboardEnhancementFlags(KEYBOARD_FLAGS));
 
-    let result = run_attached(&endpoint, session_name, hello(cols, rows), &mut stdout).await;
-    restore_terminal(&mut stdout);
+    let mut guard = TerminalGuard::new(stdout);
+    let result = run_attached(&endpoint, session_name, hello(cols, rows), &mut guard.out).await;
+    guard.restore();
     match result {
         Ok(detached) => {
             if detached {
