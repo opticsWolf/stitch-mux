@@ -11,7 +11,8 @@ use stitch_mux_protocol::{
 };
 
 fn test_endpoint() -> (Endpoint, Option<PathBuf>) {
-    let unique = format!("stitch-mux-backpressure-{}-{}", std::process::id(), nanos());
+    // macOS caps Unix socket paths at SUN_LEN; keep the temp filename short.
+    let unique = format!("m3bp{}", nanos() % 1_000_000_000);
     if cfg!(windows) {
         (Endpoint::from_override(&unique), None)
     } else {
@@ -114,28 +115,25 @@ async fn stalled_client_is_disconnected_with_busy_and_cannot_block_other_clients
     // Deliberately do not read from `stalled`: its socket buffer and the
     // daemon's bounded update queue will fill under the child's output.
 
-    // Ten megabytes of echoed input is enough to exceed any local socket or
-    // pipe buffer while the stalled client refuses to read.
     // Short lines matter: canonical mode on macOS stops echoing a line once
-    // its line-length limit is hit, so the flood must include newlines.
-    let flood = format!(
-        "{}
-",
-        "a".repeat(80)
-    )
-    .repeat(11_000);
-    for _ in 0..10 {
-        let sent = stitch_mux_client::command(
-            &endpoint,
-            Command::SendText {
-                pane_id,
-                text: flood.clone(),
-            },
-        )
-        .await
-        .expect("flood response");
-        assert!(sent.ok, "{:?}", sent.error);
+    // its line-length limit is hit, so the flood must include newlines. Each
+    // round writes about 9 MB; extra rounds cover slower CI socket buffers.
+    let flood = format!("{}\n", "a".repeat(80)).repeat(11_000);
+    async fn flood_pane(endpoint: &Endpoint, pane_id: u64, flood: &str) {
+        for _ in 0..10 {
+            let sent = stitch_mux_client::command(
+                endpoint,
+                Command::SendText {
+                    pane_id,
+                    text: flood.to_owned(),
+                },
+            )
+            .await
+            .expect("flood response");
+            assert!(sent.ok, "{:?}", sent.error);
+        }
     }
+    flood_pane(&endpoint, pane_id, &flood).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     wait_for("healthy client keeps draining", &healthy, |view| {
         view.pane(pane_id)
@@ -146,19 +144,27 @@ async fn stalled_client_is_disconnected_with_busy_and_cannot_block_other_clients
     assert_eq!(healthy.view().connection, ConnectionState::Connected);
 
     let mut busy: Option<ErrorInfo> = None;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_secs(3), stalled.recv_frame()).await {
-            Ok(Ok(frame)) => {
-                if frame.kind == MessageKind::Error
-                    && let Ok(error) = decode_message::<ErrorInfo>(&frame)
-                {
-                    busy = Some(error);
-                    break;
+    for round in 0..3 {
+        if round > 0 {
+            flood_pane(&endpoint, pane_id, &flood).await;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(500), stalled.recv_frame()).await {
+                Ok(Ok(frame)) => {
+                    if frame.kind == MessageKind::Error
+                        && let Ok(error) = decode_message::<ErrorInfo>(&frame)
+                    {
+                        busy = Some(error);
+                        break;
+                    }
                 }
+                Ok(Err(_)) => break,
+                Err(_) => {}
             }
-            Ok(Err(_)) => break,
-            Err(_) => break,
+        }
+        if busy.is_some() {
+            break;
         }
     }
     let busy = busy.expect("slow client receives a typed Busy error");

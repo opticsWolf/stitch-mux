@@ -10,11 +10,8 @@ use stitch_mux_protocol::{
 };
 
 fn test_endpoint(label: &str) -> (Endpoint, Option<PathBuf>) {
-    let unique = format!(
-        "stitch-mux-clients-{label}-{}-{}",
-        std::process::id(),
-        nanos()
-    );
+    // macOS caps Unix socket paths at SUN_LEN; keep the temp filename short.
+    let unique = format!("m3{label}{}", nanos() % 1_000_000_000);
     if cfg!(windows) {
         (Endpoint::from_override(&unique), None)
     } else {
