@@ -169,20 +169,31 @@ async fn viewport_follows_scrolling_output() {
     })
     .await;
 
-    let rows = viewport(&session.view(), pane_id);
-    let visible: Vec<String> = rows
-        .iter()
-        .map(|line| line.trim_end().to_owned())
-        .filter(|line| !line.is_empty())
-        .collect();
-    let expected = authoritative_lines(&endpoint, pane_id).await;
-    let tail = &expected[expected
-        .len()
-        .saturating_sub(visible.len().min(expected.len()))..];
-    assert_eq!(
-        &visible[visible.len().saturating_sub(tail.len())..],
-        tail,
-        "client viewport:\n{visible:#?}\nauthoritative tail:\n{tail:#?}"
+    // The child is still writing when the last row appears, so compare until
+    // the client viewport settles on the daemon's tail. A viewport that drifts
+    // (the pre-fix behaviour) never settles.
+    let mut last_view = Vec::new();
+    let mut last_expected = Vec::new();
+    let mut matched = false;
+    for _ in 0..200 {
+        last_view = viewport(&session.view(), pane_id)
+            .iter()
+            .map(|line| line.trim_end().to_owned())
+            .filter(|line| !line.is_empty())
+            .collect();
+        last_expected = authoritative_lines(&endpoint, pane_id).await;
+        let tail = &last_expected[last_expected
+            .len()
+            .saturating_sub(last_view.len().min(last_expected.len()))..];
+        if last_view[last_view.len().saturating_sub(tail.len())..] == *tail {
+            matched = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        matched,
+        "client viewport:\n{last_view:#?}\nauthoritative tail:\n{last_expected:#?}"
     );
 
     session.detach().await;
