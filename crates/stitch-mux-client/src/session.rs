@@ -249,13 +249,15 @@ impl ClientSession {
         self.offer(outbound);
     }
 
-    fn offer(&self, outbound: Outbound) {
+    /// Returns `true` when the frame was queued.
+    fn offer(&self, outbound: Outbound) -> bool {
         match self.outbound_tx.try_send(outbound) {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.dropped_outbound.fetch_add(1, Ordering::Relaxed);
+                false
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
         }
     }
 
@@ -265,8 +267,14 @@ impl ClientSession {
     }
 
     /// Ask the daemon to detach, then wait for the actor to finish.
+    ///
+    /// If the outbound queue is full the detach frame cannot be queued; aborting
+    /// the actor closes the socket instead, which the daemon treats the same
+    /// way. Either path terminates, so `detach` never waits forever.
     pub async fn detach(self) {
-        self.offer(Outbound::Detach);
+        if !self.offer(Outbound::Detach) {
+            self.task.abort();
+        }
         let _ = self.task.await;
     }
 }
