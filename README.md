@@ -147,9 +147,11 @@ cargo run -p stitch-mux -- kill -t work
 
 On Windows use `cmd.exe` instead of `sh`. `stitch-mux gui -s demo` skips the
 picker. In the GUI, click a pane to focus it, use `Ctrl+Arrow` to move focus,
-drag a splitter to change its ratio, and use the status bar to split, close,
-zoom, and detach. The egui adapter is a disposable reference; the protocol and
-client state are toolkit-neutral.
+drag a splitter to change its ratio, and use each pane's title bar for
+left/right (`LR`), top/bottom (`TB`), close (`X`), and zoom (`Z`/`U`). The top
+status bar shows session size, revision, clients, activity, and bell state;
+`Detach` leaves the session alive. The egui adapter is a disposable reference;
+the protocol and client state are toolkit-neutral.
 
 The terminal view can be open at the same time as the GUI. It enters the
 alternate screen and restores it on detach. `Ctrl-]` is the local prefix:

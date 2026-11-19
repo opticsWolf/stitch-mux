@@ -209,6 +209,7 @@ Before marking a task Ready for review:
 | 2026-11-19 | Qt receives batched view signals from a polling QThread | Per-cell callbacks would flood the Qt event loop | `ViewSignaler` emits one dict per 33 ms tick, and `CellCanvas` paints style runs from that snapshot; IME/key/mouse map to the shared client API |
 | 2026-11-19 | GPUI stays a boundary-only feature spike | GPUI 0.2.x is pre-1.0 and must not block v0.1 | `from_view(&SessionView)` proves no protocol changes; the real dependency is gated in `docs/GPUI-SPIKE.md` |
 | 2026-11-19 | Python tests run through maturin instead of the Rust test harness | The PyO3 harness needs a linkable Python DLL on Windows | `test = false` for the PyO3 crate; offscreen Qt and real-daemon SDK tests run under pytest in CI |
+| 2026-11-19 | The egui reference uses one stable keyboard focus id and absolute pane actions | Clicking a pane used to leave keyboard focus on a different widget, and the global split buttons obscured axis semantics | Pane clicks request `INPUT_FOCUS`; title bars carry explicit left/right and top/bottom split, close, and zoom actions; the status line owns session/activity state; splitter drags commit once on release with the drag-start revision |
 
 ## 9. Current status
 

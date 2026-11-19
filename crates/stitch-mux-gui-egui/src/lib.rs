@@ -71,6 +71,10 @@ struct MuxApp {
     next_retry: Option<Instant>,
     /// Last session the daemon lost, shown in the picker until reattached.
     lost_session: Option<String>,
+    /// Layout revision captured when a splitter drag begins. Sending the
+    /// stale revision on every mouse frame would make the daemon reject all
+    /// but the first resize.
+    split_drag: Option<(u64, LayoutNode)>,
 }
 
 impl MuxApp {
@@ -96,6 +100,7 @@ impl MuxApp {
             retry_backoff: INITIAL_RETRY,
             next_retry: None,
             lost_session: None,
+            split_drag: None,
         };
         if !selected.is_empty() {
             app.attach(&selected);
@@ -248,22 +253,56 @@ impl eframe::App for MuxApp {
             }));
         }
 
+        let detach = self.status_ui(ui, &view);
+        let area = ui.available_rect_before_wrap();
         let grid = egui::Rect::from_min_size(
-            ui.available_rect_before_wrap().min,
-            egui::vec2(available.x, (available.y - STATUS_H).max(CELL_H)),
+            area.min,
+            egui::vec2(area.width(), (area.height() - STATUS_H).max(CELL_H)),
         );
         let actions = draw_panes(ui, &view, grid);
-        for pane_id in actions.focus {
-            self.send(Outbound::Focus(pane_id));
+        for action in actions.panes {
+            match action {
+                PaneAction::Focus(pane_id) => self.send(Outbound::Focus(pane_id)),
+                PaneAction::Split { pane_id, axis } => {
+                    self.send_command(Command::SplitPane {
+                        pane_id,
+                        axis,
+                        ratio_bps: 5000,
+                    });
+                }
+                PaneAction::Close(pane_id) => {
+                    self.send_command(Command::ClosePane { pane_id });
+                }
+                PaneAction::Zoom { pane_id, unzoom } => {
+                    self.send_command(Command::ZoomPane {
+                        session: view.name.clone(),
+                        pane_id: unzoom.then_some(pane_id),
+                    });
+                }
+            }
         }
-        for (_, root) in actions.ratios {
-            self.send_command(Command::SetLayout {
-                base_revision: view.layout_revision,
-                root,
-            });
+        if let Some(drag) = actions.drag {
+            if drag.started {
+                self.split_drag = Some((view.layout_revision, drag.node.clone()));
+            }
+            if drag.stopped {
+                let base_revision = self
+                    .split_drag
+                    .as_ref()
+                    .map(|(revision, _)| *revision)
+                    .unwrap_or(view.layout_revision);
+                self.send_command(Command::SetLayout {
+                    base_revision,
+                    root: set_ratio(&drag.node, &drag.node, drag.ratio_bps),
+                });
+                self.split_drag = None;
+            }
         }
-        self.status_ui(ui, &view);
-        handle_input(ui, self.client.as_ref());
+        if detach && let Some(client) = self.client.take() {
+            self.view_rx = None;
+            self.handle.spawn(async move { client.detach().await });
+        }
+        handle_input(ui, self.client.as_ref(), grid);
     }
 
     fn on_exit(&mut self) {
@@ -336,90 +375,64 @@ impl MuxApp {
         }
     }
 
-    fn status_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) {
+    /// Paint session information in a status bar above the pane grid.
+    fn status_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) -> bool {
+        let mut detach = false;
         ui.horizontal(|ui| {
-            ui.label(format!("session: {}", view.name));
-            ui.label(format!("{:?}", view.connection));
-            ui.label(format!(
-                "{}x{} r{}",
-                view.size.cols, view.size.rows, view.layout_revision
-            ));
-            ui.label(format!(
-                "clients: {}  working: {}  bell: {}",
-                view.attached_clients,
-                view.activity.working,
-                view.panes.values().any(|pane| pane.bell)
-            ));
-            if view.needs_resync {
-                ui.colored_label(egui::Color32::YELLOW, "resyncing…");
-                self.send(Outbound::Resync);
-            }
+            let color = if view.needs_resync {
+                egui::Color32::YELLOW
+            } else if view.error.is_some() {
+                egui::Color32::RED
+            } else {
+                egui::Color32::LIGHT_GRAY
+            };
+            ui.colored_label(color, status_text(view));
             if let Some(error) = &view.error {
                 ui.colored_label(egui::Color32::RED, &error.message);
             }
             if let Some(exit) = &view.exit {
                 ui.label(format!("child: {}", exit.reason));
             }
-
-            let focused = view.focus;
-            if ui.button("Split |").clicked()
-                && let Some(pane_id) = focused
-            {
-                self.send_command(Command::SplitPane {
-                    pane_id,
-                    axis: SplitAxis::Columns,
-                    ratio_bps: 5000,
-                });
+            if view.needs_resync {
+                self.send(Outbound::Resync);
             }
-            if ui.button("Split —").clicked()
-                && let Some(pane_id) = focused
-            {
-                self.send_command(Command::SplitPane {
-                    pane_id,
-                    axis: SplitAxis::Rows,
-                    ratio_bps: 5000,
-                });
-            }
-            if ui.button("Close").clicked()
-                && let Some(pane_id) = focused
-            {
-                self.send_command(Command::ClosePane { pane_id });
-            }
-            let zoomed = view
-                .layout
-                .as_ref()
-                .is_some_and(|layout| matches!(layout.root, LayoutNode::Leaf { .. }));
-            if ui.button(if zoomed { "Unzoom" } else { "Zoom" }).clicked() {
-                self.send_command(Command::ZoomPane {
-                    session: view.name.clone(),
-                    pane_id: if zoomed { None } else { focused },
-                });
-            }
-            if ui.button("Detach").clicked()
-                && let Some(client) = self.client.take()
-            {
-                self.view_rx = None;
-                self.handle.spawn(async move { client.detach().await });
-            }
+            detach = ui.button("Detach").clicked();
         });
+        ui.separator();
+        detach
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PaneAction {
+    Focus(u64),
+    Split { pane_id: u64, axis: SplitAxis },
+    Close(u64),
+    Zoom { pane_id: u64, unzoom: bool },
+}
+
+struct SplitDrag {
+    started: bool,
+    stopped: bool,
+    node: LayoutNode,
+    ratio_bps: u16,
+}
+
 struct DrawActions {
-    focus: Vec<u64>,
-    ratios: Vec<(u16, LayoutNode)>,
+    panes: Vec<PaneAction>,
+    drag: Option<SplitDrag>,
 }
 
 fn draw_panes(ui: &mut egui::Ui, view: &SessionView, grid: egui::Rect) -> DrawActions {
     let mut actions = DrawActions {
-        focus: Vec::new(),
-        ratios: Vec::new(),
+        panes: Vec::new(),
+        drag: None,
     };
-    let painter = ui.painter();
-    painter.rect_filled(grid, 0.0, egui::Color32::from_gray(12));
+    ui.painter()
+        .rect_filled(grid, 0.0, egui::Color32::from_gray(12));
 
     let Some(layout) = view.layout.as_ref() else {
-        painter.text(
+        ui.painter().text(
             grid.center(),
             egui::Align2::CENTER_CENTER,
             "waiting for layout…",
@@ -432,30 +445,126 @@ fn draw_panes(ui: &mut egui::Ui, view: &SessionView, grid: egui::Rect) -> DrawAc
     let rows = layout.rows.max(1);
     let cell_w = grid.width() / f32::from(cols);
     let cell_h = grid.height() / f32::from(rows);
+    let zoomed_pane = match layout.root {
+        LayoutNode::Leaf { pane_id } => Some(pane_id),
+        LayoutNode::Split { .. } => None,
+    };
 
-    let mut click_commands = Vec::new();
     for geometry in &layout.panes {
+        let pane_id = geometry.pane_id;
         let outer = cell_rect(grid, geometry.outer, cell_w, cell_h);
-        let focused = view.focus == Some(geometry.pane_id);
+        let focused = view.focus == Some(pane_id);
         let border = if focused {
             egui::Color32::from_rgb(96, 165, 250)
         } else {
             egui::Color32::from_gray(60)
         };
-        painter.rect_filled(outer, 0.0, egui::Color32::from_gray(16));
-        painter.rect_stroke(
+        ui.painter()
+            .rect_filled(outer, 0.0, egui::Color32::from_gray(16));
+        ui.painter().rect_stroke(
             outer.shrink(BORDER_PX / 2.0),
             0.0,
             egui::Stroke::new(BORDER_PX, border),
             egui::StrokeKind::Inside,
         );
-        painter.text(
-            outer.min + egui::vec2(4.0, 1.0),
+
+        // Title bar lives in the pane's border row, so it never covers PTY
+        // content. Buttons are real egui interactions, not painted labels.
+        let title_rect = egui::Rect::from_min_size(
+            outer.min + egui::vec2(BORDER_PX, BORDER_PX),
+            egui::vec2(
+                (outer.width() - 2.0 * BORDER_PX).max(0.0),
+                (cell_h - BORDER_PX).max(8.0),
+            ),
+        );
+        ui.painter().rect_filled(
+            title_rect,
+            0.0,
+            if focused {
+                egui::Color32::from_rgb(32, 54, 82)
+            } else {
+                egui::Color32::from_gray(28)
+            },
+        );
+        let button_w = 18.0;
+        let button_h = title_rect.height().max(12.0);
+        let button_y = title_rect.max.y - button_h;
+        let mut buttons: Vec<(&str, PaneAction)> = Vec::new();
+        buttons.push(("X", PaneAction::Close(pane_id)));
+        buttons.push((
+            if zoomed_pane == Some(pane_id) {
+                "U"
+            } else {
+                "Z"
+            },
+            PaneAction::Zoom {
+                pane_id,
+                unzoom: zoomed_pane == Some(pane_id),
+            },
+        ));
+        buttons.push((
+            "TB",
+            PaneAction::Split {
+                pane_id,
+                axis: SplitAxis::Rows,
+            },
+        ));
+        buttons.push((
+            "LR",
+            PaneAction::Split {
+                pane_id,
+                axis: SplitAxis::Columns,
+            },
+        ));
+        let click_pos = ui.input(|input| {
+            input
+                .pointer
+                .button_clicked(egui::PointerButton::Primary)
+                .then(|| input.pointer.latest_pos())
+                .flatten()
+        });
+        let mut button_clicked = false;
+        let mut button_x = title_rect.max.x;
+        for (label, action) in buttons {
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(button_x - button_w, button_y),
+                egui::vec2(button_w, button_h),
+            );
+            let hovered = click_pos.is_some_and(|pos| rect.contains(pos));
+            ui.painter().rect_filled(
+                rect,
+                2.0,
+                if hovered {
+                    egui::Color32::from_rgb(70, 90, 120)
+                } else {
+                    egui::Color32::from_gray(50)
+                },
+            );
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(9.0),
+                egui::Color32::WHITE,
+            );
+            if hovered && click_pos.is_some() && !button_clicked {
+                actions.panes.push(action);
+                button_clicked = true;
+            }
+            button_x -= button_w;
+        }
+        let title_width = (button_x - title_rect.min.x - 4.0).max(0.0);
+        let title: String = format!("{} ({})", geometry.title, pane_id)
+            .chars()
+            .take((title_width / 6.0) as usize)
+            .collect();
+        ui.painter().text(
+            title_rect.min + egui::vec2(3.0, 0.0),
             egui::Align2::LEFT_TOP,
-            &geometry.title,
+            title,
             egui::FontId::proportional(11.0),
             if focused {
-                egui::Color32::from_rgb(160, 210, 255)
+                egui::Color32::from_rgb(180, 220, 255)
             } else {
                 egui::Color32::GRAY
             },
@@ -463,17 +572,15 @@ fn draw_panes(ui: &mut egui::Ui, view: &SessionView, grid: egui::Rect) -> DrawAc
 
         let response = ui.interact(
             outer,
-            egui::Id::unique(format!("stitch-mux-pane-{}", geometry.pane_id)),
+            egui::Id::unique(("pane", pane_id)),
             egui::Sense::click(),
         );
-        if response.clicked() {
-            click_commands.push(geometry.pane_id);
+        if response.clicked() && !button_clicked {
+            actions.panes.push(PaneAction::Focus(pane_id));
+            ui.memory_mut(|memory| memory.request_focus(input_focus()));
         }
 
-        let Some(snapshot) = view
-            .pane(geometry.pane_id)
-            .and_then(|pane| pane.snapshot.as_ref())
-        else {
+        let Some(snapshot) = view.pane(pane_id).and_then(|pane| pane.snapshot.as_ref()) else {
             continue;
         };
         let content = cell_rect(grid, geometry.content, cell_w, cell_h);
@@ -492,7 +599,7 @@ fn draw_panes(ui: &mut egui::Ui, view: &SessionView, grid: egui::Rect) -> DrawAc
             let origin = content.min + egui::vec2(0.0, y as f32 * cell_h);
             let max_chars = usize::from(geometry.content.cols);
             let shown: String = line.chars().take(max_chars).collect();
-            painter.text(
+            ui.painter().text(
                 origin,
                 egui::Align2::LEFT_TOP,
                 shown,
@@ -509,15 +616,14 @@ fn draw_panes(ui: &mut egui::Ui, view: &SessionView, grid: egui::Rect) -> DrawAc
                     ),
                 egui::vec2(cell_w, cell_h),
             );
-            painter.rect_filled(
+            ui.painter().rect_filled(
                 cursor_rect,
                 0.0,
                 egui::Color32::from_rgba_unmultiplied(120, 180, 255, 90),
             );
         }
     }
-    actions.focus = click_commands;
-    actions.ratios = draw_splitters(ui, layout, grid, cell_w, cell_h);
+    actions.drag = draw_splitters(ui, layout, grid, cell_w, cell_h);
     actions
 }
 
@@ -527,8 +633,7 @@ fn draw_splitters(
     grid: egui::Rect,
     cell_w: f32,
     cell_h: f32,
-) -> Vec<(u16, LayoutNode)> {
-    let mut ratios = Vec::new();
+) -> Option<SplitDrag> {
     let mut splits = Vec::new();
     collect_splits(
         &layout.root,
@@ -538,10 +643,11 @@ fn draw_splitters(
         cell_h,
         &mut splits,
     );
-    for (index, (axis, strip, node)) in splits.into_iter().enumerate() {
+    let mut drag = None;
+    for (index, (axis, strip, union, node)) in splits.into_iter().enumerate() {
         let response = ui.interact(
             strip,
-            egui::Id::unique(format!("stitch-mux-split-{index}")),
+            egui::Id::unique(("stitch-mux-split", index)),
             egui::Sense::drag(),
         );
         if response.hovered() || response.dragged() {
@@ -551,18 +657,22 @@ fn draw_splitters(
                 egui::Color32::from_rgba_unmultiplied(96, 165, 250, 140),
             );
         }
-        if response.dragged()
+        if (response.dragged() || response.drag_stopped())
             && let Some(pos) = ui.input(|input| input.pointer.latest_pos())
         {
             let ratio = match axis {
-                SplitAxis::Columns => (pos.x - strip.min.x) / strip.width().max(1.0),
-                SplitAxis::Rows => (pos.y - strip.min.y) / strip.height().max(1.0),
+                SplitAxis::Columns => (pos.x - union.min.x) / union.width().max(1.0),
+                SplitAxis::Rows => (pos.y - union.min.y) / union.height().max(1.0),
             };
-            let ratio_bps = (ratio.clamp(0.01, 0.99) * 10_000.0) as u16;
-            ratios.push((ratio_bps, set_ratio(&layout.root, &node, ratio_bps)));
+            drag = Some(SplitDrag {
+                started: response.drag_started(),
+                stopped: response.drag_stopped(),
+                node: node.clone(),
+                ratio_bps: (ratio.clamp(0.01, 0.99) * 10_000.0) as u16,
+            });
         }
     }
-    ratios
+    drag
 }
 
 fn collect_splits(
@@ -571,7 +681,7 @@ fn collect_splits(
     grid: egui::Rect,
     cell_w: f32,
     cell_h: f32,
-    out: &mut Vec<(SplitAxis, egui::Rect, LayoutNode)>,
+    out: &mut Vec<(SplitAxis, egui::Rect, egui::Rect, LayoutNode)>,
 ) {
     let LayoutNode::Split {
         axis,
@@ -596,7 +706,7 @@ fn collect_splits(
                 egui::vec2(union.width(), 4.0),
             ),
         };
-        out.push((*axis, strip, node.clone()));
+        out.push((*axis, strip, union, node.clone()));
     }
     collect_splits(first, geometries, grid, cell_w, cell_h, out);
     collect_splits(second, geometries, grid, cell_w, cell_h, out);
@@ -654,6 +764,25 @@ fn cell_rect(grid: egui::Rect, cell: Rect, cell_w: f32, cell_h: f32) -> egui::Re
         grid.min + egui::vec2(f32::from(cell.x) * cell_w, f32::from(cell.y) * cell_h),
         egui::vec2(f32::from(cell.cols) * cell_w, f32::from(cell.rows) * cell_h),
     )
+}
+
+fn status_text(view: &SessionView) -> String {
+    let bell = view.panes.values().any(|pane| pane.bell);
+    format!(
+        "session: {} {:?} {}x{} r{} clients: {}  working: {}  bell: {}",
+        view.name,
+        view.connection,
+        view.size.cols,
+        view.size.rows,
+        view.layout_revision,
+        view.attached_clients,
+        view.activity.working,
+        bell
+    )
+}
+
+fn input_focus() -> egui::Id {
+    egui::Id::unique("stitch-mux-pane-input")
 }
 
 fn next_backoff(current: Duration) -> Duration {
@@ -714,20 +843,20 @@ fn color32(color: Color) -> egui::Color32 {
     }
 }
 
-fn handle_input(ui: &mut egui::Ui, client: Option<&ClientSession>) {
+fn handle_input(ui: &mut egui::Ui, client: Option<&ClientSession>, grid: egui::Rect) {
     let Some(client) = client else {
         return;
     };
-    let events = ui.input(|input| input.events.clone());
-    let has_focus = ui.memory(|memory| memory.has_focus(egui::Id::unique("stitch-mux-pane")));
-    if !has_focus {
-        ui.memory_mut(|memory| memory.request_focus(egui::Id::unique("stitch-mux-pane")));
+    // One focus id owns keyboard input for every pane. Pane clicks request it
+    // explicitly; never pull focus away from title-bar buttons.
+    ui.interact(grid, input_focus(), egui::Sense::focusable_noninteractive());
+    let focused = ui.memory(|memory| memory.focused());
+    if focused.is_none() {
+        ui.memory_mut(|memory| memory.request_focus(input_focus()));
+    } else if focused != Some(input_focus()) {
+        return;
     }
-    ui.interact(
-        ui.available_rect_before_wrap(),
-        egui::Id::unique("stitch-mux-pane"),
-        egui::Sense::click(),
-    );
+    let events = ui.input(|input| input.events.clone());
 
     for event in events {
         match event {
@@ -894,5 +1023,47 @@ mod tests {
         assert_eq!(age_label_at(180_000, 181_000), "just now");
         assert_eq!(age_label_at(121_000, 181_000), "1m ago");
         assert_eq!(age_label_at(1_000, 181_000), "3m ago");
+    }
+
+    #[test]
+    fn status_text_reports_session_state_in_one_line() {
+        let mut view = SessionView {
+            name: "demo".into(),
+            ..Default::default()
+        };
+        view.size = Size::new(168, 66);
+        view.layout_revision = 307;
+        view.attached_clients = 1;
+        let text = status_text(&view);
+        assert!(text.contains("session: demo"), "{text}");
+        assert!(text.contains("168x66 r307"), "{text}");
+        assert!(text.contains("clients: 1"), "{text}");
+        assert!(text.contains("working: 0"), "{text}");
+        assert!(text.contains("bell: false"), "{text}");
+        assert!(!text.contains('\n'));
+    }
+
+    #[test]
+    fn title_bar_actions_distinguish_both_split_axes() {
+        let left_right = PaneAction::Split {
+            pane_id: 101,
+            axis: SplitAxis::Columns,
+        };
+        let top_bottom = PaneAction::Split {
+            pane_id: 101,
+            axis: SplitAxis::Rows,
+        };
+        assert_ne!(left_right, top_bottom);
+        assert_eq!(PaneAction::Close(101), PaneAction::Close(101));
+        assert_eq!(
+            PaneAction::Zoom {
+                pane_id: 101,
+                unzoom: true
+            },
+            PaneAction::Zoom {
+                pane_id: 101,
+                unzoom: true
+            }
+        );
     }
 }
