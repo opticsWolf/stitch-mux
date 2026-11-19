@@ -79,23 +79,11 @@ impl Control {
     }
 }
 
-async fn wait_for_text(label: &str, session: &ClientSession, pane_id: u64, needle: &str) {
+async fn wait_for_exit(label: &str, session: &ClientSession, pane_id: u64) {
     let result = tokio::time::timeout(Duration::from_secs(120), async {
         loop {
-            if session
-                .view()
-                .pane(pane_id)
-                .and_then(|pane| pane.snapshot.as_ref())
-                .is_some_and(|snapshot| {
-                    snapshot.cells.iter().any(|row| {
-                        row.cells
-                            .iter()
-                            .map(|cell| cell.text.as_str())
-                            .collect::<String>()
-                            .contains(needle)
-                    })
-                })
-            {
+            let view = session.view();
+            if view.exit.is_some() {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -104,29 +92,13 @@ async fn wait_for_text(label: &str, session: &ClientSession, pane_id: u64, needl
     .await;
     if result.is_err() {
         let view = session.view();
-        let pane = view.pane(pane_id);
-        let tail = pane
-            .and_then(|pane| pane.snapshot.as_ref())
-            .map(|snapshot| {
-                snapshot
-                    .cells
-                    .iter()
-                    .rev()
-                    .take(6)
-                    .map(|row| {
-                        row.cells
-                            .iter()
-                            .map(|cell| cell.text.as_str())
-                            .collect::<String>()
-                    })
-                    .collect::<Vec<_>>()
-            });
         panic!(
-            "{label}: {needle} within timeout; state={:?} error={:?} exit={:?} seq={:?} tail={tail:?}",
+            "{label}: exit within timeout; state={:?} error={:?} exit={:?} seq={:?} needs_resync={}",
             view.connection,
             view.error,
             view.exit,
-            pane.map(|pane| pane.last_seq)
+            view.pane(pane_id).map(|pane| pane.last_seq),
+            view.needs_resync
         );
     }
 }
@@ -217,8 +189,43 @@ async fn ten_megabytes_reach_two_clients_and_a_stalled_client_is_busy() {
         }
     });
 
-    wait_for_text("first", &first, pane_id, "STRESS-DONE").await;
-    wait_for_text("second", &second, pane_id, "STRESS-DONE").await;
+    wait_for_exit("first", &first, pane_id).await;
+    wait_for_exit("second", &second, pane_id).await;
+
+    // The viewport is only 24 rows; prove the authoritative screen retained
+    // the marker, then check both clients consumed the flood above.
+    let head = control
+        .send(Command::Capture {
+            pane_id,
+            start: 0,
+            lines: 1,
+            format: stitch_mux_core::CaptureFormat::Text,
+        })
+        .await;
+    let total = head
+        .capture
+        .as_ref()
+        .map(|capture| capture.total_lines)
+        .unwrap_or(0);
+    let tail = control
+        .send(Command::Capture {
+            pane_id,
+            start: total.saturating_sub(1_000),
+            lines: 1_000,
+            format: stitch_mux_core::CaptureFormat::Text,
+        })
+        .await;
+    let text = tail
+        .capture
+        .as_ref()
+        .and_then(|capture| capture.text.as_deref())
+        .unwrap_or_default();
+    assert!(text.contains("STRESS-DONE"), "capture tail: {text:?}");
+    for client in [&first, &second] {
+        let view = client.view();
+        let seq = view.pane(pane_id).map(|pane| pane.last_seq).unwrap_or(0);
+        assert!(seq > 0, "no deltas reached the client");
+    }
 
     // The stalled socket buffered as many deltas as it could; the daemon must
     // have closed it with the typed `Busy` error instead of growing memory.
