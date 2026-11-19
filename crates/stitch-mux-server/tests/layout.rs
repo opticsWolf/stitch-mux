@@ -8,11 +8,7 @@ use stitch_mux_core::{LayoutNode, SplitAxis};
 use stitch_mux_protocol::{Command, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, ViewMode};
 
 fn test_endpoint(label: &str) -> (Endpoint, Option<PathBuf>) {
-    let unique = format!(
-        "stitch-mux-layout-{label}-{}-{}",
-        std::process::id(),
-        nanos()
-    );
+    let unique = format!("m2{label}{}", nanos() % 1_000_000_000);
     if cfg!(windows) {
         (Endpoint::from_override(&unique), None)
     } else {

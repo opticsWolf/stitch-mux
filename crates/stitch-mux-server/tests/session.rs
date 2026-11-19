@@ -10,11 +10,7 @@ use stitch_mux_protocol::{
 };
 
 fn test_endpoint(label: &str) -> (Endpoint, Option<PathBuf>) {
-    let unique = format!(
-        "stitch-mux-session-{label}-{}-{}",
-        std::process::id(),
-        nanos()
-    );
+    let unique = format!("m1s{label}{}", nanos() % 1_000_000_000);
     if cfg!(windows) {
         (Endpoint::from_override(&unique), None)
     } else {

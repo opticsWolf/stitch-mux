@@ -9,11 +9,7 @@ use stitch_mux_protocol::{
 };
 
 fn test_endpoint(label: &str) -> (Endpoint, Option<std::path::PathBuf>) {
-    let unique = format!(
-        "stitch-mux-test-{label}-{}-{}",
-        std::process::id(),
-        unique_suffix()
-    );
+    let unique = format!("m0h{label}{}", unique_suffix() % 1_000_000_000);
     if cfg!(windows) {
         (Endpoint::from_override(&unique), None)
     } else {
