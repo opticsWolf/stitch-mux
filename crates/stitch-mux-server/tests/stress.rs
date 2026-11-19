@@ -201,12 +201,12 @@ async fn ten_megabytes_reach_two_clients_and_a_stalled_client_is_busy() {
         })
         .await;
     assert!(go.ok, "{:?}", go.error);
-    wait_for_text("first", &first, pane_id, "STRESS-DONE").await;
-    wait_for_text("second", &second, pane_id, "STRESS-DONE").await;
 
-    // The stalled socket buffered as many deltas as it could; the daemon must
-    // have closed it with the typed `Busy` error instead of growing memory.
-    let error = tokio::time::timeout(Duration::from_secs(20), async {
+    // Stall long enough for the bounded queue to overflow, then drain the
+    // socket so the daemon's typed `Busy` frame can reach us. Waiting until
+    // the 10 MiB marker is too late: the error write has a 30 s deadline.
+    let stalled_reader = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(8)).await;
         loop {
             let frame = stalled.recv_frame().await.expect("stalled frame");
             if frame.kind == MessageKind::Error {
@@ -215,9 +215,17 @@ async fn ten_megabytes_reach_two_clients_and_a_stalled_client_is_busy() {
                 return error;
             }
         }
-    })
-    .await
-    .expect("typed busy frame");
+    });
+
+    wait_for_text("first", &first, pane_id, "STRESS-DONE").await;
+    wait_for_text("second", &second, pane_id, "STRESS-DONE").await;
+
+    // The stalled socket buffered as many deltas as it could; the daemon must
+    // have closed it with the typed `Busy` error instead of growing memory.
+    let error = tokio::time::timeout(Duration::from_secs(30), stalled_reader)
+        .await
+        .expect("stalled reader")
+        .expect("stalled task");
     assert_eq!(error.code, stitch_mux_protocol::ErrorCode::Busy);
     assert_eq!(error.message, "client fell behind");
 
