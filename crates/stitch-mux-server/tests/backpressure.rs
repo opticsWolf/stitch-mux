@@ -138,7 +138,12 @@ async fn stalled_client_is_disconnected_with_busy_and_cannot_block_other_clients
     wait_for("healthy client keeps draining", &healthy, |view| {
         view.pane(pane_id)
             .and_then(|pane| pane.snapshot.as_ref())
-            .is_some_and(|snapshot| snapshot.seq > 1)
+            .is_some_and(|snapshot| {
+                snapshot
+                    .cells
+                    .iter()
+                    .any(|row| row.cells.iter().any(|cell| cell.text.contains('a')))
+            })
     })
     .await;
     assert_eq!(healthy.view().connection, ConnectionState::Connected);

@@ -347,7 +347,7 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
             .is_some_and(|queue| queue.overflows() >= client_updates::MAX_CLIENT_OVERFLOWS)
         {
             let _ = tokio::time::timeout(
-                Duration::from_secs(2),
+                Duration::from_secs(30),
                 send_error(&mut writer, ErrorCode::Busy, "client fell behind"),
             )
             .await;
