@@ -2,5 +2,10 @@
 **/*.rs.bk
 .venv/
 __pycache__/
+.pytest_cache/
+dist/
 *.log
 .DS_Store
+*.pyd
+*.so
+*.dylib
