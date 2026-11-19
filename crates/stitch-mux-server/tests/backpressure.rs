@@ -141,7 +141,7 @@ async fn ten_megabytes_and_repeated_attach_stay_responsive() {
             view.pane(pane_id).is_some()
         })
         .await;
-        transient.detach().await;
+        let _ = tokio::time::timeout(Duration::from_secs(10), transient.detach()).await;
         assert_eq!(
             first.view().connection,
             ConnectionState::Connected,
@@ -171,8 +171,8 @@ async fn ten_megabytes_and_repeated_attach_stay_responsive() {
     .await
     .expect("kill response");
     assert!(killed.ok, "{:?}", killed.error);
-    first.detach().await;
-    second.detach().await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), first.detach()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), second.detach()).await;
     server.abort();
     if let Some(path) = socket {
         let _ = tokio::fs::remove_file(path).await;
