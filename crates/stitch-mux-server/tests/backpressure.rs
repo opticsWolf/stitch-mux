@@ -46,10 +46,25 @@ fn hello(label: &str) -> Hello {
 }
 
 fn noisy_program() -> (&'static str, Vec<String>) {
+    // Emit output explicitly: some platforms disable PTY echo for a
+    // non-interactive shell, which would make an input-only flood silent.
     if cfg!(windows) {
-        ("cmd.exe", vec!["/Q".into()])
+        (
+            "cmd.exe",
+            vec![
+                "/Q".into(),
+                "/C".into(),
+                "for /L %i in (1,1,500000) do @echo aaaaaaaaaaaaaaaaaaaa".into(),
+            ],
+        )
     } else {
-        ("sh", Vec::new())
+        (
+            "sh",
+            vec![
+                "-c".into(),
+                "while true; do echo aaaaaaaaaaaaaaaaaaaa; done".into(),
+            ],
+        )
     }
 }
 
@@ -198,6 +213,15 @@ async fn stalled_client_is_disconnected_with_busy_and_cannot_block_other_clients
     assert!(capture.ok, "{:?}", capture.error);
 
     healthy.detach().await;
+    let killed = stitch_mux_client::command(
+        &endpoint,
+        Command::KillSession {
+            name: "noisy".into(),
+        },
+    )
+    .await
+    .expect("kill response");
+    assert!(killed.ok, "{:?}", killed.error);
     server.abort();
     if let Some(path) = socket {
         let _ = tokio::fs::remove_file(path).await;
