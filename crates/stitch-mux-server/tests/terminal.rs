@@ -192,7 +192,13 @@ async fn terminal_projection_shares_layout_and_output_with_a_structured_client()
         view.layout_revision > base_revision
     })
     .await;
-    assert_eq!(terminal.view().layout.unwrap().panes.len(), 2);
+    let terminal_view = terminal.view();
+    let gui_view = gui.view();
+    assert_eq!(terminal_view.size, gui_view.size);
+    assert_eq!(
+        terminal_view.layout.as_ref().unwrap().panes,
+        gui_view.layout.as_ref().unwrap().panes
+    );
 
     terminal.detach().await;
     wait_for("gui sees the detach", &gui, |view| {
