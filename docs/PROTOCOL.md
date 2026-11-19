@@ -49,8 +49,9 @@ offset  size  field
 
 Rules:
 
-- Maximum payload: **8 MiB** for `Render`, `PaneSnapshot`, and
-  `CaptureResponse`; **1 MiB** for all other kinds. Reject larger frames before
+- Maximum payload: **8 MiB** for `Render`, `PaneSnapshot`, `CaptureResponse`,
+  and `CommandResponse` (which can carry a capture); **1 MiB** for all other
+  kinds. Reject larger frames before
   allocating.
 - A decoder must be incremental: socket reads may split or coalesce frames.
 - Unknown `kind` values are a protocol error in v1. A future version may add a
@@ -771,6 +772,8 @@ struct PaneInfo {
     id: u64,
     title: String,
     cwd: Option<String>,
+    cols: u16,                       // current PTY geometry
+    rows: u16,
     alive: bool,
     placement: PanePlacement,
     window_id: Option<u64>,
@@ -800,6 +803,11 @@ struct ClientInfo {
 handshake, gains a `session_id` and `focus` on `Attach`, and is removed on
 `Detach`, EOF, or `DetachClient`. The canonical session size is recomputed from
 the smallest attached client whenever this registry changes.
+
+Focus is remembered per `Hello.client_instance` across detach/reattach. On a
+new attach the daemon restores that instance's last focus when the pane is
+still visible; otherwise it focuses the first visible pane. `SessionInfo.last_activity_unix_ms`
+is the latest pane output timestamp, not the time the listing was requested.
 
 `EnsureSession` is the GUI startup primitive: reuse by name or create it. `NewSession`
 is explicit and fails if the name exists. `ListSessions` powers the GUI session

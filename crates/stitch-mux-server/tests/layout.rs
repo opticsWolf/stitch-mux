@@ -7,8 +7,12 @@ use stitch_mux_client::{ClientSession, Outbound, SessionView, command};
 use stitch_mux_core::{LayoutNode, SplitAxis};
 use stitch_mux_protocol::{Command, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, ViewMode};
 
-fn test_endpoint() -> (Endpoint, Option<PathBuf>) {
-    let unique = format!("stitch-mux-layout-{}-{}", std::process::id(), nanos());
+fn test_endpoint(label: &str) -> (Endpoint, Option<PathBuf>) {
+    let unique = format!(
+        "stitch-mux-layout-{label}-{}-{}",
+        std::process::id(),
+        nanos()
+    );
     if cfg!(windows) {
         (Endpoint::from_override(&unique), None)
     } else {
@@ -96,7 +100,7 @@ async fn wait_for_capture(label: &str, endpoint: &Endpoint, pane_id: u64, needle
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn split_focus_zoom_close_and_revision_guard() {
-    let (endpoint, socket_path) = test_endpoint();
+    let (endpoint, socket_path) = test_endpoint("split");
     let listener = endpoint.bind().await.expect("bind endpoint");
     let server = tokio::spawn(async move { stitch_mux_server::serve(listener).await });
 
@@ -324,7 +328,7 @@ async fn split_focus_zoom_close_and_revision_guard() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn impossible_layouts_are_rejected() {
-    let (endpoint, socket_path) = test_endpoint();
+    let (endpoint, socket_path) = test_endpoint("invalid");
     let listener = endpoint.bind().await.expect("bind endpoint");
     let server = tokio::spawn(async move { stitch_mux_server::serve(listener).await });
     let (program, args) = shell();

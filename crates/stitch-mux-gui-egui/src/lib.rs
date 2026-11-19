@@ -5,7 +5,7 @@
 //! `stitch-mux-client`.
 
 use std::error::Error;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 use stitch_mux_client::{ClientSession, Outbound, SessionView, command, size_from_pixels};
@@ -67,6 +67,8 @@ struct MuxApp {
     error: Option<String>,
     retry_backoff: Duration,
     next_retry: Option<Instant>,
+    /// Last session the daemon lost, shown in the picker until reattached.
+    lost_session: Option<String>,
 }
 
 impl MuxApp {
@@ -91,6 +93,7 @@ impl MuxApp {
             error: None,
             retry_backoff: Duration::from_millis(500),
             next_retry: None,
+            lost_session: None,
         };
         if !selected.is_empty() {
             app.attach(&selected);
@@ -119,6 +122,7 @@ impl MuxApp {
                 self.client = Some(client);
                 self.selected = name.to_owned();
                 self.error = None;
+                self.lost_session = None;
                 self.retry_backoff = Duration::from_millis(500);
                 self.next_retry = None;
             }
@@ -272,7 +276,7 @@ impl MuxApp {
         ui.heading("Session lost");
         ui.colored_label(
             egui::Color32::RED,
-            "The daemon connection was lost. Child processes are not restored              by this client; retry or start a new session explicitly.",
+            "The daemon connection was lost. Child processes are not restored by this client; retry or start a new session explicitly.",
         );
         if let Some(error) = &view.error {
             ui.label(format!("Reason: {}", error.message));
@@ -295,7 +299,8 @@ impl MuxApp {
             if ui.button("Back to picker").clicked() {
                 self.client = None;
                 self.view_rx = None;
-                self.error = None;
+                self.lost_session = Some(self.selected.clone());
+                self.error = view.error.as_ref().map(|error| error.message.clone());
                 self.refresh_sessions();
             }
         });
@@ -311,12 +316,25 @@ impl MuxApp {
                 let panes = info
                     .panes
                     .iter()
-                    .map(|pane| format!("{} {}", pane.title, pane.id))
+                    .map(|pane| format!("{} ({}) {}x{}", pane.title, pane.id, pane.cols, pane.rows))
                     .collect::<Vec<_>>()
                     .join(", ");
+                let lost = if self.lost_session.as_deref() == Some(info.name.as_str()) {
+                    " [last session lost]"
+                } else {
+                    ""
+                };
                 let label = format!(
-                    "{} — {} pane(s), {} client(s), working {}\n{}",
-                    info.name, info.pane_count, info.attached_clients, info.activity.working, panes
+                    "{}{} — {}x{}, {} pane(s), {} client(s), working {}\nlast activity {}\n{}",
+                    info.name,
+                    lost,
+                    info.cols,
+                    info.rows,
+                    info.pane_count,
+                    info.attached_clients,
+                    info.activity.working,
+                    age_label(info.last_activity_unix_ms),
+                    panes
                 );
                 if ui.button(label).clicked() {
                     self.attach(&info.name);
@@ -649,6 +667,24 @@ fn cell_rect(grid: egui::Rect, cell: Rect, cell_w: f32, cell_h: f32) -> egui::Re
         grid.min + egui::vec2(f32::from(cell.x) * cell_w, f32::from(cell.y) * cell_h),
         egui::vec2(f32::from(cell.cols) * cell_w, f32::from(cell.rows) * cell_h),
     )
+}
+
+fn age_label(unix_ms: u64) -> String {
+    if unix_ms == 0 {
+        return "unknown".into();
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let seconds = now.saturating_sub(unix_ms) / 1000;
+    match seconds {
+        0..=4 => "just now".into(),
+        5..=59 => format!("{seconds}s ago"),
+        60..=3599 => format!("{}m ago", seconds / 60),
+        3600..=86399 => format!("{}h ago", seconds / 3600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
 }
 
 fn color32(color: Color) -> egui::Color32 {

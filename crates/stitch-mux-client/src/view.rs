@@ -256,7 +256,7 @@ impl SessionView {
 mod tests {
     use super::*;
     use stitch_mux_core::{ActivitySummary, Cell, Cursor, Modes, ProgramState, ProgramStatus, Row};
-    use stitch_mux_protocol::{PaneDelta, RowUpdate};
+    use stitch_mux_protocol::{PaneDelta, ProcessInfo, RowUpdate, ShellMarks};
 
     fn snapshot(pane_id: u64, seq: u64, text: &str) -> PaneSnapshot {
         PaneSnapshot {
@@ -339,6 +339,67 @@ mod tests {
         view.needs_resync = false;
         assert!(view.apply_delta(delta(1, 3, "old")).is_ok());
         assert!(!view.needs_resync);
+    }
+
+    #[test]
+    fn optional_metadata_survives_snapshot_replacement_and_deltas() {
+        let mut view = SessionView::default();
+        let mut first = snapshot(1, 1, "a");
+        first.cwd = Some("/one".into());
+        first.foreground = Some(ProcessInfo {
+            pid: Some(1),
+            name: "sh".into(),
+            cwd: Some("/one".into()),
+        });
+        first.shell_marks = Some(ShellMarks {
+            prompt_rows: vec![0],
+            command_rows: vec![],
+        });
+        first.program_status = Some(ProgramStatus {
+            state: ProgramState::Working,
+            ..Default::default()
+        });
+        view.apply_snapshot(first);
+
+        let mut change = delta(1, 2, "b");
+        change.cwd = Some("/two".into());
+        change.shell_marks = Some(ShellMarks {
+            prompt_rows: vec![1],
+            command_rows: vec![0],
+        });
+        change.program_status = Some(ProgramStatus {
+            state: ProgramState::Done,
+            ..Default::default()
+        });
+        view.apply_delta(change).unwrap();
+        let pane = view.pane(1).expect("pane");
+        let current = pane.snapshot.as_ref().expect("snapshot");
+        assert_eq!(current.cwd.as_deref(), Some("/two"));
+        assert_eq!(
+            current.shell_marks.as_ref().map(|marks| &marks.prompt_rows),
+            Some(&vec![1])
+        );
+        assert_eq!(
+            current.program_status.as_ref().map(|status| status.state),
+            Some(ProgramState::Done)
+        );
+        assert_eq!(view.activity.done, 1);
+
+        let mut replacement = snapshot(1, 3, "c");
+        replacement.cwd = Some("/three".into());
+        replacement.shell_marks = Some(ShellMarks {
+            prompt_rows: vec![2],
+            command_rows: vec![1],
+        });
+        view.apply_snapshot(replacement);
+        let pane = view.pane(1).expect("pane");
+        let current = pane.snapshot.as_ref().expect("snapshot");
+        assert_eq!(current.cwd.as_deref(), Some("/three"));
+        assert_eq!(
+            current.shell_marks.as_ref().map(|marks| &marks.prompt_rows),
+            Some(&vec![2])
+        );
+        assert_eq!(current.program_status, None);
     }
 
     #[test]

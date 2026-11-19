@@ -6,7 +6,8 @@ use std::time::Duration;
 use stitch_mux_client::{ClientSession, ConnectionState, Outbound, SessionView, command};
 use stitch_mux_core::{CaptureFormat, Size, SplitAxis};
 use stitch_mux_protocol::{
-    Command, DEFAULT_CLIENT_CAPABILITIES, Endpoint, ErrorCode, Hello, InputEvent, ViewMode,
+    Command, CommandRequest, DEFAULT_CLIENT_CAPABILITIES, Endpoint, ErrorCode, Hello, InputEvent,
+    ViewMode,
 };
 
 fn test_endpoint(label: &str) -> (Endpoint, Option<PathBuf>) {
@@ -188,6 +189,26 @@ async fn two_clients_share_a_session_with_independent_focus() {
             .contains("m3-first")
     );
 
+    // A command response carries this connection's focus, not a global one.
+    first.send(Outbound::Command(CommandRequest {
+        request_id: 99,
+        command: Command::ZoomPane {
+            session: "shared".into(),
+            pane_id: None,
+        },
+    }));
+    wait_for(
+        "command response keeps this client's focus",
+        &first,
+        |view| {
+            view.last_command
+                .as_ref()
+                .is_some_and(|response| response.request_id == 99)
+                && view.focus == Some(second_pane)
+        },
+    )
+    .await;
+
     first.detach().await;
     wait_for("survivor stays connected", &second, |view| {
         view.connection == ConnectionState::Connected && view.attached_clients == 1
@@ -195,7 +216,17 @@ async fn two_clients_share_a_session_with_independent_focus() {
     .await;
     send_until_captured(&second, &endpoint, first_pane, "m3-second").await;
 
+    // The same client instance keeps its focus across detach/reattach.
+    let first_again = ClientSession::attach(&endpoint, "shared", hello("large", 100, 30))
+        .await
+        .expect("reattach same instance");
+    wait_for("focus restored after reattach", &first_again, |view| {
+        view.focus == Some(second_pane)
+    })
+    .await;
+
     second.detach().await;
+    first_again.detach().await;
     let listed = command(&endpoint, Command::ListSessions)
         .await
         .expect("list sessions");

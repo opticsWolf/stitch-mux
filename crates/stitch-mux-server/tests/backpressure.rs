@@ -11,9 +11,9 @@ use stitch_mux_client::{ClientSession, ConnectionState, SessionView, command};
 use stitch_mux_core::CaptureFormat;
 use stitch_mux_protocol::{Command, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, ViewMode};
 
-fn test_endpoint() -> (Endpoint, Option<PathBuf>) {
+fn test_endpoint(label: &str) -> (Endpoint, Option<PathBuf>) {
     // macOS caps Unix socket paths at SUN_LEN; keep the temp filename short.
-    let unique = format!("m3bp{}", nanos() % 1_000_000_000);
+    let unique = format!("m3bp{label}{}", nanos() % 1_000_000_000);
     if cfg!(windows) {
         (Endpoint::from_override(&unique), None)
     } else {
@@ -80,7 +80,7 @@ fn pane_has_a(view: &SessionView, pane_id: u64) -> bool {
 
 #[tokio::test]
 async fn repeated_attach_and_delta_pump_stay_responsive() {
-    let (endpoint, socket) = test_endpoint();
+    let (endpoint, socket) = test_endpoint("pump");
     let listener = endpoint.bind().await.expect("bind");
     let server = tokio::spawn(stitch_mux_server::serve(listener));
 
@@ -130,18 +130,6 @@ async fn repeated_attach_and_delta_pump_stay_responsive() {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    eprintln!(
-        "first view: {:?}",
-        first
-            .view()
-            .pane(pane_id)
-            .and_then(|p| p.snapshot.as_ref())
-            .map(|s| s
-                .cells
-                .iter()
-                .map(|r| r.cells.iter().map(|c| c.text.as_str()).collect::<String>())
-                .collect::<Vec<_>>())
-    );
     wait_for("first client sees the output", &first, |view| {
         pane_has_a(view, pane_id)
     })

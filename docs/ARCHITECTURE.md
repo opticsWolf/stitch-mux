@@ -249,7 +249,7 @@ Window
 
 PaneRuntime
   ...
-  placement: PanePlacement  // Tiled, Floating(layer), Detached
+  placement: PanePlacement  // Tiled, Floating { layer_id }, Detached
   owner: Option<ClientId>   // optional size owner; see §5.3
   status: Option<ProgramStatus>
 ```
@@ -270,7 +270,7 @@ detached panes so that v0.2/v0.3 do not require a data-model rewrite.
 ```rust
 pub enum PanePlacement {
     Tiled,
-    Floating(LayerId),
+    Floating { layer_id: u64 },
     Detached,
 }
 ```

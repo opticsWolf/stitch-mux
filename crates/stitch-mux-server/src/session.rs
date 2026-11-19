@@ -12,9 +12,7 @@ use stitch_mux_core::{
     ActivitySummary, Direction, LayoutError, LayoutNode, PaneId, Rect, Size, SplitAxis, close_leaf,
     first_leaf, layout_contains, layout_leaves, resolve_layout, split_leaf, validate_layout,
 };
-use stitch_mux_protocol::{
-    Attached, Layout, PaneGeometry, PaneInfo, PanePlacement, PlacementKind, SessionInfo,
-};
+use stitch_mux_protocol::{Attached, Layout, PaneGeometry, PaneInfo, PanePlacement, SessionInfo};
 use thiserror::Error;
 use tokio::sync::broadcast;
 
@@ -361,6 +359,11 @@ impl Session {
 
     pub fn info(&self, attached_clients: u32) -> SessionInfo {
         let panes: Vec<_> = self.panes().into_iter().collect();
+        let last_activity_unix_ms = panes
+            .iter()
+            .map(|pane| pane.last_activity_unix_ms())
+            .max()
+            .unwrap_or(self.created_at_unix_ms);
         let infos: Vec<PaneInfo> = self
             .pane_ids()
             .into_iter()
@@ -371,11 +374,10 @@ impl Session {
                     id: pane.id,
                     title: snapshot.title,
                     cwd: snapshot.cwd,
+                    cols: snapshot.cols,
+                    rows: snapshot.rows,
                     alive: pane.is_alive(),
-                    placement: PanePlacement {
-                        kind: PlacementKind::Tiled,
-                        layer_id: None,
-                    },
+                    placement: PanePlacement::Tiled,
                     window_id: Some(1),
                     owner_client_id: None,
                     program_status: snapshot.program_status,
@@ -392,7 +394,7 @@ impl Session {
             window_count: 1,
             attached_clients,
             created_at_unix_ms: self.created_at_unix_ms,
-            last_activity_unix_ms: now_unix_ms(),
+            last_activity_unix_ms,
             activity: ActivitySummary::default(),
             panes: infos,
         }

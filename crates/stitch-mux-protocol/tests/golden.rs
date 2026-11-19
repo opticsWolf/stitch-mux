@@ -7,10 +7,11 @@ use stitch_mux_core::{
 use stitch_mux_protocol::{
     ActionInfo, Attached, CaptureRequest, CaptureResponse, CapturedRow, ClientInfo, Clipboard,
     ClipboardSelection, Command, CommandRequest, CommandResponse, Detach, ErrorCode, ErrorInfo,
-    Event, Focus, FocusRequest, Hello, HelloAck, InputEvent, KeyCode, KeyEvent, KeyEventKind,
-    Layout, MessageKind, PaneDelta, PaneGeometry, PaneInfo, PaneSnapshot, ProcessInfo, ResizeEvent,
-    ResizeRequest, Resync, RowUpdate, SessionExit, SessionInfo, ShellMarks, SubscribeEvents,
-    ViewMode, WaitResult, WaitTarget, encode_message, encode_render,
+    Event, Focus, FocusRequest, Frame, Hello, HelloAck, InputEvent, KeyCode, KeyEvent,
+    KeyEventKind, Layout, MessageKind, PaneDelta, PaneGeometry, PaneInfo, PaneSnapshot,
+    ProcessInfo, ResizeEvent, ResizeRequest, Resync, RowUpdate, SessionExit, SessionInfo,
+    ShellMarks, SubscribeEvents, ViewMode, WaitResult, WaitTarget, decode_message, encode_message,
+    encode_render,
 };
 
 fn fixture<T: serde::Serialize>(kind: MessageKind, value: &T) -> String {
@@ -372,11 +373,10 @@ fn all_fixtures() -> Vec<(MessageKind, String)> {
                             id: 7,
                             title: "sh".into(),
                             cwd: None,
+                            cols: 80,
+                            rows: 24,
                             alive: true,
-                            placement: stitch_mux_protocol::PanePlacement {
-                                kind: stitch_mux_protocol::PlacementKind::Tiled,
-                                layer_id: None,
-                            },
+                            placement: stitch_mux_protocol::PanePlacement::Tiled,
                             window_id: Some(1),
                             owner_client_id: None,
                             program_status: None,
@@ -502,7 +502,7 @@ const EXPECTED: [(u8, &str); 27] = [
     (24, "534d0100180011000000920191ad6c6973745f73657373696f6e73"),
     (
         25,
-        "534d010019009d0000009c01c3c0919c01a464656d6f5018010001010102950000000000919807a27368c0c392a574696c6564c001c0c0919803b37374697463682d6d75782d6775692d65677569aa73747275637475726564015018070490c0990105501801020781a46c656166910791940794000050179401014e15a27368c09381a470616e65910700c29195aa70616e652e73706c6974a553706c6974c0a470616e65c0c0",
+        "534d010019009d0000009c01c3c0919c01a464656d6f5018010001010102950000000000919a07a27368c05018c3a574696c656401c0c0919803b37374697463682d6d75782d6775692d65677569aa73747275637475726564015018070490c0990105501801020781a46c656166910791940794000050179401014e15a27368c09381a470616e65910700c29195aa70616e652e73706c6974a553706c6974c0a470616e65c0c0",
     ),
     (26, "534d01001a000800000093a464656d6fc228"),
     (
@@ -526,4 +526,45 @@ fn every_message_kind_has_a_stable_encoding() {
         assert_eq!(kind.as_u8(), *expected_kind);
         assert_eq!(hex, expected_hex, "wrong encoding for {kind:?}");
     }
+}
+
+#[test]
+fn older_peers_may_omit_optional_snapshot_fields() {
+    let snapshot = PaneSnapshot {
+        pane_id: 7,
+        seq: 3,
+        cols: 1,
+        rows: 1,
+        cells: vec![row()],
+        cursor: cursor(),
+        modes: modes(),
+        title: "sh".into(),
+        cwd: Some("/tmp".into()),
+        foreground: Some(ProcessInfo {
+            pid: Some(11),
+            name: "sh".into(),
+            cwd: Some("/tmp".into()),
+        }),
+        shell_marks: Some(ShellMarks {
+            prompt_rows: vec![2],
+            command_rows: vec![3],
+        }),
+        program_status: Some(status()),
+        alt_screen: false,
+        scrollback_len: 9,
+        scrollback_bytes: 128,
+    };
+    let mut value = serde_json::to_value(&snapshot).expect("snapshot to json");
+    let object = value.as_object_mut().expect("snapshot object");
+    for key in ["cwd", "foreground", "shell_marks", "program_status"] {
+        object.remove(key);
+    }
+    let payload = rmp_serde::to_vec_named(&value).expect("old payload");
+    let frame = Frame::new(MessageKind::PaneSnapshot, payload).unwrap();
+    let decoded: PaneSnapshot = decode_message(&frame).expect("old peer decodes");
+    assert_eq!(decoded.title, "sh");
+    assert_eq!(decoded.cwd, None);
+    assert_eq!(decoded.foreground, None);
+    assert_eq!(decoded.shell_marks, None);
+    assert_eq!(decoded.program_status, None);
 }

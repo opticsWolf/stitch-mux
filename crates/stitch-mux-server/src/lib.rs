@@ -1,8 +1,8 @@
 //! Local stitch-mux daemon.
 //!
-//! M2 scope: own PTY panes and a server-validated binary split layout, project
-//! structured snapshots/deltas to attached clients, and keep per-client focus
-//! local to each connection. Sessions survive detach/reattach.
+//! M3 scope: own PTY panes and a server-validated binary split layout, project
+//! bounded structured snapshots/deltas to attached clients, and keep per-client
+//! focus local to each connection. Sessions survive detach/reattach.
 
 pub mod client_updates;
 pub mod pane;
@@ -45,6 +45,9 @@ pub enum ServerError {
 struct ClientRecord {
     id: u64,
     name: String,
+    /// Stable client identity from `Hello`; used to restore this client's
+    /// focus when it detaches and attaches again.
+    instance: String,
     view_mode: ViewMode,
     session_id: Option<u64>,
     cols: u16,
@@ -72,6 +75,8 @@ impl ClientRecord {
 pub struct ServerState {
     pub registry: Mutex<SessionRegistry>,
     clients: StdMutex<BTreeMap<u64, ClientRecord>>,
+    /// Last focused pane per `Hello.client_instance`, across attach cycles.
+    focus_memory: StdMutex<BTreeMap<String, u64>>,
     next_client_id: AtomicU64,
     shutdown_tx: watch::Sender<bool>,
 }
@@ -82,6 +87,7 @@ impl Default for ServerState {
         Self {
             registry: Mutex::new(SessionRegistry::new()),
             clients: StdMutex::new(BTreeMap::new()),
+            focus_memory: StdMutex::new(BTreeMap::new()),
             next_client_id: AtomicU64::new(1),
             shutdown_tx,
         }
@@ -94,6 +100,7 @@ impl ServerState {
         let record = ClientRecord {
             id,
             name: hello.client_name.clone(),
+            instance: hello.client_instance.clone(),
             view_mode: hello.view_mode,
             session_id: None,
             cols: hello.cols,
@@ -123,14 +130,40 @@ impl ServerState {
     }
 
     fn set_focus(&self, client_id: u64, focus: u64) {
-        if let Some(client) = self
+        let instance = {
+            let mut clients = self.clients.lock().expect("client registry");
+            let Some(client) = clients.get_mut(&client_id) else {
+                return;
+            };
+            client.focus = Some(focus);
+            client.instance.clone()
+        };
+        let mut memory = self.focus_memory.lock().expect("focus memory");
+        // Local single-user daemons can outlive many GUI processes. Bound the
+        // remembered instances; losing old focus is cheaper than unbounded
+        // growth.
+        if memory.len() >= 1024 && !memory.contains_key(&instance) {
+            memory.clear();
+        }
+        memory.insert(instance, focus);
+    }
+
+    /// Remembered focus for this client instance, if that pane still exists in
+    /// the session's visible layout.
+    fn remembered_focus(&self, client_id: u64, session: &Session) -> Option<u64> {
+        let instance = self
             .clients
             .lock()
             .expect("client registry")
-            .get_mut(&client_id)
-        {
-            client.focus = Some(focus);
-        }
+            .get(&client_id)?
+            .instance
+            .clone();
+        let pane = *self
+            .focus_memory
+            .lock()
+            .expect("focus memory")
+            .get(&instance)?;
+        session.visible_pane_ids().contains(&pane).then_some(pane)
     }
 
     fn set_size(&self, client_id: u64, cols: u16, rows: u16) {
@@ -435,6 +468,9 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                 } else {
                     focus = session.visible_pane_ids().first().copied();
                 }
+                if let Some(id) = focus {
+                    state.set_focus(client_id, id);
+                }
                 if let Err(err) = send_session_state(&mut writer, session, focus, &state).await {
                     failure = Some(err);
                     break;
@@ -532,11 +568,20 @@ async fn handle_frame(
         }
         MessageKind::CommandRequest => {
             let request: CommandRequest = decode_message(&frame)?;
-            let response = handle_command(request, state, client_id).await;
+            let response = handle_command(request, state, client_id, *focus).await;
             writer.send(MessageKind::CommandResponse, &response).await?;
         }
         MessageKind::Attach => {
             let request: Attach = decode_message(&frame)?;
+            if request.takeover {
+                send_error(
+                    writer,
+                    ErrorCode::Unsupported,
+                    "takeover is not supported in protocol v1",
+                )
+                .await?;
+                return Ok(false);
+            }
             let session = {
                 let registry = state.registry.lock().await;
                 registry.get(&request.session_name)
@@ -580,7 +625,9 @@ async fn handle_frame(
             *update_rx = Some(queue);
             coalescer.reset();
             *layout_rx = Some(session.subscribe_layout());
-            *focus = session.visible_pane_ids().first().copied();
+            *focus = state
+                .remembered_focus(client_id, &session)
+                .or_else(|| session.visible_pane_ids().first().copied());
             state.set_attached(client_id, session.id, *focus);
             state.sync_size(&session);
             session.publish_layout();
@@ -740,6 +787,7 @@ async fn handle_command(
     request: CommandRequest,
     state: &Arc<ServerState>,
     client_id: u64,
+    focus: Option<u64>,
 ) -> CommandResponse {
     let mut response = CommandResponse {
         request_id: request.request_id,
@@ -834,7 +882,7 @@ async fn handle_command(
             let session = state.registry.lock().await.find_by_pane(pane_id);
             match session {
                 Some(session) => match session.split(pane_id, axis, ratio_bps).await {
-                    Ok(layout) => response.layout = Some(with_attached_count(state, layout)),
+                    Ok(_) => response.layout = Some(response_layout(state, &session, focus)),
                     Err(err) => set_error(&mut response, session_error_code(&err), err),
                 },
                 None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
@@ -852,7 +900,7 @@ async fn handle_command(
             drop(registry);
             match session {
                 Some(session) => match session.close(pane_id).await {
-                    Ok(Some(layout)) => response.layout = Some(with_attached_count(state, layout)),
+                    Ok(Some(_)) => response.layout = Some(response_layout(state, &session, focus)),
                     Ok(None) => {
                         if let Some(name) = name {
                             let _ = state.registry.lock().await.kill(&name).await;
@@ -868,7 +916,7 @@ async fn handle_command(
             let target = state.registry.lock().await.get(&session);
             match target {
                 Some(target) => match target.zoom(pane_id) {
-                    Ok(layout) => response.layout = Some(with_attached_count(state, layout)),
+                    Ok(_) => response.layout = Some(response_layout(state, &target, focus)),
                     Err(err) => set_error(&mut response, session_error_code(&err), err),
                 },
                 None => set_error(&mut response, ErrorCode::NotFound, "session not found"),
@@ -901,14 +949,14 @@ async fn handle_command(
             );
             match session {
                 Some(session) => match session.set_layout(root, base_revision) {
-                    Ok(layout) => response.layout = Some(with_attached_count(state, layout)),
+                    Ok(_) => response.layout = Some(response_layout(state, &session, focus)),
                     Err(SessionError::StaleLayout { expected, current }) => {
                         set_error(
                             &mut response,
                             ErrorCode::Busy,
                             format!("layout revision {expected} is stale; current is {current}"),
                         );
-                        response.layout = Some(with_attached_count(state, session.layout(None)));
+                        response.layout = Some(response_layout(state, &session, focus));
                     }
                     Err(err) => set_error(&mut response, session_error_code(&err), err),
                 },
@@ -985,6 +1033,17 @@ async fn handle_command(
         ),
     }
     response
+}
+
+/// Build a layout for a command response using the requesting connection's
+/// focus. Control-only connections get the first visible pane, which keeps the
+/// response self-describing without inventing a global focus.
+fn response_layout(state: &ServerState, session: &Session, focus: Option<u64>) -> Layout {
+    let visible = session.visible_pane_ids();
+    let focus = focus
+        .filter(|pane_id| visible.contains(pane_id))
+        .or_else(|| visible.first().copied());
+    with_attached_count(state, session.layout(focus))
 }
 
 fn set_error(response: &mut CommandResponse, code: ErrorCode, message: impl std::fmt::Display) {

@@ -187,8 +187,14 @@ mod tests {
                 cells: Vec::new(),
                 wrapped: false,
             }],
-            cursor: Cursor::default(),
-            modes: Modes::default(),
+            cursor: Cursor {
+                x: seq as u16,
+                ..Cursor::default()
+            },
+            modes: Modes {
+                alt_screen: seq.is_multiple_of(2),
+                ..Modes::default()
+            },
             title: format!("title-{seq}"),
             cwd: None,
             foreground: None,
@@ -220,6 +226,8 @@ mod tests {
         let second: PaneDelta = stitch_mux_protocol::decode_message(&second).unwrap();
         assert_eq!(first.seq, 1);
         assert_eq!(first.title, "title-2");
+        assert_eq!(first.cursor.x, 2);
+        assert!(first.modes.alt_screen);
         assert_eq!(first.rows.len(), 2);
         assert_eq!(second.seq, 1);
         assert_eq!(second.rows.len(), 1);

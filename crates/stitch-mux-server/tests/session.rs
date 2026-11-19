@@ -9,8 +9,12 @@ use stitch_mux_protocol::{
     Command, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, InputEvent, MessageKind, ViewMode,
 };
 
-fn test_endpoint() -> (Endpoint, Option<PathBuf>) {
-    let unique = format!("stitch-mux-session-{}-{}", std::process::id(), nanos());
+fn test_endpoint(label: &str) -> (Endpoint, Option<PathBuf>) {
+    let unique = format!(
+        "stitch-mux-session-{label}-{}-{}",
+        std::process::id(),
+        nanos()
+    );
     if cfg!(windows) {
         (Endpoint::from_override(&unique), None)
     } else {
@@ -84,7 +88,7 @@ fn has_text(view: &stitch_mux_client::SessionView, needle: &str) -> bool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn echo_detach_reattach_resize_and_capture() {
-    let (endpoint, socket_path) = test_endpoint();
+    let (endpoint, socket_path) = test_endpoint("echo");
     let listener = endpoint.bind().await.expect("bind endpoint");
     let server = tokio::spawn(async move { stitch_mux_server::serve(listener).await });
 
@@ -194,6 +198,10 @@ async fn echo_detach_reattach_resize_and_capture() {
         .expect("list response");
     assert_eq!(listed.sessions.len(), 1);
     assert_eq!(listed.sessions[0].name, "demo");
+    let info = &listed.sessions[0];
+    assert_eq!(info.panes[0].cols, info.cols - 2);
+    assert_eq!(info.panes[0].rows, info.rows - 2);
+    assert!(info.last_activity_unix_ms >= info.created_at_unix_ms);
 
     let killed = command(
         &endpoint,
@@ -217,7 +225,7 @@ async fn echo_detach_reattach_resize_and_capture() {
 
 #[tokio::test]
 async fn unknown_session_attach_is_a_typed_error() {
-    let (endpoint, socket_path) = test_endpoint();
+    let (endpoint, socket_path) = test_endpoint("unknown");
     let listener = endpoint.bind().await.expect("bind endpoint");
     let server = tokio::spawn(async move { stitch_mux_server::serve(listener).await });
 
@@ -241,6 +249,83 @@ async fn unknown_session_attach_is_a_typed_error() {
         stitch_mux_protocol::decode_message(&frame).unwrap();
     assert_eq!(error.code, stitch_mux_protocol::ErrorCode::NotFound);
 
+    server.abort();
+    if let Some(path) = socket_path {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_exit_becomes_a_clean_exit_event() {
+    let (endpoint, socket_path) = test_endpoint("exit");
+    let listener = endpoint.bind().await.expect("bind endpoint");
+    let server = tokio::spawn(async move { stitch_mux_server::serve(listener).await });
+
+    let (program, args) = shell();
+    let created = command(
+        &endpoint,
+        Command::NewSession {
+            name: "exit".into(),
+            program: program.into(),
+            args,
+            cwd: None,
+            env: None,
+            cols: 80,
+            rows: 24,
+        },
+    )
+    .await
+    .expect("new session");
+    assert!(created.ok, "{:?}", created.error);
+    let pane_id = created.sessions[0].panes[0].id;
+
+    let session = ClientSession::attach(&endpoint, "exit", hello())
+        .await
+        .expect("attach");
+    wait_for("initial snapshot", &session, |view| {
+        view.pane(pane_id).is_some()
+    })
+    .await;
+    let newline = if cfg!(windows) { "\r\n" } else { "\n" };
+    // A freshly spawned shell may swallow the first line; re-send until the
+    // child has actually exited.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while session.view().exit.is_none() && tokio::time::Instant::now() < deadline {
+        let sent = command(
+            &endpoint,
+            Command::SendText {
+                pane_id,
+                text: format!("exit 7{newline}"),
+            },
+        )
+        .await
+        .expect("send exit");
+        assert!(sent.ok, "{:?}", sent.error);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    wait_for("clean exit event", &session, |view| view.exit.is_some()).await;
+    let exit = session.view().exit.expect("exit event");
+    assert_eq!(exit.pane_id, Some(pane_id));
+    assert!(
+        exit.reason.contains('7'),
+        "unexpected exit: {}",
+        exit.reason
+    );
+
+    // The daemon stays healthy after a child exit.
+    let listed = command(&endpoint, Command::ListSessions)
+        .await
+        .expect("list after exit");
+    assert!(listed.ok, "{:?}", listed.error);
+
+    let _ = command(
+        &endpoint,
+        Command::KillSession {
+            name: "exit".into(),
+        },
+    )
+    .await;
+    session.detach().await;
     server.abort();
     if let Some(path) = socket_path {
         let _ = tokio::fs::remove_file(path).await;

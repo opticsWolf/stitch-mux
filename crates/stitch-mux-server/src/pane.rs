@@ -70,6 +70,7 @@ struct PaneState {
     seq: u64,
     program: String,
     bell: bool,
+    last_activity_unix_ms: u64,
 }
 
 pub struct PaneRuntime {
@@ -135,6 +136,7 @@ impl PaneRuntime {
                 seq: 0,
                 program: spec.program.clone(),
                 bell: false,
+                last_activity_unix_ms: now_unix_ms(),
             }),
             updates,
             input_tx,
@@ -284,10 +286,15 @@ impl PaneRuntime {
         snapshot_from(&state, self.id, state.seq)
     }
 
+    /// Last time the child produced output, used by the session picker.
+    pub fn last_activity_unix_ms(&self) -> u64 {
+        self.lock_state().last_activity_unix_ms
+    }
+
     pub fn capture(&self, start: u64, lines: u32, format: CaptureFormat) -> CaptureResponse {
         let state = self.lock_state();
         let start = start as usize;
-        let count = (lines as usize).min(10_000);
+        let count = (lines as usize).min(1000);
         let tuples = state.screen.styled_range(start, count);
         let total_lines = state.screen.total_lines() as u64;
         let rows: Vec<CapturedRow> = tuples
@@ -339,6 +346,7 @@ impl PaneRuntime {
     fn publish_delta(&self, dirty: Vec<usize>, events: &[TermEvent]) {
         let mut state = self.lock_state();
         state.seq += 1;
+        state.last_activity_unix_ms = now_unix_ms();
         let seq = state.seq;
         let screen = &state.screen;
         let visible = screen.styled_range(screen.history_size(), screen.lines());
@@ -447,6 +455,13 @@ fn snapshot_from(state: &PaneState, pane_id: u64, seq: u64) -> PaneSnapshot {
         scrollback_len: delta.scrollback_len,
         scrollback_bytes: delta.scrollback_bytes,
     }
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn cells_from_row(line: &[(String, String, String, u8)]) -> Vec<Cell> {

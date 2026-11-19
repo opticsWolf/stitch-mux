@@ -279,6 +279,27 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_endpoint_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("stitch-mux-perm-{}-{unique}", std::process::id()));
+        let path = dir.join("endpoint.sock");
+        let listener = Endpoint::Unix(path.clone()).bind().await.unwrap();
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "runtime directory must be owner-only");
+        let socket_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(socket_mode, 0o600, "socket must be owner-only");
+        drop(listener);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn default_endpoint_is_local() {
         let endpoint = Endpoint::default_endpoint().unwrap();

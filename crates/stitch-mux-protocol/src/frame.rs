@@ -41,6 +41,37 @@ pub enum MessageKind {
 }
 
 impl MessageKind {
+    /// Every v1 message kind, in wire order. Used by conformance tests.
+    pub const ALL: [Self; 27] = [
+        Self::Hello,
+        Self::HelloAck,
+        Self::Attach,
+        Self::Attached,
+        Self::Layout,
+        Self::PaneSnapshot,
+        Self::PaneDelta,
+        Self::Focus,
+        Self::Render,
+        Self::Input,
+        Self::ResizeRequest,
+        Self::ResizeEvent,
+        Self::FocusRequest,
+        Self::SetLayout,
+        Self::Detach,
+        Self::Clipboard,
+        Self::Exit,
+        Self::Error,
+        Self::Ping,
+        Self::Pong,
+        Self::Resync,
+        Self::CaptureRequest,
+        Self::CaptureResponse,
+        Self::CommandRequest,
+        Self::CommandResponse,
+        Self::SubscribeEvents,
+        Self::Event,
+    ];
+
     pub const fn as_u8(self) -> u8 {
         self as u8
     }
@@ -48,7 +79,8 @@ impl MessageKind {
     pub fn large_payload(self) -> bool {
         matches!(
             self,
-            Self::Render | Self::PaneSnapshot | Self::CaptureResponse
+            // CommandResponse can carry a bounded CaptureResponse.
+            Self::Render | Self::PaneSnapshot | Self::CaptureResponse | Self::CommandResponse
         )
     }
 
@@ -331,6 +363,36 @@ mod tests {
     fn rejects_oversize_before_allocating() {
         assert!(Frame::new(MessageKind::Ping, vec![0; 1024 * 1024 + 1]).is_err());
         assert!(Frame::new(MessageKind::PaneSnapshot, vec![0; 1024 * 1024 + 1]).is_ok());
+        assert!(Frame::new(MessageKind::CommandResponse, vec![0; 4 * 1024 * 1024]).is_ok());
+    }
+
+    #[test]
+    fn round_trips_every_message_kind() {
+        for kind in MessageKind::ALL {
+            let frame = Frame::new(kind, b"payload".to_vec()).unwrap();
+            let encoded = frame.encode();
+            // Decode byte-by-byte as well: framing must not depend on the
+            // payload arriving in one read.
+            let mut decoder = FrameDecoder::new();
+            let mut decoded = Vec::new();
+            for byte in encoded {
+                decoded.extend(decoder.push(&[byte]).unwrap());
+            }
+            assert_eq!(decoder.buffered(), 0);
+            assert_eq!(decoded, vec![frame], "round trip failed for {kind:?}");
+        }
+    }
+
+    #[test]
+    fn truncated_payload_waits_for_the_rest() {
+        let frame = Frame::new(MessageKind::Ping, b"hello".to_vec()).unwrap();
+        let encoded = frame.encode();
+        let split = HEADER_LEN + 2;
+        let mut decoder = FrameDecoder::new();
+        assert!(decoder.push(&encoded[..split]).unwrap().is_empty());
+        assert_eq!(decoder.buffered(), split);
+        assert_eq!(decoder.push(&encoded[split..]).unwrap(), vec![frame]);
+        assert_eq!(decoder.buffered(), 0);
     }
 
     #[test]

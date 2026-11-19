@@ -187,15 +187,22 @@ Before marking a task Ready for review:
 | 2026-11-18 | Rewrite delta sequence numbers per client after coalescing | Dropping intermediate deltas must not look like a protocol gap | `UpdateCoalescer` keeps client-visible `seq` contiguous; `Resync` remains for real gaps |
 | 2026-11-18 | GUI retries a lost session with exponential backoff, capped at 8s | Daemon loss must be visible and never silently recreated | Lost overlay offers Retry, New session, and Back to picker |
 | 2026-11-19 | Shutdown excludes the issuing control connection | Detaching every client at once broke the `Shutdown` response with a broken pipe | Other clients get typed close; the command client receives its response first |
+| 2026-11-19 | `PanePlacement` lives in `stitch-mux-core` and the protocol re-exports it | M0 lists placement as a core type and the architecture treats it as domain state | Wire shape is `tiled` / `floating { layer_id }` / `detached` |
+| 2026-11-19 | `Attach { takeover: true }` is rejected as `Unsupported` | `PROTOCOL.md` reserves takeover for a later version and v1 must not silently force an attach | Typed-error test covers the handshake path |
+| 2026-11-19 | Focus is remembered per `Hello.client_instance` | M2 requires this client's focus to survive detach/reattach | Bounded 1024-entry map, validated against the current visible panes; auto-focus changes update it |
+| 2026-11-19 | Command responses carry the requesting connection's focus | Applying a split/close/zoom/SetLayout response must not clear the GUI's active pane | `response_layout` keeps a visible focus and falls back to the first visible pane |
+| 2026-11-19 | `CommandResponse` is an 8 MiB payload kind; capture rows cap at 1000 | A bounded `CaptureResponse` can exceed the old 1 MiB limit and kill the control connection mid-frame | Frame cap test plus `CaptureResponse`/golden fixtures; docs updated |
+| 2026-11-19 | `SessionInfo.last_activity_unix_ms` is the newest pane output timestamp | A picker must not report listing time as activity | `PaneRuntime` tracks the last delta; `Session::info` takes the maximum |
+| 2026-11-19 | M0–M3 acceptance audit | Several deliverable clauses were untested even though code existed | Added every-kind frame round-trips, truncated-frame buffering, old-peer optional-field decoding, Unix endpoint permissions, child-exit, optional-metadata survival, focus restore, and large-response tests |
 
 ## 9. Current status
 
 | Milestone | Status | Evidence / next action |
 |---|---|---|
-| M0 — workspace, core, protocol, client skeleton | **Done** | `3b6bcca`; 30 tests; fmt/clippy/test/doc green; CLI `ping` verified on Windows named pipe |
-| M1 — one-pane GUI session with detach/reattach | **Done** | 35 tests; real-child echo, capture, resize, detach/reattach test; CLI `new`/`ls`/`kill`/`gui` smoke; abrupt GUI kill leaves child alive and clears attached count |
-| M2 — multi-pane GUI layout and per-client focus | **Done** | 42 tests; real-child split/focus/zoom/stale-revision/close test; CLI `new`/`split`/`ls`/`zoom`/`close`/`kill` smoke; 8-second GUI smoke leaves children alive with `attached_clients: 0` |
-| M3 — multiple clients, backpressure | **Done** | 52 tests; real-endpoint tests for two-client focus/size/detach, registry commands and typed shutdown, a two-client delta-pump test with repeated attach/detach, bounded-queue unit tests, and a deterministic typed `Busy` frame test; CLI `clients`/`rename`/`shutdown` smoke; GUI survives daemon loss |
+| M0 — workspace, core, protocol, client skeleton | **Done** | `3b6bcca`; every message kind round-trips byte-by-byte, truncated frames buffer, old peers can omit optional fields, and Unix endpoints are owner-only; fmt/clippy/test/doc green; CLI `ping` verified on Windows named pipe |
+| M1 — one-pane GUI session with detach/reattach | **Done** | Real-child echo, capture, resize, detach/reattach, and clean child-exit tests; optional cwd/foreground/shell/status metadata survives snapshots and deltas; CLI `new`/`ls`/`kill`/`gui` smoke; abrupt GUI kill leaves child alive and clears attached count |
+| M2 — multi-pane GUI layout and per-client focus | **Done** | Real-child split/focus/zoom/stale-revision/close test; focus restores per client instance across detach/reattach; picker receives pane sizes and real last-activity timestamps; CLI `new`/`split`/`ls`/`zoom`/`close`/`kill` smoke; 8-second GUI smoke leaves children alive with `attached_clients: 0` |
+| M3 — multiple clients, backpressure | **Done** | 58 tests; real-endpoint tests for two-client focus/size/detach, focus restore, registry commands and typed shutdown, a two-client delta-pump test with repeated attach/detach, bounded-queue/coalescer unit tests, and a deterministic typed `Busy` frame test; `CommandResponse` payload cap covers captures; CLI `clients`/`rename`/`shutdown` smoke; GUI survives daemon loss |
 | M4 — terminal ANSI compatibility | Backlog | Structured path first |
 | M5 — Qt/PySide6 + optional GPUI | Backlog | Second-toolkit proof, no protocol changes allowed |
 | M6 — hardening / v0.1 | Backlog | Release checklist in `IMPLEMENTATION_PLAN.md` §7 |

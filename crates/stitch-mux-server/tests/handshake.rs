@@ -4,11 +4,16 @@ use std::time::Duration;
 
 use stitch_mux_client::connect;
 use stitch_mux_protocol::{
-    Connection, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, MessageKind, ViewMode,
+    Command, Connection, DEFAULT_CLIENT_CAPABILITIES, Endpoint, ErrorCode, Hello, MessageKind,
+    ViewMode,
 };
 
-fn test_endpoint() -> (Endpoint, Option<std::path::PathBuf>) {
-    let unique = format!("stitch-mux-test-{}-{}", std::process::id(), unique_suffix());
+fn test_endpoint(label: &str) -> (Endpoint, Option<std::path::PathBuf>) {
+    let unique = format!(
+        "stitch-mux-test-{label}-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    );
     if cfg!(windows) {
         (Endpoint::from_override(&unique), None)
     } else {
@@ -30,7 +35,7 @@ fn unique_suffix() -> u64 {
 
 #[tokio::test]
 async fn client_and_daemon_exchange_hello_then_detach() {
-    let (endpoint, socket_path) = test_endpoint();
+    let (endpoint, socket_path) = test_endpoint("hello");
     let listener = endpoint.bind().await.expect("bind endpoint");
     let server = tokio::spawn(async move { stitch_mux_server::serve(listener).await });
 
@@ -76,7 +81,7 @@ async fn client_and_daemon_exchange_hello_then_detach() {
 
 #[tokio::test]
 async fn wrong_protocol_version_is_rejected() {
-    let (endpoint, socket_path) = test_endpoint();
+    let (endpoint, socket_path) = test_endpoint("version");
     let listener = endpoint.bind().await.expect("bind endpoint");
     let server = tokio::spawn(async move { stitch_mux_server::serve(listener).await });
 
@@ -100,6 +105,74 @@ async fn wrong_protocol_version_is_rejected() {
         .expect("typed protocol error");
     assert_eq!(error.code, stitch_mux_protocol::ErrorCode::ProtocolVersion);
 
+    server.abort();
+    if let Some(path) = socket_path {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+}
+
+#[tokio::test]
+async fn takeover_attach_is_rejected() {
+    let (endpoint, socket_path) = test_endpoint("takeover");
+    let listener = endpoint.bind().await.expect("bind endpoint");
+    let server = tokio::spawn(async move { stitch_mux_server::serve(listener).await });
+    let (program, args) = if cfg!(windows) {
+        ("cmd.exe".to_owned(), Vec::new())
+    } else {
+        ("sh".to_owned(), Vec::new())
+    };
+    let created = stitch_mux_client::command(
+        &endpoint,
+        Command::NewSession {
+            name: "takeover".into(),
+            program,
+            args,
+            cwd: None,
+            env: None,
+            cols: 80,
+            rows: 24,
+        },
+    )
+    .await
+    .expect("new session");
+    assert!(created.ok, "{:?}", created.error);
+
+    let hello = Hello {
+        protocol_version: stitch_mux_protocol::PROTOCOL_VERSION,
+        client_name: "takeover-test".into(),
+        client_instance: "takeover".into(),
+        view_mode: ViewMode::Structured,
+        cols: 80,
+        rows: 24,
+        pixel_width: 0,
+        pixel_height: 0,
+        capabilities: DEFAULT_CLIENT_CAPABILITIES,
+    };
+    let (mut connection, _) = connect(&endpoint, hello).await.expect("handshake");
+    connection
+        .send(
+            MessageKind::Attach,
+            &stitch_mux_protocol::Attach {
+                session_name: "takeover".into(),
+                takeover: true,
+            },
+        )
+        .await
+        .unwrap();
+    let error: stitch_mux_protocol::ErrorInfo = connection
+        .recv(MessageKind::Error)
+        .await
+        .expect("typed takeover error");
+    assert_eq!(error.code, ErrorCode::Unsupported);
+
+    let _ = stitch_mux_client::command(
+        &endpoint,
+        Command::KillSession {
+            name: "takeover".into(),
+        },
+    )
+    .await;
+    connection.shutdown().await.unwrap();
     server.abort();
     if let Some(path) = socket_path {
         let _ = tokio::fs::remove_file(path).await;

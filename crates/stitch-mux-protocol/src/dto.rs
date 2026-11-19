@@ -10,6 +10,8 @@ use stitch_mux_core::{
     Rect, Row,
 };
 
+pub use stitch_mux_core::PanePlacement;
+
 pub type ActionArgs = serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -327,24 +329,16 @@ pub struct CaptureResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PanePlacement {
-    pub kind: PlacementKind,
-    pub layer_id: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlacementKind {
-    Tiled,
-    Floating,
-    Detached,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PaneInfo {
     pub id: u64,
     pub title: String,
     pub cwd: Option<String>,
+    /// Current PTY geometry, so a session picker can show pane sizes without
+    /// attaching. Older peers omit both fields and read zero.
+    #[serde(default)]
+    pub cols: u16,
+    #[serde(default)]
+    pub rows: u16,
     pub alive: bool,
     pub placement: PanePlacement,
     pub window_id: Option<u64>,

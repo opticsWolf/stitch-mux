@@ -11,6 +11,16 @@ pub enum SplitAxis {
     Rows,
 }
 
+/// Where a pane currently lives. `Tiled` panes are leaves in a window's
+/// split tree; `Floating` and `Detached` are reserved for later milestones.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PanePlacement {
+    Tiled,
+    Floating { layer_id: u64 },
+    Detached,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutNode {
