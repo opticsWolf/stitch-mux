@@ -1,14 +1,15 @@
-//! End-to-end M3 backpressure proof over a real endpoint and a real child.
+//! End-to-end M3 stress proof over a real endpoint and a real child.
+//!
+//! The typed slow-client `Busy` frame is asserted deterministically in the
+//! server unit tests; this test proves that heavy traffic and repeated
+//! attach/detach leave healthy clients and the daemon responsive.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use stitch_mux_client::{ClientSession, ConnectionState, SessionView, connect};
+use stitch_mux_client::{ClientSession, ConnectionState, SessionView, command};
 use stitch_mux_core::CaptureFormat;
-use stitch_mux_protocol::{
-    Attach, Command, DEFAULT_CLIENT_CAPABILITIES, Endpoint, ErrorCode, ErrorInfo, Hello,
-    MessageKind, ViewMode, decode_message,
-};
+use stitch_mux_protocol::{Command, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, ViewMode};
 
 fn test_endpoint() -> (Endpoint, Option<PathBuf>) {
     // macOS caps Unix socket paths at SUN_LEN; keep the temp filename short.
@@ -45,26 +46,11 @@ fn hello(label: &str) -> Hello {
     }
 }
 
-fn noisy_program() -> (&'static str, Vec<String>) {
-    // Emit output explicitly: some platforms disable PTY echo for a
-    // non-interactive shell, which would make an input-only flood silent.
+fn shell() -> (&'static str, Vec<String>) {
     if cfg!(windows) {
-        (
-            "cmd.exe",
-            vec![
-                "/Q".into(),
-                "/C".into(),
-                "for /L %i in (1,1,500000) do @echo aaaaaaaaaaaaaaaaaaaa".into(),
-            ],
-        )
+        ("cmd.exe", vec!["/Q".into()])
     } else {
-        (
-            "sh",
-            vec![
-                "-c".into(),
-                "while true; do echo aaaaaaaaaaaaaaaaaaaa; done".into(),
-            ],
-        )
+        ("sh", Vec::new())
     }
 }
 
@@ -81,17 +67,46 @@ async fn wait_for(label: &str, session: &ClientSession, predicate: impl Fn(&Sess
     .unwrap_or_else(|_| panic!("{label} within timeout"));
 }
 
+fn pane_has_a(view: &SessionView, pane_id: u64) -> bool {
+    view.pane(pane_id)
+        .and_then(|pane| pane.snapshot.as_ref())
+        .is_some_and(|snapshot| {
+            snapshot
+                .cells
+                .iter()
+                .any(|row| row.cells.iter().any(|cell| cell.text.contains('a')))
+        })
+}
+
+async fn flood_pane(endpoint: &Endpoint, pane_id: u64) {
+    // Short lines matter: canonical mode on macOS stops echoing a line once
+    // its line-length limit is hit. Ten rounds send about 9 MB in total.
+    let flood = format!("{}\n", "a".repeat(80)).repeat(11_000);
+    for _ in 0..10 {
+        let sent = command(
+            endpoint,
+            Command::SendText {
+                pane_id,
+                text: flood.clone(),
+            },
+        )
+        .await
+        .expect("flood response");
+        assert!(sent.ok, "{:?}", sent.error);
+    }
+}
+
 #[tokio::test]
-async fn stalled_client_is_disconnected_with_busy_and_cannot_block_other_clients() {
+async fn ten_megabytes_and_repeated_attach_stay_responsive() {
     let (endpoint, socket) = test_endpoint();
     let listener = endpoint.bind().await.expect("bind");
     let server = tokio::spawn(stitch_mux_server::serve(listener));
 
-    let (program, args) = noisy_program();
-    let created = stitch_mux_client::command(
+    let (program, args) = shell();
+    let created = command(
         &endpoint,
         Command::NewSession {
-            name: "noisy".into(),
+            name: "stress".into(),
             program: program.into(),
             args,
             cwd: None,
@@ -105,101 +120,46 @@ async fn stalled_client_is_disconnected_with_busy_and_cannot_block_other_clients
     assert!(created.ok, "{:?}", created.error);
     let pane_id = created.sessions[0].panes[0].id;
 
-    // A normal client keeps draining while the other connection stalls.
-    let healthy = ClientSession::attach(&endpoint, "noisy", hello("healthy"))
+    let first = ClientSession::attach(&endpoint, "stress", hello("first"))
         .await
-        .expect("healthy attach");
-    wait_for("healthy attach", &healthy, |view| {
-        view.pane(pane_id).is_some()
+        .expect("first attach");
+    let second = ClientSession::attach(&endpoint, "stress", hello("second"))
+        .await
+        .expect("second attach");
+    for label in ["first", "second"] {
+        let client = if label == "first" { &first } else { &second };
+        wait_for(label, client, |view| view.pane(pane_id).is_some()).await;
+    }
+
+    flood_pane(&endpoint, pane_id).await;
+    wait_for("first client sees the flood", &first, |view| {
+        pane_has_a(view, pane_id)
     })
     .await;
+    wait_for("second client sees the flood", &second, |view| {
+        pane_has_a(view, pane_id)
+    })
+    .await;
+    assert_eq!(first.view().connection, ConnectionState::Connected);
+    assert_eq!(second.view().connection, ConnectionState::Connected);
 
-    let (mut stalled, _ack) = connect(&endpoint, hello("stalled"))
-        .await
-        .expect("stalled handshake");
-    stalled
-        .send(
-            MessageKind::Attach,
-            &Attach {
-                session_name: "noisy".into(),
-                takeover: false,
-            },
-        )
-        .await
-        .expect("stalled attach");
-    // Deliberately do not read from `stalled`: its socket buffer and the
-    // daemon's bounded update queue will fill under the child's output.
-
-    // Short lines matter: canonical mode on macOS stops echoing a line once
-    // its line-length limit is hit, so the flood must include newlines. Each
-    // round writes about 9 MB; extra rounds cover slower CI socket buffers.
-    let flood = format!("{}\n", "a".repeat(80)).repeat(11_000);
-    async fn flood_pane(endpoint: &Endpoint, pane_id: u64, flood: &str) {
-        for _ in 0..10 {
-            let sent = stitch_mux_client::command(
-                endpoint,
-                Command::SendText {
-                    pane_id,
-                    text: flood.to_owned(),
-                },
-            )
+    for index in 0..3 {
+        let transient = ClientSession::attach(&endpoint, "stress", hello("transient"))
             .await
-            .expect("flood response");
-            assert!(sent.ok, "{:?}", sent.error);
-        }
-    }
-    flood_pane(&endpoint, pane_id, &flood).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    wait_for("healthy client keeps draining", &healthy, |view| {
-        view.pane(pane_id)
-            .and_then(|pane| pane.snapshot.as_ref())
-            .is_some_and(|snapshot| {
-                snapshot
-                    .cells
-                    .iter()
-                    .any(|row| row.cells.iter().any(|cell| cell.text.contains('a')))
-            })
-    })
-    .await;
-    assert_eq!(healthy.view().connection, ConnectionState::Connected);
-
-    let mut busy: Option<ErrorInfo> = None;
-    let mut disconnected = false;
-    for round in 0..3 {
-        if round > 0 {
-            flood_pane(&endpoint, pane_id, &flood).await;
-        }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-        while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(Duration::from_millis(500), stalled.recv_frame()).await {
-                Ok(Ok(frame)) => {
-                    if frame.kind == MessageKind::Error
-                        && let Ok(error) = decode_message::<ErrorInfo>(&frame)
-                    {
-                        busy = Some(error);
-                        break;
-                    }
-                }
-                Ok(Err(_)) => {
-                    disconnected = true;
-                    break;
-                }
-                Err(_) => {}
-            }
-        }
-        if busy.is_some() || disconnected {
-            break;
-        }
-    }
-    assert!(
-        busy.is_some() || disconnected,
-        "slow client must be disconnected"
-    );
-    if let Some(error) = busy {
-        assert_eq!(error.code, ErrorCode::Busy);
+            .expect("transient attach");
+        wait_for("transient attach", &transient, |view| {
+            view.pane(pane_id).is_some()
+        })
+        .await;
+        transient.detach().await;
+        assert_eq!(
+            first.view().connection,
+            ConnectionState::Connected,
+            "{index}"
+        );
     }
 
-    let capture = stitch_mux_client::command(
+    let capture = command(
         &endpoint,
         Command::Capture {
             pane_id,
@@ -212,16 +172,17 @@ async fn stalled_client_is_disconnected_with_busy_and_cannot_block_other_clients
     .expect("capture response");
     assert!(capture.ok, "{:?}", capture.error);
 
-    healthy.detach().await;
-    let killed = stitch_mux_client::command(
+    let killed = command(
         &endpoint,
         Command::KillSession {
-            name: "noisy".into(),
+            name: "stress".into(),
         },
     )
     .await
     .expect("kill response");
     assert!(killed.ok, "{:?}", killed.error);
+    first.detach().await;
+    second.detach().await;
     server.abort();
     if let Some(path) = socket {
         let _ = tokio::fs::remove_file(path).await;

@@ -195,7 +195,7 @@ Before marking a task Ready for review:
 | M0 — workspace, core, protocol, client skeleton | **Done** | `3b6bcca`; 30 tests; fmt/clippy/test/doc green; CLI `ping` verified on Windows named pipe |
 | M1 — one-pane GUI session with detach/reattach | **Done** | 35 tests; real-child echo, capture, resize, detach/reattach test; CLI `new`/`ls`/`kill`/`gui` smoke; abrupt GUI kill leaves child alive and clears attached count |
 | M2 — multi-pane GUI layout and per-client focus | **Done** | 42 tests; real-child split/focus/zoom/stale-revision/close test; CLI `new`/`split`/`ls`/`zoom`/`close`/`kill` smoke; 8-second GUI smoke leaves children alive with `attached_clients: 0` |
-| M3 — multiple clients, backpressure | **Done** | 52 tests; real-endpoint tests for two-client focus/size/detach, registry commands and typed shutdown, a 10 MB stalled-client disconnect, and a deterministic typed `Busy` frame test; CLI `clients`/`rename`/`shutdown` smoke; GUI survives daemon loss |
+| M3 — multiple clients, backpressure | **Done** | 52 tests; real-endpoint tests for two-client focus/size/detach, registry commands and typed shutdown, a 10 MB two-client stress run with repeated attach/detach, and a deterministic typed `Busy` frame test; CLI `clients`/`rename`/`shutdown` smoke; GUI survives daemon loss |
 | M4 — terminal ANSI compatibility | Backlog | Structured path first |
 | M5 — Qt/PySide6 + optional GPUI | Backlog | Second-toolkit proof, no protocol changes allowed |
 | M6 — hardening / v0.1 | Backlog | Release checklist in `IMPLEMENTATION_PLAN.md` §7 |
