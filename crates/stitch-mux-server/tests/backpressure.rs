@@ -116,7 +116,14 @@ async fn stalled_client_is_disconnected_with_busy_and_cannot_block_other_clients
 
     // Ten megabytes of echoed input is enough to exceed any local socket or
     // pipe buffer while the stalled client refuses to read.
-    let flood = "a".repeat(900_000);
+    // Short lines matter: canonical mode on macOS stops echoing a line once
+    // its line-length limit is hit, so the flood must include newlines.
+    let flood = format!(
+        "{}
+",
+        "a".repeat(80)
+    )
+    .repeat(11_000);
     for _ in 0..10 {
         let sent = stitch_mux_client::command(
             &endpoint,
