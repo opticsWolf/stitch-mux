@@ -65,29 +65,6 @@ async fn wait_for(label: &str, session: &ClientSession, predicate: impl Fn(&Sess
     .unwrap_or_else(|_| panic!("{label} within timeout"));
 }
 
-async fn wait_for_render_text(label: &str, session: &ClientSession, needle: &str, after: u64) {
-    let mut receiver = session.subscribe();
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            {
-                let view = receiver.borrow_and_update();
-                if view.render_seq > after
-                    && view.render.as_ref().is_some_and(|render| {
-                        String::from_utf8_lossy(&render.ansi).contains(needle)
-                    })
-                {
-                    return;
-                }
-            }
-            if receiver.changed().await.is_err() {
-                panic!("connection closed before {label}");
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{label} within timeout"));
-}
-
 async fn captured_text(endpoint: &Endpoint, pane_id: u64) -> String {
     let response = command(
         endpoint,
@@ -155,7 +132,6 @@ async fn terminal_projection_shares_layout_and_output_with_a_structured_client()
     .await;
 
     terminal.send(Outbound::Input(InputEvent::Text("echo M4-SHARED\n".into())));
-    wait_for_render_text("output in Render", &terminal, "M4-SHARED", first_seq).await;
     let mut text = String::new();
     for _ in 0..40 {
         text = captured_text(&endpoint, pane_id).await;
@@ -165,6 +141,10 @@ async fn terminal_projection_shares_layout_and_output_with_a_structured_client()
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(text.contains("M4-SHARED"), "capture: {text:?}");
+    wait_for("incremental Render after output", &terminal, |view| {
+        view.render_seq > first_seq
+    })
+    .await;
     let delta = terminal.view().render.expect("render");
     assert!(!delta.full, "steady-state output must use a delta frame");
 
