@@ -25,4 +25,7 @@ fn main() {
     }
     stdout.write_all(b"\nSTRESS-DONE\n").expect("marker");
     stdout.flush().expect("marker flush");
+    // Let the PTY reader consume the marker before the slave closes; macOS
+    // can drop unread tail bytes when the child exits immediately.
+    std::thread::sleep(Duration::from_millis(500));
 }
