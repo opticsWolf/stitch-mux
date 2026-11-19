@@ -6,7 +6,9 @@ A terminal multiplexer built on top of [`stitch-pty`](../stitch-pty).
 > registry, sizes sessions to the smallest attached client, bounds and coalesces
 > each client's updates, and exposes `ListClients`, `DetachClient`, session
 > rename, and typed shutdown. The reference GUI retries lost sessions with
-> backoff and never silently recreates them.
+> backoff and never silently recreates them. A 10 MiB two-client stress test,
+> a stalled-client `Busy` proof, terminal DA/DSR replies, and GUI backoff/picker
+> tests run in CI.
 
 ## Why another multiplexer?
 

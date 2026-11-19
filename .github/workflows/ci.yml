@@ -35,6 +35,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
 
+  stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release -p stitch-mux-server --test stress -- --ignored
+
   toolkit-neutral:
     runs-on: ubuntu-latest
     steps:

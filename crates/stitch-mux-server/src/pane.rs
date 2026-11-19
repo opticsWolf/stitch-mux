@@ -19,7 +19,7 @@ use stitch_pty::terminal::{
 };
 use stitch_pty::{HistoryScreen, PtySession, Winsize};
 use thiserror::Error;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{Notify, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use unicode_width::UnicodeWidthChar;
 
@@ -71,6 +71,91 @@ struct PaneState {
     program: String,
     bell: bool,
     last_activity_unix_ms: u64,
+    queries: QueryScanner,
+}
+
+/// Minimal terminal-query responder.
+///
+/// `stitch-pty` owns the screen but its `HistoryScreen` response callback is
+/// not settable through the published API, so DA/DSR requests would otherwise
+/// go unanswered and leave programs waiting. Scan the PTY byte stream for the
+/// queries the server must answer and write the replies back to the child.
+/// Remove this once `stitch-pty` exposes a response sink.
+#[derive(Default)]
+struct QueryScanner {
+    pending: Vec<u8>,
+}
+
+impl QueryScanner {
+    fn scan(&mut self, bytes: &[u8], cursor: (usize, usize)) -> Vec<Vec<u8>> {
+        const MAX_PENDING: usize = 64;
+        const ESC: u8 = 0x1b;
+        const FINAL_MIN: u8 = 0x40;
+        const FINAL_MAX: u8 = 0x7e;
+
+        self.pending.extend_from_slice(bytes);
+        let mut responses = Vec::new();
+        let mut consumed = 0;
+        let mut i = 0;
+        while i < self.pending.len() {
+            if self.pending[i] != ESC {
+                i += 1;
+                continue;
+            }
+            if i + 1 >= self.pending.len() {
+                break;
+            }
+            if self.pending[i + 1] != b'[' {
+                i += 1;
+                continue;
+            }
+            let mut end = i + 2;
+            while end < self.pending.len() && !(FINAL_MIN..=FINAL_MAX).contains(&self.pending[end])
+            {
+                end += 1;
+            }
+            if end == self.pending.len() {
+                break;
+            }
+            let params = &self.pending[i + 2..end];
+            let final_byte = self.pending[end];
+            if let Some(response) = query_response(params, final_byte, cursor) {
+                responses.push(response);
+            }
+            i = end + 1;
+            consumed = i;
+        }
+        if consumed > 0 {
+            self.pending.drain(..consumed);
+        }
+        if self.pending.len() > MAX_PENDING {
+            self.pending.clear();
+        }
+        responses
+    }
+}
+
+fn query_response(params: &[u8], final_byte: u8, cursor: (usize, usize)) -> Option<Vec<u8>> {
+    let private = params.first() == Some(&b'?');
+    let secondary = params.first() == Some(&b'>');
+    let body = params
+        .strip_prefix(b"?")
+        .or_else(|| params.strip_prefix(b">"))
+        .unwrap_or(params);
+    match final_byte {
+        b'c' if secondary => Some(b"\x1b[>0;276;0c".to_vec()),
+        b'c' if body.is_empty() || body == b"0" => Some(b"\x1b[?6c".to_vec()),
+        b'n' if body == b"5" && !private && !secondary => Some(b"\x1b[0n".to_vec()),
+        b'n' if body == b"6" => {
+            let (row, col) = cursor;
+            if private {
+                Some(format!("\x1b[?{};{}R", row + 1, col + 1).into_bytes())
+            } else {
+                Some(format!("\x1b[{};{}R", row + 1, col + 1).into_bytes())
+            }
+        }
+        _ => None,
+    }
 }
 
 pub struct PaneRuntime {
@@ -81,8 +166,7 @@ pub struct PaneRuntime {
     state: Mutex<PaneState>,
     updates: broadcast::Sender<Arc<PaneUpdate>>,
     input_tx: mpsc::UnboundedSender<Vec<u8>>,
-    exit_tx: watch::Sender<bool>,
-    exit_rx: watch::Receiver<bool>,
+    reader_done: Arc<Notify>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -124,7 +208,7 @@ impl PaneRuntime {
         let screen = HistoryScreen::new(cols as usize, rows as usize, 2000);
         let (updates, _) = broadcast::channel(UPDATE_QUEUE);
         let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (exit_tx, exit_rx) = watch::channel(false);
+        let reader_done = Arc::new(Notify::new());
 
         let runtime = Arc::new(Self {
             id,
@@ -137,11 +221,11 @@ impl PaneRuntime {
                 program: spec.program.clone(),
                 bell: false,
                 last_activity_unix_ms: now_unix_ms(),
+                queries: QueryScanner::default(),
             }),
             updates,
             input_tx,
-            exit_tx,
-            exit_rx,
+            reader_done: Arc::clone(&reader_done),
             tasks: Mutex::new(Vec::new()),
         });
 
@@ -155,38 +239,50 @@ impl PaneRuntime {
         });
 
         let reader_runtime = Arc::clone(&runtime);
-        let mut reader_exit = runtime.exit_rx.clone();
+        let reader_notify = Arc::clone(&reader_done);
         let reader = tokio::spawn(async move {
             let mut buf = vec![0_u8; READ_CHUNK];
             loop {
-                tokio::select! {
-                    biased;
-                    _ = reader_exit.changed() => break,
-                    result = reader_runtime.session.read(&mut buf) => match result {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            let (dirty, events) = {
-                                let mut state = reader_runtime.lock_state();
-                                state.screen.feed(&buf[..n]);
-                                (state.screen.take_dirty_rows(), state.screen.take_events())
+                match reader_runtime.session.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let (dirty, events, responses) = {
+                            let mut state = reader_runtime.lock_state();
+                            state.screen.feed(&buf[..n]);
+                            let cursor = {
+                                let cursor = state.screen.cursor();
+                                (cursor.y, cursor.x)
                             };
-                            reader_runtime.publish_delta(dirty, &events);
+                            let responses = state.queries.scan(&buf[..n], cursor);
+                            (
+                                state.screen.take_dirty_rows(),
+                                state.screen.take_events(),
+                                responses,
+                            )
+                        };
+                        for response in responses {
+                            let _ = reader_runtime.input_tx.send(response);
                         }
-                        Err(err) => {
-                            tracing::warn!("pane read failed: {err}");
-                            break;
-                        }
-                    },
+                        reader_runtime.publish_delta(dirty, &events);
+                    }
+                    Err(err) => {
+                        tracing::warn!("pane read failed: {err}");
+                        break;
+                    }
                 }
             }
+            reader_notify.notify_one();
         });
 
         let exit_runtime = Arc::clone(&runtime);
         let watcher = tokio::spawn(async move {
             let status = exit_runtime.session.wait().await;
-            // Let the reader drain the final bytes before announcing exit.
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            let _ = exit_runtime.exit_tx.send(true);
+            // The reader owns the PTY until EOF, so a fast child that exits
+            // after a large burst cannot lose its final bytes to a fixed
+            // drain sleep. Wait for that EOF, but do not hang the exit event
+            // forever if a platform leaves the reader blocked.
+            let _drained =
+                tokio::time::timeout(Duration::from_secs(5), exit_runtime.reader_done.notified());
             exit_runtime.publish(PaneUpdate::Exit(SessionExit {
                 session_id: exit_runtime.session_id,
                 pane_id: Some(exit_runtime.id),
@@ -218,7 +314,7 @@ impl PaneRuntime {
     }
 
     pub fn is_alive(&self) -> bool {
-        self.session.is_alive() && !*self.exit_rx.borrow()
+        self.session.is_alive()
     }
 
     pub fn write(&self, bytes: Vec<u8>) {
@@ -331,7 +427,6 @@ impl PaneRuntime {
 
     pub async fn kill(&self) {
         let _ = self.session.terminate(Duration::from_millis(250)).await;
-        let _ = self.exit_tx.send(true);
         let mut tasks = self.tasks.lock().expect("task vec");
         for task in tasks.drain(..) {
             task.abort();
@@ -525,5 +620,40 @@ mod tests {
         assert_eq!(cells[0].width, 2);
         assert_eq!(cells[1].width, 0);
         assert_eq!(cells[2].width, 1);
+    }
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::QueryScanner;
+
+    #[test]
+    fn answers_da_and_dsr_queries() {
+        let mut scanner = QueryScanner::default();
+        let mut responses = scanner.scan(b"\x1b[c\x1b[>c\x1b[5n\x1b[6n\x1b[?6n", (2, 4));
+        assert_eq!(responses.len(), 5);
+        assert_eq!(responses.remove(0), b"\x1b[?6c");
+        assert_eq!(responses.remove(0), b"\x1b[>0;276;0c");
+        assert_eq!(responses.remove(0), b"\x1b[0n");
+        assert_eq!(responses.remove(0), b"\x1b[3;5R");
+        assert_eq!(responses.remove(0), b"\x1b[?3;5R");
+    }
+
+    #[test]
+    fn buffers_a_query_split_across_reads() {
+        let mut scanner = QueryScanner::default();
+        assert!(scanner.scan(b"\x1b[6", (1, 1)).is_empty());
+        let responses = scanner.scan(b"n", (1, 1));
+        assert_eq!(responses, vec![b"\x1b[2;2R".to_vec()]);
+    }
+
+    #[test]
+    fn ignores_other_escape_sequences() {
+        let mut scanner = QueryScanner::default();
+        assert!(
+            scanner
+                .scan(b"\x1b[2J\x1b[31mhello\x1b[0m", (0, 0))
+                .is_empty()
+        );
     }
 }

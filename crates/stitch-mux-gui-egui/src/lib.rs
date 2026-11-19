@@ -21,6 +21,8 @@ const CELL_H: f32 = 18.0;
 const FONT_SIZE: f32 = 14.0;
 const STATUS_H: f32 = 30.0;
 const BORDER_PX: f32 = 2.0;
+const INITIAL_RETRY: Duration = Duration::from_millis(500);
+const MAX_RETRY: Duration = Duration::from_secs(8);
 
 /// Launch the reference GUI. `session` may be omitted to show the picker.
 pub fn run(endpoint: Endpoint, session: Option<String>) -> Result<(), Box<dyn Error>> {
@@ -91,7 +93,7 @@ impl MuxApp {
             last_size: Size::new(80, 24),
             next_request_id: 1,
             error: None,
-            retry_backoff: Duration::from_millis(500),
+            retry_backoff: INITIAL_RETRY,
             next_retry: None,
             lost_session: None,
         };
@@ -123,12 +125,12 @@ impl MuxApp {
                 self.selected = name.to_owned();
                 self.error = None;
                 self.lost_session = None;
-                self.retry_backoff = Duration::from_millis(500);
+                self.retry_backoff = INITIAL_RETRY;
                 self.next_retry = None;
             }
             Err(err) => {
                 self.error = Some(err.to_string());
-                self.retry_backoff = (self.retry_backoff * 2).min(Duration::from_secs(8));
+                self.retry_backoff = next_backoff(self.retry_backoff);
                 self.next_retry = Some(Instant::now() + self.retry_backoff);
             }
         }
@@ -319,23 +321,8 @@ impl MuxApp {
                     .map(|pane| format!("{} ({}) {}x{}", pane.title, pane.id, pane.cols, pane.rows))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let lost = if self.lost_session.as_deref() == Some(info.name.as_str()) {
-                    " [last session lost]"
-                } else {
-                    ""
-                };
-                let label = format!(
-                    "{}{} — {}x{}, {} pane(s), {} client(s), working {}\nlast activity {}\n{}",
-                    info.name,
-                    lost,
-                    info.cols,
-                    info.rows,
-                    info.pane_count,
-                    info.attached_clients,
-                    info.activity.working,
-                    age_label(info.last_activity_unix_ms),
-                    panes
-                );
+                let label =
+                    session_label(&info, self.lost_session.as_deref(), now_unix_ms(), &panes);
                 if ui.button(label).clicked() {
                     self.attach(&info.name);
                 }
@@ -669,15 +656,47 @@ fn cell_rect(grid: egui::Rect, cell: Rect, cell_w: f32, cell_h: f32) -> egui::Re
     )
 }
 
-fn age_label(unix_ms: u64) -> String {
+fn next_backoff(current: Duration) -> Duration {
+    (current * 2).min(MAX_RETRY)
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn session_label(
+    info: &SessionInfo,
+    lost_session: Option<&str>,
+    now_ms: u64,
+    panes: &str,
+) -> String {
+    let lost = if lost_session == Some(info.name.as_str()) {
+        " [last session lost]"
+    } else {
+        ""
+    };
+    format!(
+        "{}{} — {}x{}, {} pane(s), {} client(s), working {}\nlast activity {}\n{}",
+        info.name,
+        lost,
+        info.cols,
+        info.rows,
+        info.pane_count,
+        info.attached_clients,
+        info.activity.working,
+        age_label_at(info.last_activity_unix_ms, now_ms),
+        panes
+    )
+}
+
+fn age_label_at(unix_ms: u64, now_ms: u64) -> String {
     if unix_ms == 0 {
         return "unknown".into();
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    let seconds = now.saturating_sub(unix_ms) / 1000;
+    let seconds = now_ms.saturating_sub(unix_ms) / 1000;
     match seconds {
         0..=4 => "just now".into(),
         5..=59 => format!("{seconds}s ago"),
@@ -799,5 +818,81 @@ fn map_key(key: egui::Key) -> Option<KeyCode> {
         Key::F11 => Some(KeyCode::F(11)),
         Key::F12 => Some(KeyCode::F(12)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stitch_mux_core::ActivitySummary;
+    use stitch_mux_protocol::{PaneInfo, PanePlacement};
+
+    fn info(name: &str) -> SessionInfo {
+        SessionInfo {
+            id: 1,
+            name: name.into(),
+            cols: 120,
+            rows: 40,
+            pane_count: 2,
+            detached_pane_count: 0,
+            window_count: 1,
+            attached_clients: 3,
+            created_at_unix_ms: 1_000,
+            last_activity_unix_ms: 121_000,
+            activity: ActivitySummary {
+                working: 1,
+                ..ActivitySummary::default()
+            },
+            panes: vec![PaneInfo {
+                id: 7,
+                title: "vim".into(),
+                cwd: None,
+                cols: 60,
+                rows: 38,
+                alive: true,
+                placement: PanePlacement::Tiled,
+                window_id: Some(1),
+                owner_client_id: None,
+                program_status: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn retry_backoff_doubles_and_caps_at_eight_seconds() {
+        let mut backoff = INITIAL_RETRY;
+        for expected in [
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+            Duration::from_secs(8),
+            Duration::from_secs(8),
+        ] {
+            backoff = next_backoff(backoff);
+            assert_eq!(backoff, expected);
+        }
+    }
+
+    #[test]
+    fn picker_marks_only_the_lost_session_and_shows_activity() {
+        let label = session_label(&info("demo"), Some("demo"), 181_000, "vim (7) 60x38");
+        assert!(label.contains("demo [last session lost]"), "{label}");
+        assert!(
+            label.contains("120x40, 2 pane(s), 3 client(s), working 1"),
+            "{label}"
+        );
+        assert!(label.contains("last activity 1m ago"), "{label}");
+        assert!(label.contains("vim (7) 60x38"), "{label}");
+
+        let other = session_label(&info("other"), Some("demo"), 181_000, "");
+        assert!(!other.contains("last session lost"), "{other}");
+    }
+
+    #[test]
+    fn activity_age_is_deterministic() {
+        assert_eq!(age_label_at(0, 181_000), "unknown");
+        assert_eq!(age_label_at(180_000, 181_000), "just now");
+        assert_eq!(age_label_at(121_000, 181_000), "1m ago");
+        assert_eq!(age_label_at(1_000, 181_000), "3m ago");
     }
 }

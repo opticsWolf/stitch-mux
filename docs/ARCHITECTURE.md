@@ -383,18 +383,21 @@ screen exactly once, and publishes state changes:
 
 ```text
 loop:
-  n = reader.read_timeout(buf, 50ms)
+  n = session.read(&mut buf).await
   if n > 0:
       screen.feed(&buf[..n])
+      answer DA/DSR queries from the same bytes
       publish dirty rows + metadata (coalesced)
-  if n == 0 or session not alive:
-      publish Exited
+  if n == 0 or read fails:
+      notify reader_done
       break
-  drain pending pane commands
 ```
 
-The 50 ms timeout is a cancellation point, not a polling delay for normal
-output. Pane commands (resize, capture, close, write) are handled between reads.
+The reader owns the PTY until EOF. The exit watcher waits for `reader_done`
+(with a bounded fallback) before publishing `Exited`, so a child that exits
+immediately after a large burst cannot lose its final bytes to a fixed drain
+sleep. Pane commands (resize, capture, close, write) are handled between reads
+by the pane runtime, not by blocking the reader.
 
 ### 6.3 Writer and terminal replies
 
@@ -407,11 +410,12 @@ client input ─┐
 parser reply ─┘
 ```
 
-`HistoryScreen` exposes `write_process_input()` for device-attribute/status and
-keyboard-mode query replies. The pane installs a closure that sends those
-replies to the writer queue (using a non-blocking `try_send`; the parser must
-never block). This is essential: a multiplexer must answer terminal queries on
-behalf of the pane, even when no client is attached.
+`HistoryScreen` parses device-attribute/status and keyboard-mode queries, but
+the published `stitch-pty` API exposes its response callback only as an
+invocation accessor, not a settable sink. The pane therefore scans the same PTY
+bytes for DA/DSR queries and sends the replies through the existing writer
+queue. The scanner is bounded, never blocks, and answers even when no client is
+attached. Replace it with the emulator callback once `stitch-pty` exposes one.
 
 ### 6.4 Screen snapshot
 
