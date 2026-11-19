@@ -188,12 +188,15 @@ pub async fn run(endpoint: Endpoint, session_name: &str) -> Result<(), TerminalE
     let (cols, rows) = crossterm::terminal::size()?;
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(
+    if let Err(err) = execute!(
         stdout,
         EnterAlternateScreen,
         EnableBracketedPaste,
         crossterm::cursor::Hide
-    )?;
+    ) {
+        let _ = crossterm::terminal::disable_raw_mode();
+        return Err(TerminalError::Io(err));
+    }
     // Progressive enhancement is optional; older hosts keep legacy escapes
     // and the daemon still encodes keys for the focused pane.
     let _ = execute!(stdout, PushKeyboardEnhancementFlags(KEYBOARD_FLAGS));

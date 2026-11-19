@@ -6,7 +6,7 @@ This is the **operating protocol** for turning the design in
 document: update it in the **same commit** as the work it describes. It is not
 the wire protocol; that contract lives in [PROTOCOL.md](PROTOCOL.md).
 
-Last updated: **2026-11-19** — M0, M1, M2, and M3 complete, M4 ready.
+Last updated: **2026-11-19** — M0–M3 complete, M4 ready for review.
 
 ## 1. Standing rules
 
@@ -199,6 +199,10 @@ Before marking a task Ready for review:
 | 2026-11-19 | Slow-client disconnect is proven end to end | A queue unit test does not prove the real socket closes with `Busy` | The same stress test stops reading one attached connection until the daemon closes it with `ErrorCode::Busy` / `"client fell behind"` |
 | 2026-11-19 | Terminal DA/DSR replies go through a bounded scanner | `stitch-pty` 0.15.0 exposes no settable process-input callback | DA1, DA2, DSR 5, DSR 6, and private CPR are answered; scanner unit tests run everywhere and a raw-mode Unix test proves the child receives the reply |
 | 2026-11-19 | GUI backoff and lost-session labeling are pure helpers | The picker and retry behavior were only exercised by hand | `next_backoff` covers 500 ms → 8 s; `session_label` covers the lost marker, sizes, clients, working count, and deterministic activity age |
+| 2026-11-19 | Terminal clients receive `Layout` plus `Render`, never cell frames | Focus switching and shared geometry need pane IDs; cell snapshots would duplicate authoritative state | `send_session_state` sends geometry to both views, then either `PaneSnapshot` or a full `Render`; PROTOCOL.md states the boundary |
+| 2026-11-19 | The ANSI compositor keeps one previous grid per terminal connection | Full repaints on every keystroke would defeat terminal compatibility | `AnsiCompositor` emits bounded cursor-addressed diffs, forces full frames on attach/geometry/`Resync`, and clips to 300x100 |
+| 2026-11-19 | The terminal frontend writes bytes but never encodes keys or parses ANSI | Key encoding belongs to the focused pane's `HistoryScreen`; a second emulator would break reattach fidelity | `stitch-mux-terminal` maps host keys to `InputEvent` and paints server frames in sequence; a skipped frame requests `Resync` |
+| 2026-11-19 | The conformance corpus is synthetic and deterministic | vim/less/htop are not guaranteed on every CI runner | `tests/conformance.rs` drives real snapshots through the compositor for bash/zsh, vim, less, htop/top, and git log patterns; `docs/CONFORMANCE.md` records the interactive pass |
 
 ## 9. Current status
 
@@ -208,7 +212,7 @@ Before marking a task Ready for review:
 | M1 — one-pane GUI session with detach/reattach | **Done** | Real-child echo, capture, resize, detach/reattach, and clean child-exit tests; the reader drains to EOF before exit, so final output is not truncated; optional cwd/foreground/shell/status metadata survives snapshots and deltas; CLI `new`/`ls`/`kill`/`gui` smoke; abrupt GUI kill leaves child alive and clears attached count |
 | M2 — multi-pane GUI layout and per-client focus | **Done** | Real-child split/focus/zoom/stale-revision/close test; focus restores per client instance across detach/reattach; picker receives pane sizes and real last-activity timestamps; CLI `new`/`split`/`ls`/`zoom`/`close`/`kill` smoke; 8-second GUI smoke leaves children alive with `attached_clients: 0` |
 | M3 — multiple clients, backpressure | **Done** | 65 tests on Unix / 64 on Windows plus one release-only 10 MiB stress; real-endpoint tests for two-client focus/size/detach, focus restore, registry commands and typed shutdown, a two-client delta-pump test with repeated attach/detach, bounded-queue/coalescer unit tests, a deterministic typed `Busy` frame test, and an end-to-end stalled-socket `Busy` proof; `CommandResponse` payload cap covers captures; CLI `clients`/`rename`/`shutdown` smoke; GUI survives daemon loss |
-| M4 — terminal ANSI compatibility | Backlog | Structured path first |
+| M4 — terminal ANSI compatibility | Ready for review | Server compositor, bounded full/diff frames, terminal adapter, combined real-endpoint tests, and the deterministic conformance corpus pass locally; awaiting cross-platform CI before marking Done |
 | M5 — Qt/PySide6 + optional GPUI | Backlog | Second-toolkit proof, no protocol changes allowed |
 | M6 — hardening / v0.1 | Backlog | Release checklist in `IMPLEMENTATION_PLAN.md` §7 |
 | M7–M12 — v0.2/v0.3 | Backlog | Only after v0.1 is published |

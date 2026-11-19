@@ -105,11 +105,13 @@ with a clear error.
 | 27 | `Event` | server → client | v0.2 automation event envelope |
 | 28-31 | reserved | — | Future local-only extensions |
 
-`view_mode` determines whether the server sends `Layout`/`PaneSnapshot`/
-`PaneDelta` (structured) or `Render` (terminal). It never sends both for one
-attach connection. Kinds 26-27 require the `EVENTS` capability; a v1 peer that
-does not advertise it treats them as unknown kinds. Kinds 28-31 are reserved
-and must not be sent without a future capability negotiation.
+Every attached client receives `Layout` so focus, pane IDs, and geometry are
+shared. `view_mode` then selects the content projection: structured clients
+receive `PaneSnapshot`/`PaneDelta`, while terminal clients receive `Render`.
+One attach connection never receives both cell frames and `Render` frames.
+Kinds 26-27 require the `EVENTS` capability; a v1 peer that does not advertise
+it treats them as unknown kinds. Kinds 28-31 are reserved and must not be sent
+without a future capability negotiation.
 
 ## 5. Handshake
 
@@ -591,7 +593,7 @@ struct Render {
     seq: u64,                    // monotonic per session
     cols: u16,
     rows: u16,
-    full: bool,                  // true in v1
+    full: bool,                  // full repaint or incremental diff
     ansi: Vec<u8>,               // raw bytes for stdout
 }
 ```
@@ -599,15 +601,26 @@ struct Render {
 On the wire, `Render` is not MessagePack: it is the 13-byte binary prefix
 followed by raw ANSI bytes shown above. The struct is the decoded form used by
 `stitch-mux-client`. The server composes the session layout, borders, status
-bar, and focused cursor, then encodes ANSI. The terminal client enters the
-alternate screen, enables bracketed paste/focus reporting, writes frames,
-forwards input/resize, and restores the terminal on detach. It does not parse
-pane output.
+bar, and focused cursor, then encodes ANSI. Frames are bounded to a clipped
+300x100 grid. A full frame resets the screen; a later frame emits only changed
+cells plus the focused cursor. Geometry, layout revision, attach, and `Resync`
+force a full frame.
+
+The terminal client enters the alternate screen, enables bracketed paste and
+optional Kitty keyboard enhancement, writes frames in sequence, forwards
+semantic input/resize, and restores the terminal on detach. It does not parse
+pane output or encode key bytes. The detach prefix is `Ctrl-]`: `d` detaches,
+`r` requests a resync, and the arrow keys move per-client focus. Semantic keys
+are encoded once by the focused pane's `HistoryScreen`, so GUI and terminal
+clients produce the same bytes.
 
 The terminal view is a compatibility projection, not a separate session model.
-Both views share PTYs, screens, layout, and per-client focus. The server may
-coalesce terminal frames; a client that falls behind sends `Resync` for the
-latest full frame.
+Both views share PTYs, screens, layout, and per-client focus. The server
+coalesces terminal updates into the newest frame per wake. A client that sees
+a sequence gap — including when a watch channel coalesces frames it never
+wrote — sends `Resync` and waits for a full frame rather than applying an
+orphan delta. Terminal rendering of OSC 8 links remains a v0.2 fidelity task;
+the structured path preserves their metadata.
 
 ## 8. Control commands and session management
 

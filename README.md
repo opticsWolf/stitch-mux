@@ -2,13 +2,14 @@
 
 A terminal multiplexer built on top of [`stitch-pty`](../stitch-pty).
 
-> **Status: M3 multi-client sessions implemented.** The daemon keeps a client
+> **Status: M4 terminal compatibility implemented.** The daemon keeps a client
 > registry, sizes sessions to the smallest attached client, bounds and coalesces
 > each client's updates, and exposes `ListClients`, `DetachClient`, session
 > rename, and typed shutdown. The reference GUI retries lost sessions with
 > backoff and never silently recreates them. A 10 MiB two-client stress test,
 > a stalled-client `Busy` proof, terminal DA/DSR replies, and GUI backoff/picker
-> tests run in CI.
+> tests run in CI. The new terminal frontend writes server-composed ANSI frames
+> and shares sessions, layout, and focus with the GUI.
 
 ## Why another multiplexer?
 
@@ -123,7 +124,7 @@ stitch-mux/
     └── stitch-mux-py/         # PyO3 control SDK + PySide6 adapter (later)
 ```
 
-## Quickstart (M2)
+## Quickstart
 
 ```sh
 # Terminal 1: local daemon
@@ -136,6 +137,7 @@ cargo run -p stitch-mux -- split -t 101 --axis columns
 cargo run -p stitch-mux -- zoom -s demo -t 101
 cargo run -p stitch-mux -- zoom -s demo   # unzoom
 cargo run -p stitch-mux -- gui        # pick "demo"
+cargo run -p stitch-mux -- attach -s demo  # ANSI terminal view
 cargo run -p stitch-mux -- clients -s demo
 cargo run -p stitch-mux -- close -t 102
 cargo run -p stitch-mux -- rename --from demo --to work
@@ -148,11 +150,19 @@ drag a splitter to change its ratio, and use the status bar to split, close,
 zoom, and detach. The egui adapter is a disposable reference; the protocol and
 client state are toolkit-neutral.
 
+The terminal view can be open at the same time as the GUI. It enters the
+alternate screen and restores it on detach. `Ctrl-]` is the local prefix:
+`Ctrl-] d` detaches without killing the child, `Ctrl-] r` requests a full
+resync, and `Ctrl-]` followed by an arrow moves this client's focus. All other
+keys are sent as semantic key events; the daemon's authoritative screen encodes
+them for the focused pane's Kitty flags.
+
 ## Documentation map
 
 - [Architecture](docs/ARCHITECTURE.md) — the design and the reasoning.
 - [Protocol](docs/PROTOCOL.md) — the local wire protocol.
 - [Frontends](docs/FRONTENDS.md) — egui, GPUI, and Qt/PySide6 adapter design.
+- [Conformance](docs/CONFORMANCE.md) — M4 terminal corpus and interactive checks.
 - [Automation](docs/AUTOMATION.md) — local CLI, event stream, and agent skill.
 - [Implementation plan](docs/IMPLEMENTATION_PLAN.md) — milestones and order of
   work.

@@ -139,6 +139,21 @@ runs the action, or encodes the key for the pane. This keeps the GUI and termina
 client consistent. The adapter may cache `ListActions`/`GetKeymap` and refresh
 on `KeymapChanged`.
 
+### 2.4 Terminal projection
+
+`stitch-mux-terminal` is not a cell painter. The daemon composes the session
+layout, borders, status bar, styles, cursor, and dirty-cell diffs into `Render`
+frames; the adapter writes those bytes to stdout in sequence. It receives
+`Layout` for pane IDs and per-client focus, but never `PaneSnapshot`/
+`PaneDelta`, and it never parses ANSI or owns a screen model.
+
+Host key events become semantic `InputEvent::Key` values with Kitty-compatible
+modifier bits. The focused pane's `HistoryScreen` decides the actual bytes,
+using the same path as every GUI adapter. The local prefix is `Ctrl-]`: `d`
+detaches, `r` requests a full `Resync`, and arrows move this client's focus.
+If a watch update skips frames, the adapter requests a full frame instead of
+writing a delta whose predecessor was never painted.
+
 ## 3. Toolkit comparison
 
 | Toolkit | Version surveyed | License | Strengths | Cautions | Role |

@@ -572,25 +572,24 @@ deterministic renderer), simplified for our scope.
 
 ### 7.4 ANSI encoding (terminal compatibility)
 
-The terminal-view full-frame encoder:
+The terminal-view encoder keeps the previous composed grid for one client:
 
-- hide cursor;
-- home and clear each row as needed;
-- emit style runs (SGR) and text, resetting at row end;
-- position and show the cursor last;
-- optionally wrap the frame in synchronized-output markers
-  (`CSI ? 2026 h/l`) when the client advertises support.
+- a full frame hides the cursor, sets the window title, homes and clears the
+  screen, then paints SGR style runs and text;
+- an incremental frame positions the cursor at changed spans, emits only the
+  affected cells, then restores the focused cursor;
+- geometry, layout revision, attach, and `Resync` force a full frame;
+- cells are clipped to a bounded 300x100 grid so one large client cannot turn
+  an ANSI frame into an unbounded allocation.
 
-The client enters the alternate screen, enables bracketed paste and focus
-reporting, and restores all of that on detach. Those terminal modes are client
-state, not pane state.
+The client enters the alternate screen, enables bracketed paste and optional
+Kitty keyboard enhancement, and restores all of that on detach. Those terminal
+modes are client state, not pane state. It writes frames in sequence: if a
+watch update coalesces away frames it never wrote, it requests `Resync` instead
+of applying an orphan delta.
 
-Later optimization:
-
-- compare the new frame to the previous frame and emit only changed spans;
-- coalesce render ticks at ~30–60 Hz;
-- keep the ANSI encoder as a compatibility projection while structured cells
-  remain the primary GUI contract.
+Synchronized output (`CSI ? 2026 h/l`) and terminal OSC 8 links remain v0.2
+fidelity work. Structured cells remain the primary GUI contract.
 
 ### 7.5 Known rendering limits and fidelity work
 
