@@ -1,10 +1,30 @@
 [package]
 name = "stitch-mux-py"
-description = "PyO3 control SDK and PySide6 adapter for stitch-mux (stub until M5)"
+description = "PyO3 control SDK for stitch-mux"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [lib]
+name = "_native"
 path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+# The Rust test harness needs a linkable Python DLL on Windows; Python tests
+# below exercise the extension through maturin instead.
+test = false
+doctest = false
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+pyo3 = { version = "0.30", features = ["abi3-py311"] }
+pythonize = "0.30"
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+stitch-mux-client.workspace = true
+stitch-mux-core.workspace = true
+stitch-mux-protocol.workspace = true
