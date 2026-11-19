@@ -7,7 +7,7 @@ use stitch_mux_core::{Direction, PaneId, ResolvedPane, Size};
 use stitch_mux_protocol::{
     Attach, Command, CommandRequest, CommandResponse, Connection, Detach, Endpoint, ErrorInfo,
     FocusRequest, Frame, FrameError, FrameReader, FrameWriter, Hello, HelloAck, InputEvent,
-    MessageKind, ResizeRequest, Resync, Stream,
+    MessageKind, ResizeRequest, Resync, Stream, decode_render,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -265,6 +265,16 @@ where
                 stitch_mux_protocol::decode_message(frame)?;
             view.apply_snapshot(snapshot);
             view.needs_resync = false;
+        }
+        MessageKind::Render => {
+            let (seq, cols, rows, full, ansi) = decode_render(frame)?;
+            view.apply_render(stitch_mux_protocol::Render {
+                seq,
+                cols,
+                rows,
+                full,
+                ansi,
+            });
         }
         MessageKind::PaneDelta => {
             let delta: stitch_mux_protocol::PaneDelta = stitch_mux_protocol::decode_message(frame)?;

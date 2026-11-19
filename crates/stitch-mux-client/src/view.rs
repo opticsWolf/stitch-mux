@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use stitch_mux_core::{ActivitySummary, Row, Size};
 use stitch_mux_protocol::{
-    Attached, CommandResponse, ErrorInfo, Focus, Layout, PaneDelta, PaneSnapshot, ResizeEvent,
-    SessionExit,
+    Attached, CommandResponse, ErrorInfo, Focus, Layout, PaneDelta, PaneSnapshot, Render,
+    ResizeEvent, SessionExit,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -97,6 +97,11 @@ pub struct SessionView {
     pub connection: ConnectionState,
     pub needs_resync: bool,
     pub last_command: Option<CommandResponse>,
+    /// Latest composed ANSI frame, used only by the terminal projection.
+    ///
+    /// Structured clients never consume it; the daemon still owns all screen
+    /// state and decides whether a frame is full or incremental.
+    pub render: Option<Render>,
     pub render_seq: u64,
     pub error: Option<ErrorInfo>,
     pub exit: Option<SessionExit>,
@@ -115,6 +120,8 @@ impl SessionView {
         // A fresh attach replaces all local buffers; never draw a stale pane.
         self.layout = None;
         self.panes.clear();
+        self.render = None;
+        self.render_seq = 0;
         self.needs_resync = false;
     }
 
@@ -186,6 +193,17 @@ impl SessionView {
         self.last_command = Some(response);
     }
 
+    /// Apply the server-composed ANSI projection. No client parses these
+    /// bytes; a terminal frontend writes them to its output as-is.
+    pub fn apply_render(&mut self, render: Render) {
+        self.apply_render_seq(render.seq);
+        self.size = Size::new(render.cols, render.rows);
+        if render.full {
+            self.needs_resync = false;
+        }
+        self.render = Some(render);
+    }
+
     pub fn apply_render_seq(&mut self, seq: u64) {
         if seq <= self.render_seq {
             return;
@@ -204,6 +222,7 @@ impl SessionView {
         self.connection = ConnectionState::Disconnected;
         self.layout = None;
         self.panes.clear();
+        self.render = None;
         self.needs_resync = true;
     }
 
@@ -217,6 +236,7 @@ impl SessionView {
         self.connection = ConnectionState::Lost;
         self.layout = None;
         self.panes.clear();
+        self.render = None;
         self.needs_resync = true;
     }
 
@@ -228,6 +248,7 @@ impl SessionView {
         });
         self.layout = None;
         self.panes.clear();
+        self.render = None;
         self.needs_resync = true;
     }
 
@@ -483,5 +504,31 @@ mod tests {
         view.mark_disconnected();
         assert!(view.panes.is_empty());
         assert!(view.needs_resync);
+    }
+
+    #[test]
+    fn render_frames_are_stored_without_client_side_parsing() {
+        let mut view = SessionView::default();
+        view.apply_render(Render {
+            seq: 1,
+            cols: 90,
+            rows: 30,
+            full: true,
+            ansi: b"\\x1b[2Jhello".to_vec(),
+        });
+        assert_eq!(view.render_seq, 1);
+        assert_eq!(view.size, Size::new(90, 30));
+        assert_eq!(view.render.as_ref().unwrap().ansi, b"\\x1b[2Jhello");
+        assert!(!view.needs_resync);
+
+        view.apply_render(Render {
+            seq: 3,
+            cols: 90,
+            rows: 30,
+            full: false,
+            ansi: b"more".to_vec(),
+        });
+        assert!(view.needs_resync);
+        assert_eq!(view.render.as_ref().unwrap().ansi, b"more");
     }
 }
