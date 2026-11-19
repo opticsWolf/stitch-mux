@@ -9,9 +9,11 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 #[cfg(windows)]
+use std::collections::VecDeque;
+#[cfg(windows)]
 use std::hash::{DefaultHasher, Hash, Hasher};
 #[cfg(windows)]
-use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -138,16 +140,37 @@ fn platform_endpoint(value: &str) -> Endpoint {
     Endpoint::Windows(format!(r"\\.\pipe\{value}"))
 }
 
+/// Pending pipe instances kept ready for concurrent clients. Windows returns
+/// `ERROR_PIPE_BUSY` when every instance of a pipe is already serving a client,
+/// so a single instance made simultaneous attach/command connections flaky.
 #[cfg(not(unix))]
-fn bind_windows(name: &str) -> Result<Listener, EndpointError> {
+const PIPE_POOL: usize = 4;
+#[cfg(not(unix))]
+const ERROR_PIPE_BUSY: i32 = 231;
+
+#[cfg(not(unix))]
+fn pipe_instance(
+    name: &str,
+    first: bool,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeServer, io::Error> {
     use tokio::net::windows::named_pipe::ServerOptions;
     let mut options = ServerOptions::new();
-    options.first_pipe_instance(true).max_instances(254);
-    let first = options.create(name)?;
+    options.first_pipe_instance(first).max_instances(254);
+    options.create(name)
+}
+
+#[cfg(not(unix))]
+fn bind_windows(name: &str) -> Result<Listener, EndpointError> {
+    let first = pipe_instance(name, true)?;
+    let mut pending = VecDeque::with_capacity(PIPE_POOL);
+    pending.push_back(first);
+    for _ in 1..PIPE_POOL {
+        pending.push_back(pipe_instance(name, false)?);
+    }
     Ok(Listener {
         inner: ListenerInner::Windows {
             name: name.to_owned(),
-            next: Arc::new(Mutex::new(Some(first))),
+            pending: Mutex::new(pending),
         },
     })
 }
@@ -155,8 +178,22 @@ fn bind_windows(name: &str) -> Result<Listener, EndpointError> {
 #[cfg(not(unix))]
 async fn connect_windows(name: &str) -> Result<Stream, EndpointError> {
     use tokio::net::windows::named_pipe::ClientOptions;
-    let client = ClientOptions::new().open(name)?;
-    Ok(Stream::new(client))
+    // Retry ERROR_PIPE_BUSY: a burst of attaches can outrun the listener's
+    // pool refill. The daemon owns the endpoint, so waiting is bounded and
+    // cheap; any other error is returned immediately.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match ClientOptions::new().open(name) {
+            Ok(client) => return Ok(Stream::new(client)),
+            Err(err) if err.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                if Instant::now() >= deadline {
+                    return Err(err.into());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -185,7 +222,7 @@ enum ListenerInner {
     #[cfg(not(unix))]
     Windows {
         name: String,
-        next: Arc<Mutex<Option<tokio::net::windows::named_pipe::NamedPipeServer>>>,
+        pending: Mutex<VecDeque<tokio::net::windows::named_pipe::NamedPipeServer>>,
     },
 }
 
@@ -202,17 +239,18 @@ impl Listener {
                 Ok(Stream::new(stream))
             }
             #[cfg(not(unix))]
-            ListenerInner::Windows { name, next } => {
-                let server = next
-                    .lock()
-                    .await
-                    .take()
+            ListenerInner::Windows { name, pending } => {
+                let mut pending = pending.lock().await;
+                let server = pending
+                    .pop_front()
                     .ok_or_else(|| io::Error::other("no named-pipe instance available"))?;
+                // Refill before waiting for this client so the next connect
+                // already has an instance to land on.
+                if let Ok(spare) = pipe_instance(name, false) {
+                    pending.push_back(spare);
+                }
+                drop(pending);
                 server.connect().await?;
-                use tokio::net::windows::named_pipe::ServerOptions;
-                let mut options = ServerOptions::new();
-                options.first_pipe_instance(false).max_instances(254);
-                *next.lock().await = Some(options.create(name)?);
                 Ok(Stream::new(server))
             }
         }

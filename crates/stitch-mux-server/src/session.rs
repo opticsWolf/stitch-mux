@@ -2,7 +2,7 @@
 //! authoritative screen state, and layout revision. It stays alive when every
 //! client detaches.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
@@ -14,6 +14,7 @@ use stitch_mux_core::{
 };
 use stitch_mux_protocol::{Attached, Layout, PaneGeometry, PaneInfo, PanePlacement, SessionInfo};
 use thiserror::Error;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::broadcast;
 
 use crate::pane::{PaneError, PaneRuntime, PaneSpec};
@@ -21,6 +22,13 @@ use crate::pane::{PaneError, PaneRuntime, PaneSpec};
 const MIN_PANE: Size = Size::new(4, 2);
 const PANE_BORDER: u16 = 1;
 const LAYOUT_QUEUE: usize = 64;
+
+/// Pane IDs are unique for the lifetime of the daemon, across sessions.
+static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_pane_id() -> u64 {
+    NEXT_PANE_ID.fetch_add(1, Ordering::SeqCst)
+}
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -48,12 +56,37 @@ pub struct Session {
     cols: AtomicU16,
     rows: AtomicU16,
     pub created_at_unix_ms: u64,
-    root: StdMutex<LayoutNode>,
+    layout: StdMutex<LayoutState>,
     panes: StdMutex<BTreeMap<u64, Arc<PaneRuntime>>>,
-    zoom: StdMutex<Option<u64>>,
-    revision: AtomicU64,
-    next_pane_id: AtomicU64,
+    /// Serialises layout mutations. Reading the tree, editing it, and bumping
+    /// the revision has to be one atomic step: two concurrent splits used to
+    /// rebuild from the same stale root, so one subtree silently disappeared.
+    ops: AsyncMutex<()>,
     layout_tx: broadcast::Sender<Arc<Layout>>,
+}
+
+#[derive(Clone, Debug)]
+struct LayoutState {
+    root: LayoutNode,
+    zoom: Option<u64>,
+    revision: u64,
+}
+
+impl LayoutState {
+    /// Zoom shows one pane without changing the tree. A stale zoom target
+    /// (already closed) falls back to the full layout.
+    fn effective(&self) -> LayoutNode {
+        match self.zoom {
+            Some(pane_id) if layout_contains(&self.root, PaneId::new(pane_id)) => {
+                LayoutNode::leaf(PaneId::new(pane_id))
+            }
+            _ => self.root.clone(),
+        }
+    }
+
+    fn bump(&mut self) {
+        self.revision = self.revision.saturating_add(1).max(1);
+    }
 }
 
 impl Session {
@@ -66,9 +99,13 @@ impl Session {
             rows: self.rows.load(Ordering::Relaxed),
             status_rows: 0,
             attached_clients: clients,
-            layout_revision: self.revision.load(Ordering::Relaxed),
+            layout_revision: self.revision(),
             activity: ActivitySummary::default(),
         }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.layout.lock().expect("layout").revision
     }
 
     pub fn name(&self) -> String {
@@ -87,34 +124,25 @@ impl Session {
     }
 
     pub fn root(&self) -> LayoutNode {
-        self.root.lock().expect("layout root").clone()
+        self.layout.lock().expect("layout").root.clone()
     }
 
     fn effective_root(&self) -> LayoutNode {
-        let root = self.root();
-        let zoom = *self.zoom.lock().expect("zoom");
-        match zoom {
-            Some(pane_id) if layout_contains(&root, PaneId::new(pane_id)) => {
-                LayoutNode::leaf(PaneId::new(pane_id))
-            }
-            _ => root,
-        }
+        self.layout.lock().expect("layout").effective()
     }
 
     /// Resolve the authoritative tree. A viewport too small for a split degrades
     /// to the first pane instead of producing zero-size PTYs or a panic.
     fn resolved(&self) -> Vec<stitch_mux_core::ResolvedPane> {
-        let root = self.effective_root();
-        let area = Rect::new(
-            0,
-            0,
-            self.cols.load(Ordering::Relaxed),
-            self.rows.load(Ordering::Relaxed),
-        );
-        match resolve_layout(&root, area, MIN_PANE, PANE_BORDER) {
+        self.resolve_root(&self.effective_root(), self.size())
+    }
+
+    fn resolve_root(&self, root: &LayoutNode, size: Size) -> Vec<stitch_mux_core::ResolvedPane> {
+        let area = Rect::new(0, 0, size.cols, size.rows);
+        match resolve_layout(root, area, MIN_PANE, PANE_BORDER) {
             Ok(panes) => panes,
             Err(_) => {
-                let Some(pane_id) = first_leaf(&root) else {
+                let Some(pane_id) = first_leaf(root) else {
                     return Vec::new();
                 };
                 vec![stitch_mux_core::ResolvedPane {
@@ -127,14 +155,25 @@ impl Session {
     }
 
     pub fn layout(&self, focus: Option<u64>) -> Layout {
+        let (root, revision, size) = {
+            let state = self.layout.lock().expect("layout");
+            (
+                state.effective(),
+                state.revision,
+                Size::new(
+                    self.cols.load(Ordering::Relaxed),
+                    self.rows.load(Ordering::Relaxed),
+                ),
+            )
+        };
         let panes = self.panes.lock().expect("panes");
         let geometry = self
-            .resolved()
+            .resolve_root(&root, size)
             .into_iter()
             .map(|resolved| {
                 let title = panes
                     .get(&resolved.pane_id)
-                    .map(|pane| pane.snapshot().title)
+                    .map(|pane| pane.title())
                     .unwrap_or_default();
                 PaneGeometry {
                     pane_id: resolved.pane_id,
@@ -146,13 +185,13 @@ impl Session {
             .collect();
         Layout {
             session_id: self.id,
-            revision: self.revision.load(Ordering::Relaxed),
-            cols: self.cols.load(Ordering::Relaxed),
-            rows: self.rows.load(Ordering::Relaxed),
+            revision,
+            cols: size.cols,
+            rows: size.rows,
             status_rows: 0,
             attached_clients: 0,
             focus,
-            root: self.effective_root(),
+            root,
             panes: geometry,
         }
     }
@@ -193,10 +232,6 @@ impl Session {
             .collect()
     }
 
-    fn bump_revision(&self) -> u64 {
-        self.revision.fetch_add(1, Ordering::SeqCst) + 1
-    }
-
     fn resize_panes(&self) {
         let geometry = self.resolved();
         let panes = self.panes.lock().expect("panes");
@@ -212,16 +247,20 @@ impl Session {
     /// Attach/detach recomputation runs often; a no-op must not burn a layout
     /// revision or resize every PTY.
     pub fn resize(&self, cols: u16, rows: u16) {
-        if cols == 0
-            || rows == 0
-            || (cols == self.cols.load(Ordering::Relaxed)
-                && rows == self.rows.load(Ordering::Relaxed))
-        {
+        if cols == 0 || rows == 0 {
             return;
         }
-        self.cols.store(cols, Ordering::Relaxed);
-        self.rows.store(rows, Ordering::Relaxed);
-        self.bump_revision();
+        {
+            let mut state = self.layout.lock().expect("layout");
+            if cols == self.cols.load(Ordering::Relaxed)
+                && rows == self.rows.load(Ordering::Relaxed)
+            {
+                return;
+            }
+            self.cols.store(cols, Ordering::Relaxed);
+            self.rows.store(rows, Ordering::Relaxed);
+            state.bump();
+        }
         self.resize_panes();
         self.publish_layout();
     }
@@ -237,6 +276,7 @@ impl Session {
         axis: SplitAxis,
         ratio_bps: u16,
     ) -> Result<Layout, SessionError> {
+        let _op = self.ops.lock().await;
         let spec = {
             let panes = self.panes.lock().expect("panes");
             panes
@@ -245,40 +285,53 @@ impl Session {
                 .spec()
                 .clone()
         };
-        let new_id = self.next_pane_id.fetch_add(1, Ordering::SeqCst);
-        let root = split_leaf(
-            &self.root(),
-            PaneId::new(pane_id),
-            PaneId::new(new_id),
-            axis,
-            ratio_bps,
-        )?;
-        let area = Rect::new(
-            0,
-            0,
-            self.cols.load(Ordering::Relaxed),
-            self.rows.load(Ordering::Relaxed),
-        );
-        let (cols, rows) = resolve_layout(&root, area, MIN_PANE, PANE_BORDER)
-            .ok()
-            .and_then(|panes| {
-                panes
-                    .into_iter()
-                    .find(|pane| pane.pane_id == new_id)
-                    .map(|pane| (pane.content.cols.max(1), pane.content.rows.max(1)))
-            })
-            .unwrap_or((2, 1));
+        let new_id = next_pane_id();
+        let (root, size) = {
+            let state = self.layout.lock().expect("layout");
+            (
+                split_leaf(
+                    &state.root,
+                    PaneId::new(pane_id),
+                    PaneId::new(new_id),
+                    axis,
+                    ratio_bps,
+                )?,
+                self.size(),
+            )
+        };
+        let (cols, rows) = resolve_layout(
+            &root,
+            Rect::new(0, 0, size.cols, size.rows),
+            MIN_PANE,
+            PANE_BORDER,
+        )
+        .ok()
+        .and_then(|panes| {
+            panes
+                .into_iter()
+                .find(|pane| pane.pane_id == new_id)
+                .map(|pane| (pane.content.cols.max(1), pane.content.rows.max(1)))
+        })
+        .unwrap_or((2, 1));
         let pane = PaneRuntime::spawn(self.id, new_id, &spec, cols, rows).await?;
         self.panes.lock().expect("panes").insert(new_id, pane);
-        *self.root.lock().expect("layout root") = root;
-        *self.zoom.lock().expect("zoom") = None;
-        self.bump_revision();
+        {
+            let mut state = self.layout.lock().expect("layout");
+            state.root = root;
+            state.zoom = None;
+            state.bump();
+        }
         self.resize_panes();
         self.publish_layout();
         Ok(self.layout(Some(pane_id)))
     }
 
     pub async fn close(&self, pane_id: u64) -> Result<Option<Layout>, SessionError> {
+        let _op = self.ops.lock().await;
+        let next_root = {
+            let state = self.layout.lock().expect("layout");
+            close_leaf(&state.root, PaneId::new(pane_id))?
+        };
         let pane = {
             let mut panes = self.panes.lock().expect("panes");
             if panes.len() == 1 && panes.contains_key(&pane_id) {
@@ -288,61 +341,78 @@ impl Session {
                 .remove(&pane_id)
                 .ok_or(SessionError::PaneNotFound(pane_id))?
         };
-        pane.kill().await;
-        let Some(next_root) = close_leaf(&self.root(), PaneId::new(pane_id))? else {
+        let Some(next_root) = next_root else {
             return Ok(None);
         };
-        *self.root.lock().expect("layout root") = next_root;
-        let mut zoom = self.zoom.lock().expect("zoom");
-        if *zoom == Some(pane_id) {
-            *zoom = None;
+        {
+            let mut state = self.layout.lock().expect("layout");
+            state.root = next_root;
+            if state.zoom == Some(pane_id) {
+                state.zoom = None;
+            }
+            state.bump();
         }
-        drop(zoom);
-        self.bump_revision();
+        pane.kill().await;
         self.resize_panes();
         self.publish_layout();
         Ok(Some(self.layout(None)))
     }
 
-    pub fn set_layout(&self, root: LayoutNode, base_revision: u64) -> Result<Layout, SessionError> {
-        let current = self.revision.load(Ordering::Relaxed);
+    pub async fn set_layout(
+        &self,
+        root: LayoutNode,
+        base_revision: u64,
+    ) -> Result<Layout, SessionError> {
+        let _op = self.ops.lock().await;
+        self.check_revision(base_revision)?;
+        validate_layout(&root)?;
+        let requested: BTreeSet<u64> = layout_leaves(&root).into_iter().map(PaneId::get).collect();
+        let known: BTreeSet<u64> = self.panes.lock().expect("panes").keys().copied().collect();
+        if requested != known {
+            return Err(SessionError::LayoutMismatch);
+        }
+        {
+            let mut state = self.layout.lock().expect("layout");
+            // A canonical resize can bump the revision while this layout is
+            // validated; never apply a request that was already stale.
+            if base_revision != state.revision {
+                return Err(SessionError::StaleLayout {
+                    expected: base_revision,
+                    current: state.revision,
+                });
+            }
+            state.root = root;
+            state.zoom = None;
+            state.bump();
+        }
+        self.resize_panes();
+        self.publish_layout();
+        Ok(self.layout(None))
+    }
+
+    fn check_revision(&self, base_revision: u64) -> Result<(), SessionError> {
+        let current = self.revision();
         if base_revision != current {
             return Err(SessionError::StaleLayout {
                 expected: base_revision,
                 current,
             });
         }
-        validate_layout(&root)?;
-        let requested: BTreeMap<u64, ()> = layout_leaves(&root)
-            .into_iter()
-            .map(|id| (id.get(), ()))
-            .collect();
-        let known: BTreeMap<u64, ()> = self
-            .panes
-            .lock()
-            .expect("panes")
-            .keys()
-            .map(|id| (*id, ()))
-            .collect();
-        if requested != known {
-            return Err(SessionError::LayoutMismatch);
-        }
-        *self.root.lock().expect("layout root") = root;
-        *self.zoom.lock().expect("zoom") = None;
-        self.bump_revision();
-        self.resize_panes();
-        self.publish_layout();
-        Ok(self.layout(None))
+        Ok(())
     }
 
-    pub fn zoom(&self, pane_id: Option<u64>) -> Result<Layout, SessionError> {
+    pub async fn zoom(&self, pane_id: Option<u64>) -> Result<Layout, SessionError> {
+        let _op = self.ops.lock().await;
         if let Some(id) = pane_id
             && self.pane(id).is_none()
         {
             return Err(SessionError::PaneNotFound(id));
         }
-        *self.zoom.lock().expect("zoom") = pane_id;
-        self.bump_revision();
+        {
+            let mut state = self.layout.lock().expect("layout");
+            state.zoom = pane_id;
+            state.bump();
+        }
         self.resize_panes();
         self.publish_layout();
         Ok(self.layout(pane_id))
@@ -369,18 +439,18 @@ impl Session {
             .into_iter()
             .filter_map(|id| panes.iter().find(|pane| pane.id == id))
             .map(|pane| {
-                let snapshot = pane.snapshot();
+                let meta = pane.meta();
                 PaneInfo {
                     id: pane.id,
-                    title: snapshot.title,
-                    cwd: snapshot.cwd,
-                    cols: snapshot.cols,
-                    rows: snapshot.rows,
+                    title: meta.title,
+                    cwd: meta.cwd,
+                    cols: meta.cols,
+                    rows: meta.rows,
                     alive: pane.is_alive(),
                     placement: PanePlacement::Tiled,
                     window_id: Some(1),
                     owner_client_id: None,
-                    program_status: snapshot.program_status,
+                    program_status: None,
                 }
             })
             .collect();
@@ -461,7 +531,7 @@ impl SessionRegistry {
             return Err(SessionError::AlreadyExists(name.to_owned()));
         }
         let session_id = self.next_id + 1;
-        let pane_id = session_id * 100 + 1;
+        let pane_id = next_pane_id();
         let spec = PaneSpec::new(program, args, cwd, env);
         let pane = PaneRuntime::spawn(session_id, pane_id, &spec, cols, rows).await?;
         let panes = BTreeMap::from([(pane_id, Arc::clone(&pane))]);
@@ -472,11 +542,13 @@ impl SessionRegistry {
             cols: AtomicU16::new(cols),
             rows: AtomicU16::new(rows),
             created_at_unix_ms: now_unix_ms(),
-            root: StdMutex::new(LayoutNode::leaf(PaneId::new(pane_id))),
+            layout: StdMutex::new(LayoutState {
+                root: LayoutNode::leaf(PaneId::new(pane_id)),
+                zoom: None,
+                revision: 1,
+            }),
             panes: StdMutex::new(panes),
-            zoom: StdMutex::new(None),
-            revision: AtomicU64::new(1),
-            next_pane_id: AtomicU64::new(pane_id + 1),
+            ops: AsyncMutex::new(()),
             layout_tx,
         });
         self.sessions.insert(name.to_owned(), Arc::clone(&session));
@@ -535,7 +607,7 @@ mod tests {
             session.close(pane_id).await,
             Err(SessionError::LastPane)
         ));
-        let stale = session.set_layout(session.root(), 99);
+        let stale = session.set_layout(session.root(), 99).await;
         assert!(matches!(stale, Err(SessionError::StaleLayout { .. })));
         assert_eq!(session.layout(None).revision, 1);
     }

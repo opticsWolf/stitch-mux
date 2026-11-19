@@ -3,6 +3,7 @@
 //! `PtySession` is transport-only. The screen, keyboard flags, scrollback and
 //! structured snapshot/delta stream belong here, not in a frontend.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -25,6 +26,8 @@ use unicode_width::UnicodeWidthChar;
 
 const UPDATE_QUEUE: usize = 256;
 const READ_CHUNK: usize = 16 * 1024;
+/// Bounded so a child that stops reading cannot grow memory without limit.
+const INPUT_QUEUE: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum PaneError {
@@ -169,9 +172,20 @@ pub struct PaneRuntime {
     session: Arc<PtySession>,
     state: Mutex<PaneState>,
     updates: broadcast::Sender<Arc<PaneUpdate>>,
-    input_tx: mpsc::UnboundedSender<Vec<u8>>,
+    input_tx: mpsc::Sender<Vec<u8>>,
+    dropped_input: AtomicU64,
     reader_done: Arc<Notify>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+}
+
+/// Cheap pane metadata: everything a picker, a layout title, or a session
+/// listing needs, without cloning the screen.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaneMeta {
+    pub title: String,
+    pub cwd: Option<String>,
+    pub cols: u16,
+    pub rows: u16,
 }
 
 impl PaneRuntime {
@@ -211,7 +225,7 @@ impl PaneRuntime {
         let session = Arc::new(session);
         let screen = HistoryScreen::new(cols as usize, rows as usize, 2000);
         let (updates, _) = broadcast::channel(UPDATE_QUEUE);
-        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (input_tx, mut input_rx) = mpsc::channel::<Vec<u8>>(INPUT_QUEUE);
         let reader_done = Arc::new(Notify::new());
 
         let runtime = Arc::new(Self {
@@ -230,6 +244,7 @@ impl PaneRuntime {
             }),
             updates,
             input_tx,
+            dropped_input: AtomicU64::new(0),
             reader_done: Arc::clone(&reader_done),
             tasks: Mutex::new(Vec::new()),
         });
@@ -266,7 +281,7 @@ impl PaneRuntime {
                             )
                         };
                         for response in responses {
-                            let _ = reader_runtime.input_tx.send(response);
+                            reader_runtime.write(response);
                         }
                         reader_runtime.publish_delta(dirty, &events);
                     }
@@ -323,9 +338,26 @@ impl PaneRuntime {
     }
 
     pub fn write(&self, bytes: Vec<u8>) {
-        if !bytes.is_empty() {
-            let _ = self.input_tx.send(bytes);
+        if bytes.is_empty() {
+            return;
         }
+        match self.input_tx.try_send(bytes) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if self.dropped_input.fetch_add(1, Ordering::Relaxed) == 0 {
+                    tracing::warn!(
+                        pane_id = self.id,
+                        "pane input queue is full; dropping input until the child reads"
+                    );
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+
+    /// Number of input chunks dropped because the child stopped reading.
+    pub fn dropped_input_chunks(&self) -> u64 {
+        self.dropped_input.load(Ordering::Relaxed)
     }
 
     /// Encode a frontend key event with the screen's active Kitty flags.
@@ -388,6 +420,25 @@ impl PaneRuntime {
     pub fn snapshot(&self) -> PaneSnapshot {
         let state = self.lock_state();
         snapshot_from(&state, self.id, state.seq)
+    }
+
+    /// Cheap metadata for session listings and layout titles.
+    ///
+    /// `snapshot()` clones every visible cell; a picker or a layout broadcast
+    /// only needs these fields, and a busy pane used to burn that copy on
+    /// every layout revision.
+    pub fn meta(&self) -> PaneMeta {
+        let state = self.lock_state();
+        PaneMeta {
+            title: state.screen.title().to_owned(),
+            cwd: state.screen.cwd().map(str::to_owned),
+            cols: state.screen.columns().min(u16::MAX as usize) as u16,
+            rows: state.screen.lines().min(u16::MAX as usize) as u16,
+        }
+    }
+
+    pub fn title(&self) -> String {
+        self.lock_state().screen.title().to_owned()
     }
 
     /// Last time the child produced output, used by the session picker.

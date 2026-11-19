@@ -482,6 +482,12 @@ in `Attached`, `ResizeEvent`, and `Layout`. A structured client receives a new
 Clients larger than the canonical size leave unused space; smaller clients crop
 from the top-left in v1.
 
+`Command::ResizeSession` follows the same rule. While at least one viewport
+client is attached, the command fails with `Unsupported`: a control-plane resize
+would move the PTY away from the size every client is drawing and would be
+overwritten by the next attach or detach anyway. With no viewport client, the
+command sets the size for headless use.
+
 ### 6.9 `SetLayout`
 
 ```rust

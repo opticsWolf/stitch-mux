@@ -325,7 +325,8 @@ The daemon has one canonical terminal size per session:
 - with no clients: keep the last size;
 - with clients: `min(cols)` × `min(rows)` across attached clients;
 - clamp to a sensible minimum (`20 × 5`);
-- on attach/detach/resize, recompute and resize every pane.
+- on attach/detach/resize, recompute and resize every pane;
+- a control-plane resize is rejected while a viewport client is attached.
 
 All clients share the same session size and layout. A client larger than the
 canonical frame has unused space; a client smaller than the frame crops from the

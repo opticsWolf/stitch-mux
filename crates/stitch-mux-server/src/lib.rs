@@ -824,7 +824,10 @@ async fn handle_frame(
                 send_error(writer, ErrorCode::NotFound, "no session attached").await?;
                 return Ok(false);
             };
-            match session.set_layout(request.root, request.base_revision) {
+            match session
+                .set_layout(request.root, request.base_revision)
+                .await
+            {
                 Ok(layout) => {
                     writer
                         .send(MessageKind::Layout, &with_attached_count(state, layout))
@@ -1057,7 +1060,7 @@ async fn handle_command(
         Command::ZoomPane { session, pane_id } => {
             let target = state.registry.lock().await.get(&session);
             match target {
-                Some(target) => match target.zoom(pane_id) {
+                Some(target) => match target.zoom(pane_id).await {
                     Ok(_) => response.layout = Some(response_layout(state, &target, focus)),
                     Err(err) => set_error(&mut response, session_error_code(&err), err),
                 },
@@ -1071,6 +1074,15 @@ async fn handle_command(
         } => {
             let target = state.registry.lock().await.get(&session);
             match target {
+                // Attached viewports own the canonical size (smallest client
+                // wins). A control resize would leave the PTY and the clients
+                // disagreeing until the next attach, so only a session with no
+                // viewport client may be resized from here.
+                Some(target) if state.canonical_size(target.id).is_some() => set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "attached clients own the canonical size; resize the client viewport instead",
+                ),
                 Some(target) => {
                     target.resize(cols, rows);
                     response.sessions = state.infos().await;
@@ -1090,7 +1102,7 @@ async fn handle_command(
                     .unwrap_or(0),
             );
             match session {
-                Some(session) => match session.set_layout(root, base_revision) {
+                Some(session) => match session.set_layout(root, base_revision).await {
                     Ok(_) => response.layout = Some(response_layout(state, &session, focus)),
                     Err(SessionError::StaleLayout { expected, current }) => {
                         set_error(
