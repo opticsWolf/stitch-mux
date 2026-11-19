@@ -17,7 +17,11 @@ fn endpoint(label: &str) -> Endpoint {
             .as_nanos()
             % 1_000_000_000
     );
-    Endpoint::from_override(&unique)
+    if cfg!(windows) {
+        Endpoint::from_override(&unique)
+    } else {
+        Endpoint::Unix(std::env::temp_dir().join(format!("{unique}.sock")))
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -88,7 +88,9 @@ fn platform_endpoint(value: &str) -> Endpoint {
 async fn bind_unix(path: &PathBuf) -> Result<Listener, EndpointError> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 
-    if let Some(parent) = path.parent() {
+    // A relative override such as `rel.sock` has an empty parent; binding it
+    // in the current directory is still valid.
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         tokio::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
