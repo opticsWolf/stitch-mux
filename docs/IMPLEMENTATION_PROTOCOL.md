@@ -186,6 +186,7 @@ Before marking a task Ready for review:
 | 2026-11-18 | Bound each client's update queue at 64 and coalesce deltas per pane | A stalled GUI must never block a PTY reader or grow memory without limit | `try_send` + lagged-snapshot fallback; one overflow closes with typed `Busy` |
 | 2026-11-18 | Rewrite delta sequence numbers per client after coalescing | Dropping intermediate deltas must not look like a protocol gap | `UpdateCoalescer` keeps client-visible `seq` contiguous; `Resync` remains for real gaps |
 | 2026-11-18 | GUI retries a lost session with exponential backoff, capped at 8s | Daemon loss must be visible and never silently recreated | Lost overlay offers Retry, New session, and Back to picker |
+| 2026-11-19 | Shutdown excludes the issuing control connection | Detaching every client at once broke the `Shutdown` response with a broken pipe | Other clients get typed close; the command client receives its response first |
 
 ## 9. Current status
 

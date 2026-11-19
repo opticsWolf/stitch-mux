@@ -219,8 +219,14 @@ impl ServerState {
             .collect()
     }
 
-    fn shutdown(&self) {
-        for client in self.clients.lock().expect("client registry").values() {
+    fn shutdown(&self, except: Option<u64>) {
+        for client in self
+            .clients
+            .lock()
+            .expect("client registry")
+            .values()
+            .filter(|client| Some(client.id) != except)
+        {
             client.detach.notify_one();
         }
         let _ = self.shutdown_tx.send(true);
@@ -534,7 +540,7 @@ async fn handle_frame(
         }
         MessageKind::CommandRequest => {
             let request: CommandRequest = decode_message(&frame)?;
-            let response = handle_command(request, state).await;
+            let response = handle_command(request, state, client_id).await;
             writer.send(MessageKind::CommandResponse, &response).await?;
         }
         MessageKind::Attach => {
@@ -738,7 +744,11 @@ fn session_error_code(error: &SessionError) -> ErrorCode {
     }
 }
 
-async fn handle_command(request: CommandRequest, state: &Arc<ServerState>) -> CommandResponse {
+async fn handle_command(
+    request: CommandRequest,
+    state: &Arc<ServerState>,
+    client_id: u64,
+) -> CommandResponse {
     let mut response = CommandResponse {
         request_id: request.request_id,
         ok: true,
@@ -972,7 +982,9 @@ async fn handle_command(request: CommandRequest, state: &Arc<ServerState>) -> Co
             }
         }
         Command::Shutdown => {
-            state.shutdown();
+            // Do not detach the control connection that is waiting for this
+            // response; every other client gets a typed close.
+            state.shutdown(Some(client_id));
         }
         other => set_error(
             &mut response,

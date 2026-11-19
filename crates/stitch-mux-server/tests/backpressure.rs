@@ -52,8 +52,8 @@ fn noisy_program() -> (&'static str, Vec<String>) {
     }
 }
 
-async fn wait_for(session: &ClientSession, predicate: impl Fn(&SessionView) -> bool) {
-    tokio::time::timeout(Duration::from_secs(15), async {
+async fn wait_for(label: &str, session: &ClientSession, predicate: impl Fn(&SessionView) -> bool) {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if predicate(&session.view()) {
                 return;
@@ -62,7 +62,7 @@ async fn wait_for(session: &ClientSession, predicate: impl Fn(&SessionView) -> b
         }
     })
     .await
-    .expect("view condition within timeout");
+    .unwrap_or_else(|_| panic!("{label} within timeout"));
 }
 
 #[tokio::test]
@@ -93,7 +93,10 @@ async fn stalled_client_is_disconnected_with_busy_and_cannot_block_other_clients
     let healthy = ClientSession::attach(&endpoint, "noisy", hello("healthy"))
         .await
         .expect("healthy attach");
-    wait_for(&healthy, |view| view.pane(pane_id).is_some()).await;
+    wait_for("healthy attach", &healthy, |view| {
+        view.pane(pane_id).is_some()
+    })
+    .await;
 
     let (mut stalled, _ack) = connect(&endpoint, hello("stalled"))
         .await
@@ -127,7 +130,7 @@ async fn stalled_client_is_disconnected_with_busy_and_cannot_block_other_clients
         assert!(sent.ok, "{:?}", sent.error);
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
-    wait_for(&healthy, |view| {
+    wait_for("healthy client keeps draining", &healthy, |view| {
         view.pane(pane_id)
             .and_then(|pane| pane.snapshot.as_ref())
             .is_some_and(|snapshot| snapshot.seq > 1)

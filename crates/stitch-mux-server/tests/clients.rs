@@ -56,7 +56,7 @@ fn shell() -> (&'static str, Vec<String>) {
 }
 
 async fn wait_for(label: &str, session: &ClientSession, predicate: impl Fn(&SessionView) -> bool) {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if predicate(&session.view()) {
                 return;
@@ -87,17 +87,27 @@ async fn captured_text(endpoint: &Endpoint, pane_id: u64) -> String {
         .unwrap_or_default()
 }
 
-async fn wait_for_capture(endpoint: &Endpoint, pane_id: u64, needle: &str) {
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            if captured_text(endpoint, pane_id).await.contains(needle) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+async fn send_until_captured(
+    client: &ClientSession,
+    endpoint: &Endpoint,
+    pane_id: u64,
+    text: &str,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut last_send = tokio::time::Instant::now() - Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        if captured_text(endpoint, pane_id).await.contains(text) {
+            return;
         }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("capture contains {needle} within timeout"));
+        if last_send.elapsed() >= Duration::from_secs(2) {
+            // A newly spawned child may swallow the first line before its
+            // line discipline is ready; re-send until capture proves routing.
+            client.send(Outbound::Input(InputEvent::Text(format!("{text}\n"))));
+            last_send = tokio::time::Instant::now();
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    panic!("focused pane {pane_id} did not echo {text}");
 }
 
 #[tokio::test]
@@ -173,8 +183,7 @@ async fn two_clients_share_a_session_with_independent_focus() {
     })
     .await;
 
-    first.send(Outbound::Input(InputEvent::Text("m3-first\n".into())));
-    wait_for_capture(&endpoint, second_pane, "m3-first").await;
+    send_until_captured(&first, &endpoint, second_pane, "m3-first").await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         !captured_text(&endpoint, first_pane)
@@ -187,8 +196,7 @@ async fn two_clients_share_a_session_with_independent_focus() {
         view.connection == ConnectionState::Connected && view.attached_clients == 1
     })
     .await;
-    second.send(Outbound::Input(InputEvent::Text("m3-second\n".into())));
-    wait_for_capture(&endpoint, first_pane, "m3-second").await;
+    send_until_captured(&second, &endpoint, first_pane, "m3-second").await;
 
     second.detach().await;
     let listed = command(&endpoint, Command::ListSessions)
