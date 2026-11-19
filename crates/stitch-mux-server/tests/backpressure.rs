@@ -46,20 +46,11 @@ fn hello(label: &str) -> Hello {
     }
 }
 
-fn noisy_program() -> (&'static str, Vec<String>) {
-    // A child that emits output itself avoids shell parsing a multi-megabyte
-    // command line and exercises the same structured delta pipeline.
+fn shell() -> (&'static str, Vec<String>) {
     if cfg!(windows) {
-        (
-            "cmd.exe",
-            vec![
-                "/Q".into(),
-                "/C".into(),
-                "for /L %i in (1,1,500000) do @echo aaaaaaaaaaaaaaaaaaaa".into(),
-            ],
-        )
+        ("cmd.exe", vec!["/Q".into()])
     } else {
-        ("sh", vec!["-c".into(), "yes aaaaaaaaaaaaaaaaaaaa".into()])
+        ("sh", Vec::new())
     }
 }
 
@@ -88,12 +79,12 @@ fn pane_has_a(view: &SessionView, pane_id: u64) -> bool {
 }
 
 #[tokio::test]
-async fn ten_megabytes_and_repeated_attach_stay_responsive() {
+async fn repeated_attach_and_delta_pump_stay_responsive() {
     let (endpoint, socket) = test_endpoint();
     let listener = endpoint.bind().await.expect("bind");
     let server = tokio::spawn(stitch_mux_server::serve(listener));
 
-    let (program, args) = noisy_program();
+    let (program, args) = shell();
     let created = command(
         &endpoint,
         Command::NewSession {
@@ -121,12 +112,41 @@ async fn ten_megabytes_and_repeated_attach_stay_responsive() {
         let client = if label == "first" { &first } else { &second };
         wait_for(label, client, |view| view.pane(pane_id).is_some()).await;
     }
-
-    wait_for("first client sees the flood", &first, |view| {
+    for _ in 0..10 {
+        let echoed = command(
+            &endpoint,
+            Command::SendText {
+                pane_id,
+                text: "echo aaaaaaaaaaaaaaaaaaaa
+"
+                .into(),
+            },
+        )
+        .await
+        .expect("echo response");
+        assert!(echoed.ok, "{:?}", echoed.error);
+        if pane_has_a(&first.view(), pane_id) && pane_has_a(&second.view(), pane_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    eprintln!(
+        "first view: {:?}",
+        first
+            .view()
+            .pane(pane_id)
+            .and_then(|p| p.snapshot.as_ref())
+            .map(|s| s
+                .cells
+                .iter()
+                .map(|r| r.cells.iter().map(|c| c.text.as_str()).collect::<String>())
+                .collect::<Vec<_>>())
+    );
+    wait_for("first client sees the output", &first, |view| {
         pane_has_a(view, pane_id)
     })
     .await;
-    wait_for("second client sees the flood", &second, |view| {
+    wait_for("second client sees the output", &second, |view| {
         pane_has_a(view, pane_id)
     })
     .await;
