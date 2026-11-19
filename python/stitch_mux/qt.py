@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QPushButton,
     QVBoxLayout,
@@ -143,6 +144,7 @@ class CellCanvas(QWidget):
     """Paints rows and style runs from a structured SessionView."""
 
     resized = Signal(int, int)
+    command_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -258,9 +260,15 @@ class CellCanvas(QWidget):
         )
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt API
+        modifiers = event.modifiers()
+        if (
+            event.key() == Qt.Key.Key_P
+            and modifiers & Qt.KeyboardModifier.ControlModifier
+        ):
+            self.command_requested.emit()
+            return
         if self.session is None:
             return
-        modifiers = event.modifiers()
         bits = 0
         if modifiers & Qt.KeyboardModifier.ShiftModifier:
             bits |= 1
@@ -367,6 +375,38 @@ class SessionPicker(QWidget):
             self.session_selected.emit(item.text().split(" — ", 1)[0])
 
 
+class CommandPalette(QWidget):
+    """Stub command palette: named intents over the existing client API."""
+
+    command_selected = Signal(str)
+
+    ACTIONS = ("Focus first pane", "Detach session", "Refresh view")
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Run a command…")
+        self.results = QListWidget()
+        self._populate("")
+        self.search.textChanged.connect(self._populate)
+        self.results.itemActivated.connect(self._activate)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.search)
+        layout.addWidget(self.results)
+        self.setWindowTitle("stitch-mux commands")
+        self.resize(320, 220)
+
+    def _populate(self, query: str) -> None:
+        self.results.clear()
+        for action in self.ACTIONS:
+            if query.lower() in action.lower():
+                self.results.addItem(action)
+
+    def _activate(self, item: Any) -> None:
+        self.command_selected.emit(item.text())
+        self.close()
+
+
 class SessionWindow(QWidget):
     """Attaches, paints, reports loss, and never silently recreates a session."""
 
@@ -377,6 +417,7 @@ class SessionWindow(QWidget):
         self.session: SessionProtocol | None = None
         self.worker: ViewSignaler | None = None
         self.canvas = CellCanvas()
+        self.palette = CommandPalette(self)
         self.status = QLabel("connecting…")
         self.lost = QLabel("Session lost — the daemon did not restore it.")
         self.lost.setStyleSheet("color: #ffcc66;")
@@ -396,6 +437,8 @@ class SessionWindow(QWidget):
         self.setWindowTitle(f"stitch-mux — {session_name}")
         self.resize(800, 500)
         self.canvas.resized.connect(self._on_resize)
+        self.canvas.command_requested.connect(self.palette.show)
+        self.palette.command_selected.connect(self._run_command)
         self.attach()
 
     def attach(self) -> None:
@@ -430,6 +473,23 @@ class SessionWindow(QWidget):
     @Slot()
     def retry(self) -> None:
         self.attach()
+
+    @Slot(str)
+    def _run_command(self, command: str) -> None:
+        if self.session is None:
+            return
+        if command == "Detach session":
+            self.session.detach()
+            self.status.setText("detached; session is still alive")
+            return
+        if command == "Focus first pane":
+            layout = self.canvas.view.get("layout") or {}
+            panes = layout.get("panes") or []
+            if panes:
+                self.session.focus(int(panes[0]["pane_id"]))
+            return
+        if command == "Refresh view":
+            self.canvas.set_view(self.session.view())
 
     @Slot(int, int)
     def _on_resize(self, cols: int, rows: int) -> None:

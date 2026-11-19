@@ -6,7 +6,7 @@ This is the **operating protocol** for turning the design in
 document: update it in the **same commit** as the work it describes. It is not
 the wire protocol; that contract lives in [PROTOCOL.md](PROTOCOL.md).
 
-Last updated: **2026-11-19** — M0–M4 complete, M5 ready.
+Last updated: **2026-11-19** — M0–M4 complete, M5 ready for review.
 
 ## 1. Standing rules
 
@@ -205,6 +205,10 @@ Before marking a task Ready for review:
 | 2026-11-19 | The conformance corpus is synthetic and deterministic | vim/less/htop are not guaranteed on every CI runner | `tests/conformance.rs` drives real snapshots through the compositor for bash/zsh, vim, less, htop/top, and git log patterns; `docs/CONFORMANCE.md` records the interactive pass |
 | 2026-11-19 | The DSR end-to-end assertion accepts any CPR row/column | macOS reported a different cursor position than Linux while the daemon still answered the query | `tests/queries.rs` matches `ESC [ row ; col R` by shape and keeps the screen in the timeout diagnostic |
 | 2026-11-19 | The terminal test asserts output through Capture, not one Render frame | A style run can split a word across coalesced ANSI diffs on macOS | Capture proves the child output; the test asserts that terminal Render sequence advanced without requiring one frame to contain the whole marker |
+| 2026-11-19 | PyO3 owns one background Tokio runtime per attached Session | Python's GUI thread must never block on socket I/O | `Session` publishes immutable `SessionView` dicts and accepts semantic commands; Rust owns the protocol state machine |
+| 2026-11-19 | Qt receives batched view signals from a polling QThread | Per-cell callbacks would flood the Qt event loop | `ViewSignaler` emits one dict per 33 ms tick, and `CellCanvas` paints style runs from that snapshot; IME/key/mouse map to the shared client API |
+| 2026-11-19 | GPUI stays a boundary-only feature spike | GPUI 0.2.x is pre-1.0 and must not block v0.1 | `from_view(&SessionView)` proves no protocol changes; the real dependency is gated in `docs/GPUI-SPIKE.md` |
+| 2026-11-19 | Python tests run through maturin instead of the Rust test harness | The PyO3 harness needs a linkable Python DLL on Windows | `test = false` for the PyO3 crate; offscreen Qt and real-daemon SDK tests run under pytest in CI |
 
 ## 9. Current status
 
@@ -215,7 +219,7 @@ Before marking a task Ready for review:
 | M2 — multi-pane GUI layout and per-client focus | **Done** | Real-child split/focus/zoom/stale-revision/close test; focus restores per client instance across detach/reattach; picker receives pane sizes and real last-activity timestamps; CLI `new`/`split`/`ls`/`zoom`/`close`/`kill` smoke; 8-second GUI smoke leaves children alive with `attached_clients: 0` |
 | M3 — multiple clients, backpressure | **Done** | 65 tests on Unix / 64 on Windows plus one release-only 10 MiB stress; real-endpoint tests for two-client focus/size/detach, focus restore, registry commands and typed shutdown, a two-client delta-pump test with repeated attach/detach, bounded-queue/coalescer unit tests, a deterministic typed `Busy` frame test, and an end-to-end stalled-socket `Busy` proof; `CommandResponse` payload cap covers captures; CLI `clients`/`rename`/`shutdown` smoke; GUI survives daemon loss |
 | M4 — terminal ANSI compatibility | **Done** | 82 tests on Unix / 79 on Windows plus one release-only 10 MiB stress; bounded server compositor emits full and diff ANSI frames, terminal adapter writes them without parsing or key encoding, real-endpoint test attaches terminal + structured clients and asserts identical layout geometry/output/detach, deterministic conformance corpus covers bash/zsh, vim, less, htop/top and git log patterns, and CLI `attach` replaces the M4 stub; main CI `44598420738` green on all nine jobs |
-| M5 — Qt/PySide6 + optional GPUI | Backlog | Second-toolkit proof, no protocol changes allowed |
+| M5 — Qt/PySide6 + optional GPUI | Ready for review | PyO3 control SDK, PySide6 offscreen adapter, command-palette/activity hooks, parity checklist, licensing notes, and the boundary-only GPUI feature pass locally; awaiting cross-platform Rust CI plus the Linux Python/Qt job |
 | M6 — hardening / v0.1 | Backlog | Release checklist in `IMPLEMENTATION_PLAN.md` §7 |
 | M7–M12 — v0.2/v0.3 | Backlog | Only after v0.1 is published |
 

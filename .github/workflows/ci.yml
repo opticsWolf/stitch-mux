@@ -47,6 +47,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --release -p stitch-mux-server --test stress -- --ignored
 
+  python:
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --extra test
+      - run: uvx ruff check python tests
+      - run: cargo build -p stitch-mux
+      - name: Python SDK and offscreen Qt tests
+        run: uv run pytest -q
+        env:
+          STITCH_MUX_BIN: ${{ github.workspace }}/target/debug/stitch-mux
+
   toolkit-neutral:
     runs-on: ubuntu-latest
     steps:
@@ -54,4 +72,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check -p stitch-mux-core --no-default-features
       - run: cargo check -p stitch-mux-client --no-default-features
+      - run: cargo check -p stitch-mux-gui-gpui --features gpui
       - run: cargo doc --no-deps --workspace

@@ -15,7 +15,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, Qt  # noqa: E402
 from PySide6.QtGui import QKeyEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
-from stitch_mux.qt import CellCanvas, SessionPicker, color_key, style_key  # noqa: E402
+from stitch_mux.qt import (  # noqa: E402
+    CellCanvas,
+    CommandPalette,
+    SessionPicker,
+    color_key,
+    style_key,
+)
 
 
 class FakeSession:
@@ -155,6 +161,31 @@ def test_canvas_emits_bounded_resize(app: QApplication) -> None:
     app.processEvents()
     assert sizes and sizes[-1][0] > 0
     assert session.resize_calls == []
+
+
+def test_command_palette_filters_named_intents(app: QApplication) -> None:
+    palette = CommandPalette()
+    palette._populate("detach")
+    assert palette.results.count() == 1
+    selected: list[str] = []
+    palette.command_selected.connect(selected.append)
+    palette._activate(palette.results.item(0))
+    assert selected == ["Detach session"]
+
+
+def test_canvas_requests_palette_on_ctrl_p(app: QApplication) -> None:
+    canvas = CellCanvas()
+    requests: list[bool] = []
+    canvas.command_requested.connect(lambda: requests.append(True))
+    canvas.keyPressEvent(
+        QKeyEvent(
+            QEvent.Type.KeyPress,
+            ord("P"),
+            Qt.KeyboardModifier.ControlModifier,
+            "",
+        )
+    )
+    assert requests == [True]
 
 
 def test_picker_lists_sessions(app: QApplication) -> None:

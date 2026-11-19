@@ -347,3 +347,15 @@ clients.
 The adapter boundary is the contract. If a toolkit needs a change in the
 protocol, the protocol is probably wrong; if it only needs a different cell
 painter, the architecture is working.
+
+## 9. Implemented adapter status
+
+- egui: reference structured GUI from M1–M3.
+- ANSI terminal: compatibility projection from M4; server-composed frames.
+- PySide6: second-toolkit proof from M5. The Rust SDK publishes batched
+  `SessionView` dicts to Qt; see [PYTHON.md](PYTHON.md).
+- GPUI: boundary-only spike behind the `gpui` feature; see
+  [GPUI-SPIKE.md](GPUI-SPIKE.md).
+
+The cross-adapter capability matrix and the remaining v0.2 fidelity work are
+tracked in [PARITY.md](PARITY.md).

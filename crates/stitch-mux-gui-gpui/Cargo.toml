@@ -1,6 +1,6 @@
 [package]
 name = "stitch-mux-gui-gpui"
-description = "Optional GPUI adapter for stitch-mux (feature-gated spike)"
+description = "Optional GPUI adapter spike for stitch-mux"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,3 +8,13 @@ repository.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[features]
+default = []
+# Boundary-only spike. The GPUI dependency itself stays out of v0.1; see
+# docs/GPUI-SPIKE.md for the rationale and the upgrade gate.
+gpui = []
+
+[dependencies]
+stitch-mux-client.workspace = true
+stitch-mux-core.workspace = true

@@ -3400,6 +3400,10 @@ dependencies = [
 [[package]]
 name = "stitch-mux-gui-gpui"
 version = "0.1.0-dev"
+dependencies = [
+ "stitch-mux-client",
+ "stitch-mux-core",
+]
 
 [[package]]
 name = "stitch-mux-protocol"

@@ -2,14 +2,15 @@
 
 A terminal multiplexer built on top of [`stitch-pty`](../stitch-pty).
 
-> **Status: M4 terminal compatibility implemented.** The daemon keeps a client
+> **Status: M5 Python/Qt adapter implemented.** The daemon keeps a client
 > registry, sizes sessions to the smallest attached client, bounds and coalesces
 > each client's updates, and exposes `ListClients`, `DetachClient`, session
 > rename, and typed shutdown. The reference GUI retries lost sessions with
 > backoff and never silently recreates them. A 10 MiB two-client stress test,
 > a stalled-client `Busy` proof, terminal DA/DSR replies, and GUI backoff/picker
-> tests run in CI. The new terminal frontend writes server-composed ANSI frames
-> and shares sessions, layout, and focus with the GUI.
+> tests run in CI. The terminal frontend writes server-composed ANSI frames and
+> shares sessions, layout, and focus with the GUI. A PyO3 SDK and PySide6 adapter
+> prove the frontend boundary with a second toolkit, with no protocol changes.
 
 ## Why another multiplexer?
 
@@ -157,11 +158,24 @@ resync, and `Ctrl-]` followed by an arrow moves this client's focus. All other
 keys are sent as semantic key events; the daemon's authoritative screen encodes
 them for the focused pane's Kitty flags.
 
+A Python client and Qt adapter are available through the maturin package:
+
+```sh
+uv sync --extra test
+uv run python -m stitch_mux.qt --session demo
+```
+
+See [Python SDK](docs/PYTHON.md), [parity](docs/PARITY.md), and the
+[GPUI spike](docs/GPUI-SPIKE.md) for scope and licensing notes.
+
 ## Documentation map
 
 - [Architecture](docs/ARCHITECTURE.md) — the design and the reasoning.
 - [Protocol](docs/PROTOCOL.md) — the local wire protocol.
 - [Frontends](docs/FRONTENDS.md) — egui, GPUI, and Qt/PySide6 adapter design.
+- [Python SDK](docs/PYTHON.md) — PyO3 API, PySide6 adapter, and licensing.
+- [Parity](docs/PARITY.md) — frontend capability checklist.
+- [GPUI spike](docs/GPUI-SPIKE.md) — optional second-native-toolkit boundary.
 - [Conformance](docs/CONFORMANCE.md) — M4 terminal corpus and interactive checks.
 - [Automation](docs/AUTOMATION.md) — local CLI, event stream, and agent skill.
 - [Implementation plan](docs/IMPLEMENTATION_PLAN.md) — milestones and order of
