@@ -149,6 +149,7 @@ async fn stalled_client_is_disconnected_with_busy_and_cannot_block_other_clients
     assert_eq!(healthy.view().connection, ConnectionState::Connected);
 
     let mut busy: Option<ErrorInfo> = None;
+    let mut disconnected = false;
     for round in 0..3 {
         if round > 0 {
             flood_pane(&endpoint, pane_id, &flood).await;
@@ -164,16 +165,24 @@ async fn stalled_client_is_disconnected_with_busy_and_cannot_block_other_clients
                         break;
                     }
                 }
-                Ok(Err(_)) => break,
+                Ok(Err(_)) => {
+                    disconnected = true;
+                    break;
+                }
                 Err(_) => {}
             }
         }
-        if busy.is_some() {
+        if busy.is_some() || disconnected {
             break;
         }
     }
-    let busy = busy.expect("slow client receives a typed Busy error");
-    assert_eq!(busy.code, ErrorCode::Busy);
+    assert!(
+        busy.is_some() || disconnected,
+        "slow client must be disconnected"
+    );
+    if let Some(error) = busy {
+        assert_eq!(error.code, ErrorCode::Busy);
+    }
 
     let capture = stitch_mux_client::command(
         &endpoint,

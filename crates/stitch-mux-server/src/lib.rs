@@ -346,11 +346,7 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
             .as_ref()
             .is_some_and(|queue| queue.overflows() >= client_updates::MAX_CLIENT_OVERFLOWS)
         {
-            let _ = tokio::time::timeout(
-                Duration::from_secs(30),
-                send_error(&mut writer, ErrorCode::Busy, "client fell behind"),
-            )
-            .await;
+            let _ = send_backpressure_error(&mut writer).await;
             break;
         }
         let event = tokio::select! {
@@ -421,11 +417,7 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                         break;
                     }
                     Err(_) => {
-                        let _ = tokio::time::timeout(
-                            Duration::from_secs(2),
-                            send_error(&mut writer, ErrorCode::Busy, "client fell behind"),
-                        )
-                        .await;
+                        let _ = send_backpressure_error(&mut writer).await;
                         break;
                     }
                 }
@@ -1003,6 +995,21 @@ fn set_error(response: &mut CommandResponse, code: ErrorCode, message: impl std:
     });
 }
 
+/// Send the typed slow-client error. The write gets a generous deadline: the
+/// peer may not be reading yet, and cancelling mid-frame would destroy the
+/// error itself.
+async fn send_backpressure_error<W>(writer: &mut FrameWriter<W>) -> Result<(), ServerError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let _ = tokio::time::timeout(
+        Duration::from_secs(30),
+        send_error(writer, ErrorCode::Busy, "client fell behind"),
+    )
+    .await;
+    Ok(())
+}
+
 async fn send_error<W>(
     writer: &mut FrameWriter<W>,
     code: ErrorCode,
@@ -1026,6 +1033,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stitch_mux_protocol::FrameReader;
+
+    #[tokio::test]
+    async fn slow_client_error_is_typed_busy() {
+        let (client, server) = tokio::io::duplex(4096);
+        {
+            let mut writer = FrameWriter::new(server);
+            send_backpressure_error(&mut writer)
+                .await
+                .expect("error frame");
+        }
+        let mut reader = FrameReader::new(client);
+        let frame = reader.recv_frame().await.expect("error frame");
+        assert_eq!(frame.kind, MessageKind::Error);
+        let error: ErrorInfo = decode_message(&frame).expect("typed error");
+        assert_eq!(error.code, ErrorCode::Busy);
+        assert_eq!(error.message, "client fell behind");
+    }
 
     #[test]
     fn server_state_starts_empty() {
