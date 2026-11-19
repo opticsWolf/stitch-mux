@@ -32,3 +32,4 @@ stitch-mux-protocol = { path = "crates/stitch-mux-protocol" }
 stitch-mux-client = { path = "crates/stitch-mux-client" }
 stitch-mux-server = { path = "crates/stitch-mux-server" }
 stitch-mux-gui-egui = { path = "crates/stitch-mux-gui-egui" }
+stitch-mux-terminal = { path = "crates/stitch-mux-terminal" }

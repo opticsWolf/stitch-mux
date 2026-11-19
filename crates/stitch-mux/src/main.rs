@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use std::error::Error;
 use std::process::ExitCode;
 
-use stitch_mux_client::{ClientError, ClientSession, Outbound, command as send_control};
+use stitch_mux_client::{ClientError, command as send_control};
 use stitch_mux_core::SplitAxis;
 use stitch_mux_protocol::{
     Command, CommandResponse, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, MessageKind, ViewMode,
@@ -106,7 +106,7 @@ enum Commands {
         #[arg(short = 's', long = "session")]
         session: Option<String>,
     },
-    /// Terminal attach is a compatibility projection (M4).
+    /// Attach with the ANSI compatibility frontend (Ctrl-] d detaches).
     Attach {
         #[arg(short = 's', long = "session", default_value = "default")]
         session: String,
@@ -351,20 +351,8 @@ async fn run(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
             .await
         }
         Commands::Attach { session } => {
-            let client = match ClientSession::attach(
-                &endpoint,
-                session,
-                hello(ViewMode::Structured),
-            )
-            .await
-            {
-                Ok(client) => client,
-                Err(ClientError::Endpoint(_)) => return Ok(ExitCode::from(4)),
-                Err(err) => return Err(Box::new(err)),
-            };
-            println!("attached to {session}; terminal rendering arrives in M4");
-            client.send(Outbound::Detach);
-            Ok(ExitCode::from(2))
+            stitch_mux_terminal::run(endpoint, session).await?;
+            Ok(ExitCode::SUCCESS)
         }
         Commands::Gui { .. } => Ok(ExitCode::from(2)),
     }
