@@ -30,6 +30,7 @@ const MAX_RETRY: Duration = Duration::from_secs(8);
 
 /// Launch the reference GUI. `session` may be omitted to show the picker.
 pub fn run(endpoint: Endpoint, session: Option<String>) -> Result<(), Box<dyn Error>> {
+    let _ = stitch_mux_protocol::init_logging();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -91,6 +92,10 @@ struct MuxApp {
     /// Structured rows that have scrolled off each pane while this GUI was
     /// attached, plus the user's wheel offset.
     pane_scroll: HashMap<u64, PaneScroll>,
+    /// F1 / the status-bar button opens local connection diagnostics.
+    show_diagnostics: bool,
+    endpoint_text: String,
+    log_path_text: String,
 }
 
 impl MuxApp {
@@ -103,6 +108,8 @@ impl MuxApp {
         let selected = session
             .or_else(|| sessions.first().map(|info| info.name.clone()))
             .unwrap_or_default();
+        let endpoint_text = endpoint.to_string();
+        let log_path_text = stitch_mux_protocol::log_path().display().to_string();
         let mut app = Self {
             endpoint,
             sessions,
@@ -118,6 +125,9 @@ impl MuxApp {
             lost_session: None,
             split_drag: None,
             pane_scroll: HashMap::new(),
+            show_diagnostics: false,
+            endpoint_text,
+            log_path_text,
         };
         if !selected.is_empty() {
             app.attach(&selected);
@@ -151,6 +161,7 @@ impl MuxApp {
                 self.next_retry = None;
             }
             Err(err) => {
+                tracing::warn!(error = %err, "attach failed");
                 self.error = Some(err.to_string());
                 self.retry_backoff = next_backoff(self.retry_backoff);
                 self.next_retry = Some(Instant::now() + self.retry_backoff);
@@ -277,12 +288,75 @@ impl MuxApp {
             Err(err) => self.error = Some(err.to_string()),
         }
     }
+
+    /// Local-only diagnostics: connection state, the endpoint in use, the log
+    /// file and a fresh session list. Never writes to the daemon except a
+    /// `ListSessions` command when the panel is opened or refreshed.
+    fn diagnostics_ui(&mut self, ctx: &egui::Context, view: &SessionView) {
+        if !self.show_diagnostics {
+            return;
+        }
+        let sessions = self.sessions.clone();
+        let endpoint = self.endpoint_text.clone();
+        let log_path = self.log_path_text.clone();
+        let mut refresh = false;
+        egui::Window::new("stitch-mux diagnostics")
+            .open(&mut self.show_diagnostics)
+            .show(ctx, |ui| {
+                ui.label(format!("Endpoint: {endpoint}"));
+                ui.label(format!("Connection: {:?}", view.connection));
+                ui.label(format!("Session: {}", self.selected));
+                ui.label(format!(
+                    "Geometry: {}x{} r{} ({} attached)",
+                    view.size.cols, view.size.rows, view.layout_revision, view.attached_clients
+                ));
+                ui.label(format!("Needs resync: {}", view.needs_resync));
+                if let Some(error) = &view.error {
+                    ui.colored_label(egui::Color32::RED, format!("Error: {}", error.message));
+                }
+                if let Some(error) = &self.error {
+                    ui.colored_label(egui::Color32::RED, format!("Last failure: {error}"));
+                }
+                ui.small(format!("Log: {log_path}"));
+                ui.separator();
+                ui.label("Daemon sessions:");
+                for info in &sessions {
+                    ui.label(format!(
+                        "{} — {} panes, {} clients",
+                        info.name, info.pane_count, info.attached_clients
+                    ));
+                    for pane in &info.panes {
+                        ui.small(format!(
+                            "  #{} {} ({}x{})",
+                            pane.id, pane.title, pane.cols, pane.rows
+                        ));
+                    }
+                }
+                if sessions.is_empty() {
+                    ui.label("(none)");
+                }
+                refresh = ui.button("Refresh sessions").clicked();
+            });
+        if refresh {
+            self.refresh_sessions();
+        }
+    }
 }
 
 impl eframe::App for MuxApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if ui.input(|input| input.key_pressed(egui::Key::F1)) {
+            self.show_diagnostics = !self.show_diagnostics;
+            if self.show_diagnostics {
+                self.refresh_sessions();
+            }
+        }
         if self.client.is_none() {
             self.picker_ui(ui);
+            if self.show_diagnostics {
+                let view = SessionView::default();
+                self.diagnostics_ui(ui.ctx(), &view);
+            }
             return;
         }
 
@@ -297,10 +371,17 @@ impl eframe::App for MuxApp {
         self.maybe_reconnect(&view);
         if view.connection == stitch_mux_client::ConnectionState::Lost {
             self.lost_ui(ui, &view);
+            self.diagnostics_ui(ui.ctx(), &view);
             return;
         }
 
-        let detach = self.status_ui(ui, &view);
+        let (detach, diagnostics) = self.status_ui(ui, &view);
+        if diagnostics {
+            self.show_diagnostics = !self.show_diagnostics;
+            if self.show_diagnostics {
+                self.refresh_sessions();
+            }
+        }
         // The status bar is a real child of this layout, so the available rect
         // is already the pane grid: subtracting STATUS_H here left a dead strip
         // at the bottom and made the requested size disagree with the grid.
@@ -360,6 +441,7 @@ impl eframe::App for MuxApp {
             self.handle.spawn(async move { client.detach().await });
         }
         handle_input(ui, self.client.as_ref(), grid);
+        self.diagnostics_ui(ui.ctx(), &view);
     }
 
     fn on_exit(&mut self) {
@@ -379,6 +461,8 @@ impl MuxApp {
         if let Some(error) = &view.error {
             ui.label(format!("Reason: {}", error.message));
         }
+        ui.small(format!("Endpoint: {}", self.endpoint_text));
+        ui.small(format!("Log: {}", self.log_path_text));
         if let Some(at) = self.next_retry {
             ui.label(format!(
                 "Retrying in {:.1}s",
@@ -430,11 +514,14 @@ impl MuxApp {
         if ui.button("Refresh").clicked() {
             self.refresh_sessions();
         }
+        ui.small(format!("Endpoint: {}", self.endpoint_text));
+        ui.small(format!("Log: {}", self.log_path_text));
     }
 
     /// Paint session information in a status bar above the pane grid.
-    fn status_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) -> bool {
+    fn status_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) -> (bool, bool) {
         let mut detach = false;
+        let mut diagnostics = false;
         ui.horizontal(|ui| {
             let color = if view.needs_resync {
                 egui::Color32::YELLOW
@@ -454,9 +541,10 @@ impl MuxApp {
                 self.send(Outbound::Resync);
             }
             detach = ui.button("Detach").clicked();
+            diagnostics = ui.button("Diagnostics").clicked();
         });
         ui.separator();
-        detach
+        (detach, diagnostics)
     }
 }
 

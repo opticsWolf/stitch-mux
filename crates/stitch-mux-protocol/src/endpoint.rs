@@ -38,6 +38,15 @@ pub enum EndpointError {
     NotOwner,
 }
 
+impl std::fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unix(path) => write!(f, "{}", path.display()),
+            Self::Windows(name) => f.write_str(name),
+        }
+    }
+}
+
 impl Endpoint {
     /// Default endpoint for this platform, honoring XDG_RUNTIME_DIR on Unix.
     pub fn default_endpoint() -> Result<Self, EndpointError> {

@@ -20,3 +20,4 @@ stitch-mux-core.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 stitch-mux-client.workspace = true
 stitch-mux-protocol.workspace = true
+tracing.workspace = true

@@ -179,6 +179,10 @@ fn print_response(response: CommandResponse) -> ExitCode {
         }
         Err(err) => {
             eprintln!("stitch-mux: {err}");
+            eprintln!(
+                "stitch-mux: log: {}",
+                stitch_mux_protocol::log_path().display()
+            );
             ExitCode::from(1)
         }
     }
@@ -194,6 +198,7 @@ async fn send_command(endpoint: &Endpoint, request: Command) -> Result<ExitCode,
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let _ = stitch_mux_protocol::init_logging();
     if matches!(cli.command, Commands::Gui { .. }) {
         // winit requires the GUI event loop on the main thread, and eframe
         // blocks that thread, so no Tokio runtime may own it.
@@ -231,6 +236,7 @@ async fn run(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
     let endpoint = endpoint(cli)?;
     match &cli.command {
         Commands::Server { foreground } => {
+            tracing::info!(endpoint = %endpoint, "daemon starting");
             if !foreground {
                 eprintln!("stitch-mux: M1 runs the daemon in the foreground");
             }

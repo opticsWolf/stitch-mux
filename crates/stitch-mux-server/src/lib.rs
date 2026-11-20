@@ -282,12 +282,12 @@ fn now_unix_ms() -> u64 {
 /// Bind the endpoint and serve connections until the process is stopped.
 pub async fn run_foreground(endpoint: Endpoint) -> Result<(), ServerError> {
     let listener = endpoint.bind().await?;
-    tracing::info!("stitch-mux daemon listening");
     serve(listener).await
 }
 
 /// Serve an already-bound listener. Used by integration tests and the CLI.
 pub async fn serve(listener: stitch_mux_protocol::Listener) -> Result<(), ServerError> {
+    tracing::info!("stitch-mux daemon listening");
     let state = Arc::new(ServerState::default());
     let mut shutdown = state.shutdown_tx.subscribe();
     loop {
@@ -766,6 +766,11 @@ async fn handle_frame(
                 .remembered_focus(client_id, &session)
                 .or_else(|| session.visible_pane_ids().first().copied());
             state.set_attached(client_id, session.id, *focus);
+            tracing::info!(
+                client_id,
+                session = %request.session_name,
+                "client attached"
+            );
             state.sync_size(&session);
             session.publish_layout();
             let clients = state.count(session.id);
@@ -972,10 +977,16 @@ async fn handle_command(
                 )
                 .await;
             match result {
-                Ok(session) => response
-                    .sessions
-                    .push(session.info(state.count(session.id))),
-                Err(err) => set_error(&mut response, session_error_code(&err), err),
+                Ok(session) => {
+                    tracing::info!(session = %name, "session created");
+                    response
+                        .sessions
+                        .push(session.info(state.count(session.id)));
+                }
+                Err(err) => {
+                    tracing::warn!(session = %name, error = %err, "session creation failed");
+                    set_error(&mut response, session_error_code(&err), err);
+                }
             }
         }
         Command::EnsureSession {
@@ -1022,8 +1033,12 @@ async fn handle_command(
         }
         Command::KillSession { name } => {
             let result = state.registry.lock().await.kill(&name).await;
-            if let Err(err) = result {
-                set_error(&mut response, session_error_code(&err), err);
+            match result {
+                Ok(()) => tracing::info!(session = %name, "session killed"),
+                Err(err) => {
+                    tracing::warn!(session = %name, error = %err, "session kill failed");
+                    set_error(&mut response, session_error_code(&err), err);
+                }
             }
         }
         Command::SplitPane {
@@ -1183,6 +1198,7 @@ async fn handle_command(
             }
         }
         Command::Shutdown => {
+            tracing::info!("shutdown requested");
             // Do not detach the control connection that is waiting for this
             // response; every other client gets a typed close.
             state.shutdown(Some(client_id));
