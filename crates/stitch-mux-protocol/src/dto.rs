@@ -294,6 +294,7 @@ pub enum ErrorCode {
     UnknownKind,
     TooLarge,
     NotFound,
+    InvalidArgs,
     Unsupported,
     Busy,
     Internal,
@@ -417,6 +418,9 @@ pub struct KeyBinding {
     pub keys: Vec<String>,
     pub action: String,
     pub args: Option<ActionArgs>,
+    /// `None` is the base layer; named modes override base bindings.
+    #[serde(default)]
+    pub mode: Option<String>,
     pub source: String,
 }
 

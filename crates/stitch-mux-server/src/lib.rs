@@ -11,19 +11,25 @@ pub mod session;
 pub mod status_scan;
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use stitch_mux_core::{Size, layout_leaves};
+use stitch_mux_core::action::{ActionError, ActionRegistry};
+use stitch_mux_core::keymap::{ActionInvocation, Keymap as CoreKeymap, KeymapError};
+use stitch_mux_core::{Direction, Size, SplitAxis, layout_leaves};
 use stitch_mux_protocol::{
-    Attach, CaptureRequest, ClientInfo, Command, CommandRequest, CommandResponse, Connection,
-    DEFAULT_SERVER_CAPABILITIES, Endpoint, EndpointError, ErrorCode, ErrorInfo, Event as WireEvent,
-    Frame, FrameError, FrameWriter, Hello, HelloAck, InputEvent, Layout, MessageKind,
-    PROTOCOL_VERSION, ResizeRequest, RunPlacement, RunResult, Stream, SubscribeEvents, ViewMode,
-    WaitResult, WaitTarget, capabilities, decode_message,
+    ActionInfo, Attach, CaptureRequest, ClientInfo, Command, CommandRequest, CommandResponse,
+    Connection, DEFAULT_SERVER_CAPABILITIES, Endpoint, EndpointError, ErrorCode, ErrorInfo,
+    Event as WireEvent, Frame, FrameError, FrameWriter, Hello, HelloAck, InputEvent, KeyBinding,
+    KeyMode, Keymap as WireKeymap, Layout, MessageKind, PROTOCOL_VERSION, ResizeRequest,
+    RunPlacement, RunResult, Stream, SubscribeEvents, ViewMode, WaitResult, WaitTarget,
+    capabilities, decode_message,
 };
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
@@ -99,12 +105,33 @@ pub struct ServerState {
     events_tx: broadcast::Sender<Arc<WireEvent>>,
     event_seq: AtomicU64,
     watched_panes: StdMutex<std::collections::BTreeSet<u64>>,
+    actions: ActionRegistry,
+    keymap: StdRwLock<CoreKeymap>,
+    keymap_path: Option<PathBuf>,
 }
 
 impl Default for ServerState {
     fn default() -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         let (events_tx, _) = broadcast::channel(EVENT_QUEUE);
+        let actions = ActionRegistry::builtin();
+        let keymap_path = std::env::var_os("STITCH_MUX_KEYMAP").map(PathBuf::from);
+        let keymap = match &keymap_path {
+            Some(path) => match fs::read_to_string(path) {
+                Ok(json) => match CoreKeymap::builtin().with_user_json(&json, &actions) {
+                    Ok(keymap) => keymap,
+                    Err(err) => {
+                        tracing::warn!(path = %path.display(), %err, "ignoring invalid keymap");
+                        CoreKeymap::builtin()
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!(path = %path.display(), %err, "cannot read keymap");
+                    CoreKeymap::builtin()
+                }
+            },
+            None => CoreKeymap::builtin(),
+        };
         Self {
             registry: Mutex::new(SessionRegistry::new()),
             clients: StdMutex::new(BTreeMap::new()),
@@ -114,6 +141,9 @@ impl Default for ServerState {
             events_tx,
             event_seq: AtomicU64::new(0),
             watched_panes: StdMutex::new(std::collections::BTreeSet::new()),
+            actions,
+            keymap: StdRwLock::new(keymap),
+            keymap_path,
         }
     }
 }
@@ -151,6 +181,60 @@ impl ServerState {
             payload,
         });
         let _ = self.events_tx.send(event);
+    }
+
+    fn action_infos(&self) -> Vec<ActionInfo> {
+        self.actions
+            .list()
+            .into_iter()
+            .map(|action| ActionInfo {
+                name: action.name.clone(),
+                title: action.title.clone(),
+                description: action.description.clone(),
+                category: action.category.clone(),
+                args_schema: serde_json::to_string(&action.args).ok(),
+            })
+            .collect()
+    }
+
+    fn wire_keymap(&self) -> WireKeymap {
+        let keymap = self.keymap.read().expect("keymap");
+        WireKeymap {
+            bindings: keymap
+                .bindings
+                .iter()
+                .map(|binding| KeyBinding {
+                    keys: binding
+                        .keys
+                        .iter()
+                        .map(|key| key.as_str().to_owned())
+                        .collect(),
+                    action: binding.action.clone(),
+                    args: binding.args.clone(),
+                    mode: binding.mode.clone(),
+                    source: binding.source.clone(),
+                })
+                .collect(),
+            modes: keymap
+                .modes
+                .iter()
+                .map(|mode| KeyMode {
+                    name: mode.name.clone(),
+                    exclusive: mode.exclusive,
+                })
+                .collect(),
+        }
+    }
+
+    fn reload_keymap(&self, path: Option<String>) -> Result<String, KeymapError> {
+        let path = path
+            .map(PathBuf::from)
+            .or_else(|| self.keymap_path.clone())
+            .ok_or(KeymapError::NoPath)?;
+        let json = fs::read_to_string(&path)?;
+        let keymap = CoreKeymap::builtin().with_user_json(&json, &self.actions)?;
+        *self.keymap.write().expect("keymap") = keymap;
+        Ok(path.display().to_string())
     }
 
     /// Fan every pane's status records and exits into the event bus once.
@@ -837,7 +921,7 @@ async fn handle_frame(
         }
         MessageKind::CommandRequest => {
             let request: CommandRequest = decode_message(&frame)?;
-            let response = handle_command(request, state, client_id, *focus).await;
+            let response = handle_command(request, state, client_id, client_caps, focus).await;
             writer.send(MessageKind::CommandResponse, &response).await?;
         }
         MessageKind::Attach => {
@@ -1098,6 +1182,107 @@ fn route_input(session: &Session, focus: Option<u64>, event: InputEvent) {
     }
 }
 
+fn focused_pane(session: &Session, focus: Option<u64>) -> Option<u64> {
+    let visible = session.visible_pane_ids();
+    focus
+        .filter(|pane_id| visible.contains(pane_id))
+        .or_else(|| visible.first().copied())
+}
+
+async fn execute_action(
+    state: &Arc<ServerState>,
+    session: Option<&Arc<Session>>,
+    focus: &mut Option<u64>,
+    invocation: &ActionInvocation,
+) -> Result<(), (ErrorCode, String)> {
+    state
+        .actions
+        .validate(&invocation.action, invocation.args.as_ref())
+        .map_err(|err| match err {
+            ActionError::Unknown(_) => (ErrorCode::Unsupported, err.to_string()),
+            ActionError::InvalidArgs { .. } => (ErrorCode::InvalidArgs, err.to_string()),
+        })?;
+    let session = session.ok_or((
+        ErrorCode::Unsupported,
+        "attach to a session before invoking a pane action".to_owned(),
+    ))?;
+    let pane_id = focused_pane(session, *focus);
+    match invocation.action.as_str() {
+        "pane.split" => {
+            let args = invocation.args.as_ref().expect("validated");
+            let axis = match args["axis"].as_str() {
+                Some("columns") => SplitAxis::Columns,
+                Some("rows") => SplitAxis::Rows,
+                _ => return Err((ErrorCode::InvalidArgs, "unknown split axis".into())),
+            };
+            let ratio = args["ratio_bps"]
+                .as_u64()
+                .unwrap_or(5000)
+                .min(u16::MAX as u64) as u16;
+            let pane_id = pane_id.ok_or((ErrorCode::NotFound, "no focused pane".into()))?;
+            session
+                .split(pane_id, axis, ratio)
+                .await
+                .map_err(|err| (ErrorCode::Busy, err.to_string()))?;
+            state.watch_session(Arc::clone(session));
+            Ok(())
+        }
+        "pane.focus-left" | "pane.focus-right" | "pane.focus-up" | "pane.focus-down" => {
+            let direction = match invocation.action.as_str() {
+                "pane.focus-left" => Direction::Left,
+                "pane.focus-right" => Direction::Right,
+                "pane.focus-up" => Direction::Up,
+                _ => Direction::Down,
+            };
+            let pane_id = pane_id.ok_or((ErrorCode::NotFound, "no focused pane".into()))?;
+            *focus = session.focus_direction(pane_id, direction);
+            Ok(())
+        }
+        "pane.close" => {
+            let pane_id = pane_id.ok_or((ErrorCode::NotFound, "no focused pane".into()))?;
+            session
+                .close(pane_id)
+                .await
+                .map_err(|err| (ErrorCode::Busy, err.to_string()))?;
+            *focus = focused_pane(session, None);
+            Ok(())
+        }
+        "pane.zoom-toggle" => {
+            let pane_id = pane_id.ok_or((ErrorCode::NotFound, "no focused pane".into()))?;
+            let zoomed = session.layout(Some(pane_id)).zoomed_pane;
+            session
+                .zoom(if zoomed.is_some() {
+                    None
+                } else {
+                    Some(pane_id)
+                })
+                .await
+                .map_err(|err| (ErrorCode::Busy, err.to_string()))?;
+            Ok(())
+        }
+        "pane.resize-left" | "pane.resize-right" | "pane.resize-up" | "pane.resize-down" => {
+            let (cols, rows) = (session.size().cols, session.size().rows);
+            let (cols, rows) = match invocation.action.as_str() {
+                "pane.resize-left" => (cols.saturating_sub(2).max(1), rows),
+                "pane.resize-right" => (cols.saturating_add(2), rows),
+                "pane.resize-up" => (cols, rows.saturating_sub(1).max(1)),
+                _ => (cols, rows.saturating_add(1)),
+            };
+            session.resize(cols, rows);
+            Ok(())
+        }
+        "client.detach" | "help.which-key" => Err((
+            ErrorCode::Unsupported,
+            "this action is handled by the frontend".into(),
+        )),
+        other if other.starts_with("mode.") => Err((
+            ErrorCode::Unsupported,
+            "key modes are local to the frontend".into(),
+        )),
+        other => Err((ErrorCode::Unsupported, format!("{other} is not executable"))),
+    }
+}
+
 async fn wait_for_pane(pane: Arc<PaneRuntime>, deadline: Option<Instant>) -> (Option<i32>, bool) {
     let mut updates = pane.subscribe();
     loop {
@@ -1144,7 +1329,8 @@ async fn handle_command(
     request: CommandRequest,
     state: &Arc<ServerState>,
     client_id: u64,
-    focus: Option<u64>,
+    client_caps: u64,
+    focus: &mut Option<u64>,
 ) -> CommandResponse {
     let mut response = CommandResponse {
         request_id: request.request_id,
@@ -1255,7 +1441,7 @@ async fn handle_command(
                 Some(session) => match session.split(pane_id, axis, ratio_bps).await {
                     Ok(_) => {
                         state.watch_session(Arc::clone(&session));
-                        response.layout = Some(response_layout(state, &session, focus));
+                        response.layout = Some(response_layout(state, &session, *focus));
                     }
                     Err(err) => set_error(&mut response, session_error_code(&err), err),
                 },
@@ -1274,7 +1460,7 @@ async fn handle_command(
             drop(registry);
             match session {
                 Some(session) => match session.close(pane_id).await {
-                    Ok(Some(_)) => response.layout = Some(response_layout(state, &session, focus)),
+                    Ok(Some(_)) => response.layout = Some(response_layout(state, &session, *focus)),
                     Ok(None) => {
                         if let Some(name) = name {
                             let _ = state.registry.lock().await.kill(&name).await;
@@ -1290,7 +1476,7 @@ async fn handle_command(
             let target = state.registry.lock().await.get(&session);
             match target {
                 Some(target) => match target.zoom(pane_id).await {
-                    Ok(_) => response.layout = Some(response_layout(state, &target, focus)),
+                    Ok(_) => response.layout = Some(response_layout(state, &target, *focus)),
                     Err(err) => set_error(&mut response, session_error_code(&err), err),
                 },
                 None => set_error(&mut response, ErrorCode::NotFound, "session not found"),
@@ -1332,14 +1518,14 @@ async fn handle_command(
             );
             match session {
                 Some(session) => match session.set_layout(root, base_revision).await {
-                    Ok(_) => response.layout = Some(response_layout(state, &session, focus)),
+                    Ok(_) => response.layout = Some(response_layout(state, &session, *focus)),
                     Err(SessionError::StaleLayout { expected, current }) => {
                         set_error(
                             &mut response,
                             ErrorCode::Busy,
                             format!("layout revision {expected} is stale; current is {current}"),
                         );
-                        response.layout = Some(response_layout(state, &session, focus));
+                        response.layout = Some(response_layout(state, &session, *focus));
                     }
                     Err(err) => set_error(&mut response, session_error_code(&err), err),
                 },
@@ -1414,7 +1600,7 @@ async fn handle_command(
                         }
                     }
                     response.run = Some(result);
-                    response.layout = Some(response_layout(state, &session, focus));
+                    response.layout = Some(response_layout(state, &session, *focus));
                 }
                 Err(err) => set_error(&mut response, session_error_code(&err), err),
             }
@@ -1469,6 +1655,85 @@ async fn handle_command(
                 exit_code,
                 timed_out,
             });
+        }
+        Command::ListActions => {
+            if client_caps & capabilities::client::ACTIONS == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "ACTIONS capability not requested",
+                );
+            } else {
+                response.actions = state.action_infos();
+            }
+        }
+        Command::GetKeymap => {
+            if client_caps & capabilities::client::ACTIONS == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "ACTIONS capability not requested",
+                );
+            } else {
+                response.keymap = Some(state.wire_keymap());
+            }
+        }
+        Command::InvokeAction { action, args } => {
+            if client_caps & capabilities::client::ACTIONS == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "ACTIONS capability not requested",
+                );
+                return response;
+            }
+            let invocation = ActionInvocation { action, args };
+            let session = match *focus {
+                Some(pane_id) => state.registry.lock().await.find_by_pane(pane_id),
+                None => None,
+            };
+            let mut effective = *focus;
+            match execute_action(state, session.as_ref(), &mut effective, &invocation).await {
+                Ok(()) => {
+                    *focus = effective;
+                    if let Some(session) = &session {
+                        response.layout = Some(response_layout(state, session, *focus));
+                    }
+                    state.publish_event(
+                        session.as_ref().map(|session| session.id),
+                        "action_invoked",
+                        serde_json::json!({
+                            "action": invocation.action,
+                            "pane_id": effective,
+                            "client_id": client_id,
+                        }),
+                    );
+                }
+                Err((code, message)) => set_error(&mut response, code, message),
+            }
+        }
+        Command::ReloadKeymap { path } => {
+            if client_caps & capabilities::client::ACTIONS == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "ACTIONS capability not requested",
+                );
+                return response;
+            }
+            match state.reload_keymap(path) {
+                Ok(path) => {
+                    state.publish_event(
+                        None,
+                        "keymap_changed",
+                        serde_json::json!({ "path": path }),
+                    );
+                    state.publish_event(None, "actions_changed", serde_json::json!({}));
+                    response.keymap = Some(state.wire_keymap());
+                    response.actions = state.action_infos();
+                }
+                Err(err) => set_error(&mut response, ErrorCode::InvalidArgs, err),
+            }
         }
         Command::Capture {
             pane_id,

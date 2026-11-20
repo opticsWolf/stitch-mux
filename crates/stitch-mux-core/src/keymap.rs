@@ -165,6 +165,10 @@ pub enum KeymapError {
     Duplicate { mode: String, keys: String },
     #[error("unknown mode {0:?}")]
     UnknownMode(String),
+    #[error("cannot read keymap: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("no keymap path is configured")]
+    NoPath,
     #[error("invalid keymap JSON: {0}")]
     Json(#[from] serde_json::Error),
 }

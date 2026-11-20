@@ -137,6 +137,9 @@ pub enum Command {
         action: String,
         args: Option<ActionArgs>,
     },
+    ReloadKeymap {
+        path: Option<String>,
+    },
     Shutdown,
 }
 

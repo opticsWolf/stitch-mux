@@ -10,7 +10,9 @@ Python package version in `pyproject.toml`.
 
 - **M9 core foundation:** typed action registry with argument validation,
   canonical key names, JSON keymap merging, and a bounded mode/sequence
-  dispatcher with which-key hints and double-prefix passthrough.
+  dispatcher with which-key hints and double-prefix passthrough. The daemon
+  now serves `ListActions`, `GetKeymap`, `InvokeAction`, and `ReloadKeymap` with
+  capability checks, typed argument errors, and local change events.
 - **M7 program status and activity:** bounded mux-side OSC 7501 scanner,
   current-status propagation to panes/sessions/GUI, textual attention badges,
   activity filtering and local unread state in the reference GUI, a sourceable
