@@ -24,6 +24,10 @@ Python package version in `pyproject.toml`.
   marks and cwd in pane snapshots, and `total_lines` lets clients map absolute
   marks to scrollback offsets. The GUI adds `prompt.previous`/`prompt.next`
   (`C-b [`/`C-b ]`) and ‹P/P› status-bar buttons; no screen text is parsed.
+- **M10 notifications/progress:** bounded OSC 9/777 and OSC 9;4 scans publish
+  current-value notification and progress metadata in snapshots/deltas; the egui
+  status bar shows the focused pane's latest record without any daemon-side
+  desktop side effect.
 - **M10 selection/copy:** the egui frontend selects cells across its bounded
   scrollback overlay, copies with `Ctrl+C` or copy-on-drag, supports
   `Ctrl+Shift+A` select-all and `Esc` clear, and publishes PRIMARY selection

@@ -102,6 +102,34 @@ pub struct ShellMarks {
     pub command_rows: Vec<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressState {
+    #[default]
+    Remove,
+    Normal,
+    Error,
+    Indeterminate,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Progress {
+    pub state: ProgressState,
+    #[serde(default)]
+    pub value: Option<u8>,
+    #[serde(default)]
+    pub message: Option<String>,
+    pub updated_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Notification {
+    #[serde(default)]
+    pub title: Option<String>,
+    pub message: String,
+    pub updated_at_unix_ms: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PaneSnapshot {
     pub pane_id: u64,
@@ -120,6 +148,12 @@ pub struct PaneSnapshot {
     pub shell_marks: Option<ShellMarks>,
     #[serde(default)]
     pub program_status: Option<ProgramStatus>,
+    /// Latest OSC 9/777 notification. Current value, not a queue.
+    #[serde(default)]
+    pub notification: Option<Notification>,
+    /// Latest OSC 9;4 progress record. Current value, not a queue.
+    #[serde(default)]
+    pub progress: Option<Progress>,
     pub alt_screen: bool,
     pub scrollback_len: u64,
     /// Absolute row count ever written to this pane. Clients use it with
@@ -152,6 +186,12 @@ pub struct PaneDelta {
     pub shell_marks: Option<ShellMarks>,
     #[serde(default)]
     pub program_status: Option<ProgramStatus>,
+    /// Latest OSC 9/777 notification. Current value, not a queue.
+    #[serde(default)]
+    pub notification: Option<Notification>,
+    /// Latest OSC 9;4 progress record. Current value, not a queue.
+    #[serde(default)]
+    pub progress: Option<Progress>,
     pub alt_screen: bool,
     pub scrollback_len: u64,
     #[serde(default)]

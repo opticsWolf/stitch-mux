@@ -7,6 +7,7 @@
 pub mod ansi;
 pub mod client_updates;
 pub mod link_scan;
+pub mod notify_scan;
 pub mod pane;
 pub mod session;
 pub mod shell_scan;

@@ -76,6 +76,8 @@ impl PaneView {
         snapshot.foreground = delta.foreground;
         snapshot.shell_marks = delta.shell_marks;
         snapshot.program_status = delta.program_status;
+        snapshot.notification = delta.notification;
+        snapshot.progress = delta.progress;
         snapshot.alt_screen = delta.alt_screen;
         snapshot.scrollback_len = delta.scrollback_len;
         snapshot.total_lines = delta.total_lines;
@@ -323,6 +325,9 @@ mod tests {
             foreground: None,
             shell_marks: None,
             program_status: None,
+            notification: None,
+            progress: None,
+
             alt_screen: false,
             scrollback_len: 0,
             total_lines: 0,
@@ -349,6 +354,9 @@ mod tests {
             foreground: None,
             shell_marks: None,
             program_status: None,
+            notification: None,
+            progress: None,
+
             alt_screen: false,
             scrollback_len: 0,
             total_lines: 0,

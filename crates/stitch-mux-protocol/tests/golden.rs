@@ -101,6 +101,9 @@ fn all_fixtures() -> Vec<(MessageKind, String)> {
             command_rows: vec![3],
         }),
         program_status: Some(status()),
+        notification: None,
+        progress: None,
+
         alt_screen: false,
         scrollback_len: 9,
         total_lines: 0,
@@ -206,6 +209,9 @@ fn all_fixtures() -> Vec<(MessageKind, String)> {
                     foreground: None,
                     shell_marks: None,
                     program_status: Some(status()),
+                    notification: None,
+                    progress: None,
+
                     alt_screen: false,
                     scrollback_len: 10,
                     total_lines: 0,
@@ -472,11 +478,11 @@ const EXPECTED: [(u8, &str); 27] = [
     ),
     (
         6,
-        "534d0100060085000000dc00100703010191929196a161a764656661756c74a764656661756c740101b368747470733a2f2f6578616d706c652e636f6dc2950102c3a5626c6f636bc297c2c3c3cd03eec3c301a27368a42f746d70930ba27368c0929102910396a56a6f622d31a7776f726b696e67c0a5636172676fa474657374cf0000018bcfe56800c20900cc80",
+        "534d0100060087000000dc00120703010191929196a161a764656661756c74a764656661756c740101b368747470733a2f2f6578616d706c652e636f6dc2950102c3a5626c6f636bc297c2c3c3cd03eec3c301a27368a42f746d70930ba27368c0929102910396a56a6f622d31a7776f726b696e67c0a5636172676fa474657374cf0000018bcfe56800c0c0c20900cc80",
     ),
     (
         7,
-        "534d01000700620000009f07049193019196a0a764656661756c74a764656661756c740001c0c3950102c3a5626c6f636bc297c2c3c3cd03eec3c301a27368c0c0c096a56a6f622d31a7776f726b696e67c0a5636172676fa474657374cf0000018bcfe56800c20a00cca0c3",
+        "534d0100070066000000dc001107049193019196a0a764656661756c74a764656661756c740001c0c3950102c3a5626c6f636bc297c2c3c3cd03eec3c301a27368c0c0c096a56a6f622d31a7776f726b696e67c0a5636172676fa474657374cf0000018bcfe56800c0c0c20a00cca0c3",
     ),
     (8, "534d01000800020000009107"),
     (9, "534d0100090011000000050000000000000050001800011b5b324a"),
@@ -554,6 +560,9 @@ fn older_peers_may_omit_optional_snapshot_fields() {
             command_rows: vec![3],
         }),
         program_status: Some(status()),
+        notification: None,
+        progress: None,
+
         alt_screen: false,
         scrollback_len: 9,
         total_lines: 0,

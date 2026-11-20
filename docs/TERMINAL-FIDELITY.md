@@ -26,7 +26,10 @@ are.
   become `ShellMarks` and cwd in snapshot/delta metadata. `prompt.previous` and
   `prompt.next` jump by absolute row, never by parsing screen text.
 - **Program status:** OSC 7501 records feed pane/session activity summaries and
-  a bounded local event stream.
+  a bounded local event stream. OSC 9/777 notifications and OSC 9;4 progress
+  become current-value metadata; the egui status bar shows the focused pane's
+  latest notification and progress. The daemon never raises a desktop
+  notification itself.
 
 ## Link safety
 
@@ -50,8 +53,9 @@ text.
   over the visible cells plus the frontend's bounded local scrollback, not a
   daemon-side mode.
 - tmux control-mode compatibility is out of scope.
-- Desktop notifications and OSC 9;4 progress are not yet surfaced as typed
-  metadata; their escape sequences still pass through to the screen unchanged.
+- Notification/progress records are current values, not an audit trail; a
+  frontend that needs history must keep its own bounded projection. The
+  daemon performs no desktop notification or other side effect.
 
 Alternate-screen programs (vim, less, htop) remain covered by the M4 conformance
 corpus: the daemon sends a fresh `PaneSnapshot` on an alternate-screen

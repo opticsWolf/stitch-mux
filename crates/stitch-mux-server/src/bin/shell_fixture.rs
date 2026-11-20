@@ -23,6 +23,9 @@ fn main() {
     osc("8;;https://example.com/docs");
     print!("docs");
     osc("8;;");
+    // Notification and progress records.
+    osc("777;notify;build;Stage 2 failed");
+    osc("9;4;2;75;verify");
     loop {
         std::thread::sleep(Duration::from_secs(60));
     }

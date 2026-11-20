@@ -218,6 +218,9 @@ mod tests {
             foreground: None,
             shell_marks: None,
             program_status: None,
+            notification: None,
+            progress: None,
+
             alt_screen: false,
             scrollback_len: 0,
             total_lines: 0,
@@ -294,6 +297,9 @@ mod tests {
             foreground: None,
             shell_marks: None,
             program_status: None,
+            notification: None,
+            progress: None,
+
             alt_screen: false,
             scrollback_len: 0,
             total_lines: 0,
@@ -334,6 +340,9 @@ mod tests {
             foreground: None,
             shell_marks: None,
             program_status: None,
+            notification: None,
+            progress: None,
+
             alt_screen: false,
             scrollback_len: 0,
             total_lines: 0,

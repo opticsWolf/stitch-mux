@@ -59,6 +59,9 @@ fn snapshot() -> PaneSnapshot {
         foreground: None,
         shell_marks: None,
         program_status: None,
+        notification: None,
+        progress: None,
+
         alt_screen: false,
         scrollback_len: 4,
         total_lines: 0,
@@ -83,6 +86,9 @@ fn valid_frames() -> Vec<Frame> {
         foreground: None,
         shell_marks: None,
         program_status: None,
+        notification: None,
+        progress: None,
+
         alt_screen: false,
         scrollback_len: 5,
         total_lines: 0,

@@ -950,6 +950,25 @@ impl MuxApp {
             if let Some(error) = &view.error {
                 ui.colored_label(egui::Color32::RED, &error.message);
             }
+            if let Some(snapshot) = view
+                .focus
+                .and_then(|pane_id| view.pane(pane_id))
+                .and_then(|pane| pane.snapshot.as_ref())
+            {
+                if let Some(progress) = &snapshot.progress
+                    && progress.state != stitch_mux_protocol::ProgressState::Remove
+                {
+                    let text = match progress.value {
+                        Some(value) => format!("[{value}%]"),
+                        None => "[working]".into(),
+                    };
+                    ui.label(text);
+                }
+                if let Some(notification) = &snapshot.notification {
+                    let title = notification.title.as_deref().unwrap_or("notify");
+                    ui.label(format!("[{title}: {}]", notification.message));
+                }
+            }
             if let Some(exit) = &view.exit {
                 ui.label(format!("child: {}", exit.reason));
             }
@@ -2266,6 +2285,9 @@ mod tests {
                 command_rows: Vec::new(),
             }),
             program_status: None,
+            notification: None,
+            progress: None,
+
             alt_screen: false,
             scrollback_len: 20,
             total_lines,
@@ -2296,6 +2318,9 @@ mod tests {
             foreground: None,
             shell_marks: None,
             program_status: None,
+            notification: None,
+            progress: None,
+
             alt_screen: false,
             scrollback_len: 2,
             total_lines: 4,

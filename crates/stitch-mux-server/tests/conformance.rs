@@ -79,6 +79,9 @@ fn scene(cols: u16, rows: u16, title: &str, alt_screen: bool) -> (Attached, Layo
         foreground: None,
         shell_marks: None,
         program_status: None,
+        notification: None,
+        progress: None,
+
         alt_screen,
         scrollback_len: 0,
         total_lines: 0,

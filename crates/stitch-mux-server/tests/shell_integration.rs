@@ -78,6 +78,8 @@ async fn shell_marks_and_cwd_survive_the_snapshot_pipeline() {
                         .as_ref()
                         .is_some_and(|marks| !marks.prompt_rows.is_empty())
                     && snapshot.total_lines > 0
+                    && snapshot.notification.is_some()
+                    && snapshot.progress.is_some()
                     && snapshot.cells.iter().any(|row| {
                         row.cells
                             .iter()
@@ -114,6 +116,15 @@ async fn shell_marks_and_cwd_survive_the_snapshot_pipeline() {
             .iter()
             .all(|row| *row >= marks.prompt_rows[0])
     );
+    assert_eq!(
+        snapshot.notification.as_ref().unwrap().message,
+        "Stage 2 failed"
+    );
+    assert_eq!(
+        snapshot.progress.as_ref().unwrap().state,
+        stitch_mux_protocol::ProgressState::Error
+    );
+    assert_eq!(snapshot.progress.as_ref().unwrap().value, Some(75));
     assert!(snapshot.total_lines >= snapshot.scrollback_len);
     assert!(
         snapshot.cells.iter().any(|row| {

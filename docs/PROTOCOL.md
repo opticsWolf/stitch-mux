@@ -253,6 +253,8 @@ struct PaneSnapshot {
     foreground: Option<ProcessInfo>,
     shell_marks: Option<ShellMarks>,
     program_status: Option<ProgramStatus>,
+    notification: Option<Notification>,     // current value, not a queue
+    progress: Option<Progress>,             // current value, not a queue
     alt_screen: bool,
     scrollback_len: u64,
     total_lines: u64,            // absolute rows ever written; optional in v1
@@ -282,6 +284,21 @@ struct ProcessInfo {
 struct ShellMarks {
     prompt_rows: Vec<u64>,       // absolute scrollback rows
     command_rows: Vec<u64>,
+}
+
+enum ProgressState { Remove, Normal, Error, Indeterminate }
+
+struct Progress {
+    state: ProgressState,
+    value: Option<u8>,                   // 0..100 when present
+    message: Option<String>,
+    updated_at_unix_ms: u64,
+}
+
+struct Notification {
+    title: Option<String>,
+    message: String,
+    updated_at_unix_ms: u64,
 }
 
 enum ProgramState { Idle, Working, Done, Blocked, Error }
@@ -384,7 +401,10 @@ statuses: `PaneInfo.program_status`, `SessionInfo.activity`, and
 `Attached.activity` all reflect the latest record, not a transition history.
 The GUI keeps unread/seen state locally. A pane with no OSC 7501 report has
 `None` status. The daemon's OSC 7501 scanner discards malformed records and
-bounds a record to 8 KiB.
+bounds a record to 8 KiB. OSC 9/777 notifications and OSC 9;4 progress use a
+separate bounded 8 KiB scanner. Both are current values, not queues: a later
+record replaces the earlier one, text is capped at 512 characters with control
+characters stripped, and no desktop action is taken by the daemon.
 
 `Cell.link` carries an OSC 8 URI from a bounded mux-side scan. A link change
 publishes a full snapshot; frontends must not open custom schemes without

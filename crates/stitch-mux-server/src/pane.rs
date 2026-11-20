@@ -12,8 +12,8 @@ use stitch_mux_core::{
     Attrs, CaptureFormat, Cell, Color, Cursor, CursorShape, Modes, ProgramStatus, Row,
 };
 use stitch_mux_protocol::{
-    CaptureResponse, CapturedRow, PaneDelta, PaneSnapshot, ProcessInfo, RowUpdate, SessionExit,
-    ShellMarks,
+    CaptureResponse, CapturedRow, Notification, PaneDelta, PaneSnapshot, ProcessInfo, Progress,
+    RowUpdate, SessionExit, ShellMarks,
 };
 use stitch_pty::errors::PtyErrorKind;
 use stitch_pty::terminal::events::TermEvent;
@@ -29,6 +29,7 @@ use tokio::task::JoinHandle;
 use unicode_width::UnicodeWidthChar;
 
 use crate::link_scan::LinkScanner;
+use crate::notify_scan::NotifyScanner;
 use crate::shell_scan::ShellScanner;
 use crate::status_scan::StatusScanner;
 
@@ -123,6 +124,10 @@ struct PaneState {
     queries: QueryScanner,
     /// Latest OSC 7501 record. Current state only, never a queue.
     program_status: Option<ProgramStatus>,
+    /// Latest OSC 9/777 notification and OSC 9;4 progress. Current values only.
+    notification: Option<Notification>,
+    progress: Option<Progress>,
+    notify_scan: NotifyScanner,
     status_scan: StatusScanner,
     /// Shell integration marks and cwd from OSC 133/1337. The scanner keeps
     /// only a bounded tail; no event history lives here.
@@ -308,6 +313,10 @@ impl PaneRuntime {
                 link_scan: LinkScanner::default(),
                 links: LinkCells::default(),
                 program_status: None,
+                notification: None,
+                progress: None,
+                notify_scan: NotifyScanner::default(),
+
                 status_scan: StatusScanner::default(),
                 exit: None,
                 exit_code: None,
@@ -358,6 +367,13 @@ impl PaneRuntime {
                             let shell = state.shell_scan.scan(&buf[..n], origin_row);
                             if shell.cwd.is_some() {
                                 state.shell_cwd = shell.cwd;
+                            }
+                            let notify = state.notify_scan.scan(&buf[..n]);
+                            if notify.notification.is_some() {
+                                state.notification = notify.notification;
+                            }
+                            if notify.progress.is_some() {
+                                state.progress = notify.progress;
                             }
                             let link =
                                 state
@@ -723,6 +739,8 @@ fn common_fields(state: &PaneState, pane_id: u64, seq: u64) -> PaneDelta {
         }),
         shell_marks: metadata_marks(state),
         program_status: state.program_status.clone(),
+        notification: state.notification.clone(),
+        progress: state.progress.clone(),
         alt_screen: screen.alt_screen(),
         scrollback_len: screen.history_size() as u64,
         total_lines: screen.total_lines() as u64,
@@ -762,6 +780,8 @@ fn snapshot_from(state: &PaneState, pane_id: u64, seq: u64) -> PaneSnapshot {
         foreground: delta.foreground,
         shell_marks: delta.shell_marks,
         program_status: delta.program_status,
+        notification: delta.notification,
+        progress: delta.progress,
         alt_screen: delta.alt_screen,
         scrollback_len: delta.scrollback_len,
         total_lines: delta.total_lines,
