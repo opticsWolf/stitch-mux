@@ -479,12 +479,14 @@ client.
 **Goal:** cover the normal terminal behaviors a GUI user expects, without
 chasing graphics protocols.
 
-**Status: In progress.** Styled `vt`/`html` capture, bounded scrollback,
+**Status: Done.** Styled `vt`/`html` capture, bounded scrollback,
 shell-integration metadata (OSC 133 prompt/command marks and OSC 1337 cwd), GUI
 prompt jumps, OSC 8 link metadata with safe click handling, egui
-selection/copy across scrollback, and current OSC 9/777 notification / OSC 9;4
-progress metadata are implemented. Smooth scrolling/reflow and final
-alternate-screen regression remain.
+selection/copy across scrollback, current OSC 9/777 notification / OSC 9;4
+progress metadata, and fractional smooth scrolling are implemented. A real-PTY
+integration test covers alternate-screen entry/exit and shell-screen restore.
+Reflow is explicitly out of scope: the daemon owns fixed canonical geometry and
+the reference GUI does not rewrap historical rows.
 
 **Estimate:** 5-7 engineer-days.
 

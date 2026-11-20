@@ -14,6 +14,9 @@ are.
   capped at 1000. `total_lines` gives clients an absolute row anchor.
 - **Scrollback:** `STITCH_MUX_SCROLLBACK` bounds daemon history rows
   (100..20000, default 2000). Frontends keep their own bounded local overlay.
+- **Smooth scrolling:** the egui frontend accumulates sub-row wheel deltas and
+  paints with a fractional pixel shift plus one extra clipped row. Selection
+  and pointer hit-testing use the same shift, so clicks stay aligned.
 - **Selection/copy:** drag in the egui pane to select cells across the local
   scrollback overlay. `Ctrl+C` copies a non-empty selection (otherwise it is
   sent to the child), `Ctrl+Shift+A` selects all retained rows, `Esc` clears the
@@ -49,6 +52,9 @@ text.
 - No sixel, Kitty image protocol, or other graphics support is implied.
 - Underline styles are mapped to a simple attribute bit, not full conformance
   with every underline variant.
+- Historical rows are not rewrapped when the viewport width changes. The
+  daemon owns canonical geometry and a resize publishes a fresh snapshot;
+  cell-indexed link metadata is cleared rather than guessed at a new width.
 - There is no copy mode or buffer search in v0.2. Selection is a direct drag
   over the visible cells plus the frontend's bounded local scrollback, not a
   daemon-side mode.
@@ -58,5 +64,6 @@ text.
   daemon performs no desktop notification or other side effect.
 
 Alternate-screen programs (vim, less, htop) remain covered by the M4 conformance
-corpus: the daemon sends a fresh `PaneSnapshot` on an alternate-screen
-transition and restores the shell screen on exit.
+corpus and by `tests/alternate_screen.rs`, which drives real OSC 1049
+transitions through a PTY and asserts that the shell screen is restored without
+leaking alternate-screen rows.

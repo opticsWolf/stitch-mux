@@ -24,6 +24,9 @@ Python package version in `pyproject.toml`.
   marks and cwd in pane snapshots, and `total_lines` lets clients map absolute
   marks to scrollback offsets. The GUI adds `prompt.previous`/`prompt.next`
   (`C-b [`/`C-b ]`) and ‹P/P› status-bar buttons; no screen text is parsed.
+- **M10 smooth scrolling:** egui accumulates fractional wheel deltas and paints
+  one extra clipped row, with pointer/selection mapping using the same shift.
+  A real-PTY alternate-screen test now asserts shell-screen restoration.
 - **M10 notifications/progress:** bounded OSC 9/777 and OSC 9;4 scans publish
   current-value notification and progress metadata in snapshots/deltas; the egui
   status bar shows the focused pane's latest record without any daemon-side

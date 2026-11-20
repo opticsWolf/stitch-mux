@@ -100,6 +100,9 @@ struct PaneScroll {
     visible: Vec<Row>,
     history: VecDeque<Row>,
     offset: usize,
+    /// Fractional row scrolled beyond `offset`, accumulated from smooth wheel
+    /// deltas. Rendering shifts by this fraction and paints one extra row.
+    fraction: f32,
     selection: Option<Selection>,
 }
 
@@ -1218,16 +1221,15 @@ fn draw_panes(
         // the sign is used as-is.
         let wheel = ui.input(|input| input.smooth_scroll_delta.y);
         if hover.is_some_and(|pos| content.contains(pos)) && wheel != 0.0 {
-            let max_offset = state.history.len() as f32;
-            state.offset = (state.offset as f32 + wheel / cell_h)
-                .round()
-                .clamp(0.0, max_offset) as usize;
+            apply_wheel(state, wheel, cell_h);
         }
         let visible_rows = usize::from(geometry.content.rows).min(snapshot.cells.len());
+        let render_offset = state.render_offset();
+        let render_shift = state.render_shift(cell_h);
         let (start, end) = scroll_window_range(
             state.history.len(),
             snapshot.cells.len(),
-            state.offset,
+            render_offset,
             visible_rows,
         );
         let old_clip = ui.clip_rect();
@@ -1247,7 +1249,7 @@ fn draw_panes(
                 .first()
                 .map(|cell| color32(cell.fg))
                 .unwrap_or(egui::Color32::LIGHT_GRAY);
-            let origin = content.min + egui::vec2(0.0, y as f32 * cell_h);
+            let origin = content.min + egui::vec2(0.0, y as f32 * cell_h + render_shift);
             let max_chars = usize::from(geometry.content.cols);
             let absolute_row = local_absolute_row(state, snapshot, index);
             if let Some(absolute_row) = absolute_row
@@ -1342,7 +1344,7 @@ fn draw_panes(
                 content.min
                     + egui::vec2(
                         f32::from(snapshot.cursor.x) * cell_w,
-                        f32::from(snapshot.cursor.y) * cell_h,
+                        f32::from(snapshot.cursor.y) * cell_h + render_shift,
                     ),
                 egui::vec2(cell_w, cell_h),
             );
@@ -1903,6 +1905,31 @@ fn local_absolute_row(
         .filter(|row| *row < snapshot.total_lines)
 }
 
+impl PaneScroll {
+    fn render_offset(&self) -> usize {
+        self.offset + usize::from(self.fraction > 0.0)
+    }
+
+    fn render_shift(&self, cell_h: f32) -> f32 {
+        if self.fraction > 0.0 {
+            -(1.0 - self.fraction) * cell_h
+        } else {
+            0.0
+        }
+    }
+}
+
+fn apply_wheel(state: &mut PaneScroll, wheel: f32, cell_h: f32) {
+    let max_offset = state.history.len() as f32;
+    let desired = state.offset as f32 + state.fraction + wheel / cell_h.max(1.0);
+    let clamped = desired.clamp(0.0, max_offset);
+    state.offset = clamped as usize;
+    state.fraction = clamped - state.offset as f32;
+    if state.fraction < 0.0 || state.fraction >= 1.0 {
+        state.fraction = 0.0;
+    }
+}
+
 fn pointer_row(
     state: &PaneScroll,
     snapshot: &stitch_mux_protocol::PaneSnapshot,
@@ -1910,31 +1937,20 @@ fn pointer_row(
     cell_h: f32,
     pos: egui::Pos2,
 ) -> Option<u64> {
-    let y = ((pos.y - content.min.y) / cell_h.max(1.0)) as usize;
     let visible_rows = usize::from(snapshot.rows).min(snapshot.cells.len());
-    let (start, _) = scroll_window_range(
+    let (start, end) = scroll_window_range(
         state.history.len(),
         snapshot.cells.len(),
-        state.offset,
+        state.render_offset(),
         visible_rows,
     );
-    (start..end_of_window(state, snapshot, visible_rows))
-        .nth(y)
+    let y = ((pos.y - content.min.y - state.render_shift(cell_h)) / cell_h.max(1.0)).floor();
+    if y < 0.0 {
+        return None;
+    }
+    (start..end)
+        .nth(y as usize)
         .and_then(|index| local_absolute_row(state, snapshot, index))
-}
-
-fn end_of_window(
-    state: &PaneScroll,
-    snapshot: &stitch_mux_protocol::PaneSnapshot,
-    rows: usize,
-) -> usize {
-    scroll_window_range(
-        state.history.len(),
-        snapshot.cells.len(),
-        state.offset,
-        rows,
-    )
-    .1
 }
 
 fn selection_columns(selection: Option<Selection>, absolute_row: u64) -> Option<(usize, usize)> {
@@ -2293,6 +2309,27 @@ mod tests {
             total_lines,
             scrollback_bytes: 0,
         }
+    }
+
+    #[test]
+    fn smooth_wheel_deltas_accumulate_into_fractional_rows() {
+        let mut state = PaneScroll::default();
+        for _ in 0..20 {
+            state.history.push_back(Row {
+                cells: Vec::new(),
+                wrapped: false,
+            });
+        }
+        apply_wheel(&mut state, 4.0, 20.0); // 0.2 rows up
+        assert_eq!(state.offset, 0);
+        assert!((state.fraction - 0.2).abs() < 0.001);
+        assert_eq!(state.render_offset(), 1);
+        apply_wheel(&mut state, 16.0, 20.0); // now exactly one row
+        assert_eq!(state.offset, 1);
+        assert!(state.fraction.abs() < 0.001);
+        apply_wheel(&mut state, -10.0, 20.0); // half a row back down
+        assert_eq!(state.offset, 0);
+        assert!((state.fraction - 0.5).abs() < 0.001);
     }
 
     #[test]
