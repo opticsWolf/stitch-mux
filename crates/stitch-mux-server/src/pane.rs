@@ -12,6 +12,7 @@ use stitch_mux_core::{
 };
 use stitch_mux_protocol::{
     CaptureResponse, CapturedRow, PaneDelta, PaneSnapshot, ProcessInfo, RowUpdate, SessionExit,
+    ShellMarks,
 };
 use stitch_pty::errors::PtyErrorKind;
 use stitch_pty::terminal::events::TermEvent;
@@ -26,6 +27,7 @@ use tokio::sync::{Notify, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use unicode_width::UnicodeWidthChar;
 
+use crate::shell_scan::ShellScanner;
 use crate::status_scan::StatusScanner;
 
 const UPDATE_QUEUE: usize = 256;
@@ -85,6 +87,10 @@ struct PaneState {
     /// Latest OSC 7501 record. Current state only, never a queue.
     program_status: Option<ProgramStatus>,
     status_scan: StatusScanner,
+    /// Shell integration marks and cwd from OSC 133/1337. The scanner keeps
+    /// only a bounded tail; no event history lives here.
+    shell_scan: ShellScanner,
+    shell_cwd: Option<String>,
     /// Authoritative terminal state, recorded before any task cancellation.
     exit: Option<SessionExit>,
     exit_code: Option<i32>,
@@ -258,6 +264,8 @@ impl PaneRuntime {
                 bell: false,
                 last_activity_unix_ms: now_unix_ms(),
                 queries: QueryScanner::default(),
+                shell_scan: ShellScanner::default(),
+                shell_cwd: None,
                 program_status: None,
                 status_scan: StatusScanner::default(),
                 exit: None,
@@ -290,6 +298,8 @@ impl PaneRuntime {
                     Ok(n) => {
                         let (dirty, events, responses) = {
                             let mut state = reader_runtime.lock_state();
+                            let origin_row = state.screen.history_size() as u64
+                                + u64::from(state.screen.cursor().y.min(u16::MAX as usize) as u16);
                             state.screen.feed(&buf[..n]);
                             let cursor = {
                                 let cursor = state.screen.cursor();
@@ -300,6 +310,10 @@ impl PaneRuntime {
                             if let Some(status) = &status {
                                 state.program_status = Some(status.clone());
                                 let _ = reader_runtime.status_tx.send(status.clone());
+                            }
+                            let shell = state.shell_scan.scan(&buf[..n], origin_row);
+                            if shell.cwd.is_some() {
+                                state.shell_cwd = shell.cwd;
                             }
                             (
                                 state.screen.take_dirty_rows(),
@@ -613,16 +627,17 @@ fn common_fields(state: &PaneState, pane_id: u64, seq: u64) -> PaneDelta {
             keyboard_flags: screen.keyboard_mode(),
         },
         title: screen.title().to_owned(),
-        cwd: screen.cwd().map(str::to_owned),
+        cwd: metadata_cwd(state),
         foreground: Some(ProcessInfo {
             pid: None,
             name: state.program.clone(),
-            cwd: screen.cwd().map(str::to_owned),
+            cwd: metadata_cwd(state),
         }),
-        shell_marks: None,
+        shell_marks: metadata_marks(state),
         program_status: state.program_status.clone(),
         alt_screen: screen.alt_screen(),
         scrollback_len: screen.history_size() as u64,
+        total_lines: screen.total_lines() as u64,
         scrollback_bytes: (screen.total_lines() * screen.columns() * 4) as u64,
         bell: false,
     }
@@ -655,7 +670,32 @@ fn snapshot_from(state: &PaneState, pane_id: u64, seq: u64) -> PaneSnapshot {
         program_status: delta.program_status,
         alt_screen: delta.alt_screen,
         scrollback_len: delta.scrollback_len,
+        total_lines: delta.total_lines,
         scrollback_bytes: delta.scrollback_bytes,
+    }
+}
+
+fn metadata_cwd(state: &PaneState) -> Option<String> {
+    state
+        .screen
+        .cwd()
+        .or(state.shell_cwd.as_deref())
+        .map(str::to_owned)
+}
+
+/// Mark rows are absolute. Drop rows whose scrollback has already been
+/// evicted so a frontend can never jump to a line it no longer has.
+fn metadata_marks(state: &PaneState) -> Option<ShellMarks> {
+    let mut marks = state.shell_scan.marks().clone();
+    let total = state.screen.total_lines();
+    let oldest =
+        total.saturating_sub(scrollback_budget().saturating_add(state.screen.lines())) as u64;
+    marks.prompt_rows.retain(|row| *row >= oldest);
+    marks.command_rows.retain(|row| *row >= oldest);
+    if marks.prompt_rows.is_empty() && marks.command_rows.is_empty() {
+        None
+    } else {
+        Some(marks)
     }
 }
 

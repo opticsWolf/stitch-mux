@@ -19,6 +19,11 @@ Python package version in `pyproject.toml`.
 - **M10 capture/export:** `capture --format vt` emits SGR-styled text,
   `--format html` emits escaped styled rows, and scrollback is bounded by
   `STITCH_MUX_SCROLLBACK` (default 2000 history rows).
+
+- **M10 shell integration:** bounded OSC 133/1337 scans publish prompt/command
+  marks and cwd in pane snapshots, and `total_lines` lets clients map absolute
+  marks to scrollback offsets. The GUI adds `prompt.previous`/`prompt.next`
+  (`C-b [`/`C-b ]`) and ‹P/P› status-bar buttons; no screen text is parsed.
 - **M7 program status and activity:** bounded mux-side OSC 7501 scanner,
   current-status propagation to panes/sessions/GUI, textual attention badges,
   activity filtering and local unread state in the reference GUI, a sourceable

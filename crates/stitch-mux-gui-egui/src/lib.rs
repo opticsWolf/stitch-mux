@@ -678,7 +678,7 @@ impl eframe::App for MuxApp {
             self.handle.spawn(async move { client.detach().await });
         }
         if !self.show_palette {
-            let detach_from_key = handle_input(ui, self, grid);
+            let detach_from_key = handle_input(ui, self, grid, &view);
             if detach_from_key && let Some(client) = self.client.take() {
                 self.view_rx = None;
                 self.handle.spawn(async move { client.detach().await });
@@ -836,6 +836,9 @@ impl MuxApp {
         self.show_palette = open;
         self.palette_filter = filter;
         if let Some(action) = selected {
+            if action == "prompt.previous" || action == "prompt.next" {
+                jump_prompt(&mut self.pane_scroll, view, action == "prompt.previous");
+            }
             self.send_command(Command::InvokeAction {
                 action,
                 args: None,
@@ -870,6 +873,12 @@ impl MuxApp {
             }
             if view.needs_resync {
                 self.send(Outbound::Resync);
+            }
+            if ui.button("‹P").clicked() {
+                jump_prompt(&mut self.pane_scroll, view, true);
+            }
+            if ui.button("P›").clicked() {
+                jump_prompt(&mut self.pane_scroll, view, false);
             }
             detach = ui.button("Detach").clicked();
             if ui.button("Actions").clicked() {
@@ -1461,7 +1470,7 @@ fn color32(color: Color) -> egui::Color32 {
     }
 }
 
-fn handle_input(ui: &mut egui::Ui, app: &mut MuxApp, grid: egui::Rect) -> bool {
+fn handle_input(ui: &mut egui::Ui, app: &mut MuxApp, grid: egui::Rect, view: &SessionView) -> bool {
     let Some(client) = app.client.as_ref() else {
         return false;
     };
@@ -1504,6 +1513,15 @@ fn handle_input(ui: &mut egui::Ui, app: &mut MuxApp, grid: egui::Rect) -> bool {
                                 ) {
                                     detach = true;
                                 } else {
+                                    if invocation.action == "prompt.previous"
+                                        || invocation.action == "prompt.next"
+                                    {
+                                        jump_prompt(
+                                            &mut app.pane_scroll,
+                                            view,
+                                            invocation.action == "prompt.previous",
+                                        );
+                                    }
                                     client.send(Outbound::Command(CommandRequest {
                                         request_id: app.next_request_id.wrapping_add(1).max(1),
                                         command: Command::InvokeAction {
@@ -1560,6 +1578,15 @@ fn handle_input(ui: &mut egui::Ui, app: &mut MuxApp, grid: egui::Rect) -> bool {
                                 ) {
                                     detach = true;
                                 } else {
+                                    if invocation.action == "prompt.previous"
+                                        || invocation.action == "prompt.next"
+                                    {
+                                        jump_prompt(
+                                            &mut app.pane_scroll,
+                                            view,
+                                            invocation.action == "prompt.previous",
+                                        );
+                                    }
                                     client.send(Outbound::Command(CommandRequest {
                                         request_id: app.next_request_id.wrapping_add(1).max(1),
                                         command: Command::InvokeAction {
@@ -1624,6 +1651,45 @@ fn send_keys(client: &ClientSession, keys: &[KeySpec]) {
 }
 
 /// Returns `true` when the action detached this client locally.
+/// Move the focused pane's local scrollback window to a shell prompt mark.
+///
+/// Marks are absolute screen rows published by the daemon; this never parses
+/// screen text. A target inside the live viewport resolves to offset zero.
+fn jump_prompt(scroll: &mut HashMap<u64, PaneScroll>, view: &SessionView, previous: bool) {
+    let Some(pane_id) = view.focus else {
+        return;
+    };
+    let Some(snapshot) = view.pane(pane_id).and_then(|pane| pane.snapshot.as_ref()) else {
+        return;
+    };
+    let Some(marks) = snapshot.shell_marks.as_ref() else {
+        return;
+    };
+    let rows = &marks.prompt_rows;
+    if rows.is_empty() {
+        return;
+    }
+    let state = scroll.entry(pane_id).or_default();
+    let end = snapshot.total_lines;
+    let anchor = end.saturating_sub(state.offset as u64);
+    let target = if previous {
+        rows.iter()
+            .rev()
+            .find(|row| **row < anchor)
+            .copied()
+            .or_else(|| rows.last().copied())
+    } else {
+        rows.iter()
+            .find(|row| **row > anchor)
+            .copied()
+            .or_else(|| rows.first().copied())
+    };
+    let Some(target) = target else {
+        return;
+    };
+    state.offset = end.saturating_sub(target).min(state.history.len() as u64) as usize;
+}
+
 fn invoke_frontend_action(
     client: &ClientSession,
     _actions: &[ActionInfo],
@@ -1798,8 +1864,8 @@ fn scrollbar_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stitch_mux_core::ActivitySummary;
-    use stitch_mux_protocol::{PaneInfo, PanePlacement};
+    use stitch_mux_core::{ActivitySummary, Cursor, Modes, Row};
+    use stitch_mux_protocol::{PaneInfo, PanePlacement, PaneSnapshot, ShellMarks};
 
     fn info(name: &str) -> SessionInfo {
         SessionInfo {
@@ -1830,6 +1896,67 @@ mod tests {
                 program_status: None,
             }],
         }
+    }
+
+    fn snapshot_with_marks(total_lines: u64, prompts: &[u64]) -> PaneSnapshot {
+        PaneSnapshot {
+            pane_id: 7,
+            seq: 1,
+            cols: 80,
+            rows: 24,
+            cells: vec![Row {
+                cells: Vec::new(),
+                wrapped: false,
+            }],
+            cursor: Cursor::default(),
+            modes: Modes::default(),
+            title: "sh".into(),
+            cwd: None,
+            foreground: None,
+            shell_marks: Some(ShellMarks {
+                prompt_rows: prompts.to_vec(),
+                command_rows: Vec::new(),
+            }),
+            program_status: None,
+            alt_screen: false,
+            scrollback_len: 20,
+            total_lines,
+            scrollback_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn prompt_jumps_use_absolute_marks_and_clamp_to_local_scrollback() {
+        let mut view = SessionView {
+            focus: Some(7),
+            ..SessionView::default()
+        };
+        view.panes.insert(
+            7,
+            stitch_mux_client::PaneView {
+                pane_id: 7,
+                snapshot: Some(snapshot_with_marks(100, &[10, 50, 90])),
+                last_seq: 1,
+                bell: false,
+            },
+        );
+        let mut scroll: HashMap<u64, PaneScroll> = HashMap::new();
+        let state = scroll.entry(7).or_default();
+        for _ in 0..20 {
+            state.history.push_back(Row {
+                cells: Vec::new(),
+                wrapped: false,
+            });
+        }
+
+        jump_prompt(&mut scroll, &view, true);
+        assert_eq!(scroll[&7].offset, 10); // target row 90
+        jump_prompt(&mut scroll, &view, true);
+        assert_eq!(scroll[&7].offset, 20); // target row 50, clamped
+        jump_prompt(&mut scroll, &view, false);
+        assert_eq!(scroll[&7].offset, 10); // next mark is row 90
+        jump_prompt(&mut scroll, &view, false);
+        assert_eq!(scroll[&7].offset, 20); // wrap to row 10, clamped
     }
 
     #[test]

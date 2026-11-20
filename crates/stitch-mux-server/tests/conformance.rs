@@ -81,6 +81,7 @@ fn scene(cols: u16, rows: u16, title: &str, alt_screen: bool) -> (Attached, Layo
         program_status: None,
         alt_screen,
         scrollback_len: 0,
+        total_lines: 0,
         scrollback_bytes: 0,
     };
     (attached, layout, snapshot)

@@ -279,6 +279,8 @@ impl Keymap {
             KeyBinding::new(&["C-b", "z"], "pane.zoom-toggle").expect("zoom"),
             KeyBinding::new(&["C-b", "d"], "client.detach").expect("detach"),
             KeyBinding::new(&["C-b", "?"], "help.which-key").expect("help"),
+            KeyBinding::new(&["C-b", "["], "prompt.previous").expect("previous prompt"),
+            KeyBinding::new(&["C-b", "]"], "prompt.next").expect("next prompt"),
             KeyBinding::new(&["C-b", "r"], "mode.resize").expect("resize mode"),
             KeyBinding::new(&["Esc"], "mode.exit")
                 .expect("escape")

@@ -61,6 +61,7 @@ fn snapshot() -> PaneSnapshot {
         program_status: None,
         alt_screen: false,
         scrollback_len: 4,
+        total_lines: 0,
         scrollback_bytes: 32,
     }
 }
@@ -84,6 +85,7 @@ fn valid_frames() -> Vec<Frame> {
         program_status: None,
         alt_screen: false,
         scrollback_len: 5,
+        total_lines: 0,
         scrollback_bytes: 40,
         bell: false,
     };

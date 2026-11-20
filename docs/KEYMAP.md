@@ -17,6 +17,8 @@ shortcut means, and there is no Lua or plugin hook.
 | `C-b z` | `pane.zoom-toggle` | — |
 | `C-b d` | `client.detach` | handled by the frontend |
 | `C-b ?` | `help.which-key` | handled by the frontend |
+| `C-b [` | `prompt.previous` | local prompt jump via shell marks |
+| `C-b ]` | `prompt.next` | local prompt jump via shell marks |
 | `C-b r` | `mode.resize` | — |
 
 `resize` is an exclusive mode: `Left/Right/Up/Down` map to `pane.resize-*`, and
@@ -60,6 +62,9 @@ Rules:
 - Key names are canonical: `ctrl-b`, `Control-b`, and `C-b` mean the same key;
   `Up`, `Escape`/`Esc`, `F1`–`F12`, and literal single characters are accepted.
 - Hints are bounded (16 entries) and report the binding's source.
+- `prompt.previous`/`prompt.next` and `client.detach`/`help.which-key` are
+  frontend-local: the daemon advertises them in the action catalog but returns
+  typed `Unsupported` if a client tries to invoke them there.
 
 ## Events and reload
 

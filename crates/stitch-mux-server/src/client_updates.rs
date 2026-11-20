@@ -220,6 +220,7 @@ mod tests {
             program_status: None,
             alt_screen: false,
             scrollback_len: 0,
+            total_lines: 0,
             scrollback_bytes: 0,
             bell: false,
         }))
@@ -295,6 +296,7 @@ mod tests {
             program_status: None,
             alt_screen: false,
             scrollback_len: 0,
+            total_lines: 0,
             scrollback_bytes: 0,
         }));
         coalescer.add(Arc::clone(&stale));
@@ -334,6 +336,7 @@ mod tests {
             program_status: None,
             alt_screen: false,
             scrollback_len: 0,
+            total_lines: 0,
             scrollback_bytes: 0,
         }));
         for _ in 0..CLIENT_UPDATE_QUEUE + 3 {

@@ -8,6 +8,7 @@ pub mod ansi;
 pub mod client_updates;
 pub mod pane;
 pub mod session;
+pub mod shell_scan;
 pub mod status_scan;
 
 use std::collections::BTreeMap;
@@ -1271,7 +1272,7 @@ async fn execute_action(
             session.resize(cols, rows);
             Ok(())
         }
-        "client.detach" | "help.which-key" => Err((
+        "client.detach" | "help.which-key" | "prompt.previous" | "prompt.next" => Err((
             ErrorCode::Unsupported,
             "this action is handled by the frontend".into(),
         )),

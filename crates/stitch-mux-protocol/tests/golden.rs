@@ -103,6 +103,7 @@ fn all_fixtures() -> Vec<(MessageKind, String)> {
         program_status: Some(status()),
         alt_screen: false,
         scrollback_len: 9,
+        total_lines: 0,
         scrollback_bytes: 128,
     };
     let render = encode_render(5, 80, 24, true, b"\x1b[2J");
@@ -207,6 +208,7 @@ fn all_fixtures() -> Vec<(MessageKind, String)> {
                     program_status: Some(status()),
                     alt_screen: false,
                     scrollback_len: 10,
+                    total_lines: 0,
                     scrollback_bytes: 160,
                     bell: true,
                 },
@@ -470,11 +472,11 @@ const EXPECTED: [(u8, &str); 27] = [
     ),
     (
         6,
-        "534d01000600820000009f0703010191929196a161a764656661756c74a764656661756c740101b368747470733a2f2f6578616d706c652e636f6dc2950102c3a5626c6f636bc297c2c3c3cd03eec3c301a27368a42f746d70930ba27368c0929102910396a56a6f622d31a7776f726b696e67c0a5636172676fa474657374cf0000018bcfe56800c209cc80",
+        "534d0100060085000000dc00100703010191929196a161a764656661756c74a764656661756c740101b368747470733a2f2f6578616d706c652e636f6dc2950102c3a5626c6f636bc297c2c3c3cd03eec3c301a27368a42f746d70930ba27368c0929102910396a56a6f622d31a7776f726b696e67c0a5636172676fa474657374cf0000018bcfe56800c20900cc80",
     ),
     (
         7,
-        "534d01000700610000009e07049193019196a0a764656661756c74a764656661756c740001c0c3950102c3a5626c6f636bc297c2c3c3cd03eec3c301a27368c0c0c096a56a6f622d31a7776f726b696e67c0a5636172676fa474657374cf0000018bcfe56800c20acca0c3",
+        "534d01000700620000009f07049193019196a0a764656661756c74a764656661756c740001c0c3950102c3a5626c6f636bc297c2c3c3cd03eec3c301a27368c0c0c096a56a6f622d31a7776f726b696e67c0a5636172676fa474657374cf0000018bcfe56800c20a00cca0c3",
     ),
     (8, "534d01000800020000009107"),
     (9, "534d0100090011000000050000000000000050001800011b5b324a"),
@@ -554,6 +556,7 @@ fn older_peers_may_omit_optional_snapshot_fields() {
         program_status: Some(status()),
         alt_screen: false,
         scrollback_len: 9,
+        total_lines: 0,
         scrollback_bytes: 128,
     };
     let mut value = serde_json::to_value(&snapshot).expect("snapshot to json");

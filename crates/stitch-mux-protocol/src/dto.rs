@@ -122,6 +122,10 @@ pub struct PaneSnapshot {
     pub program_status: Option<ProgramStatus>,
     pub alt_screen: bool,
     pub scrollback_len: u64,
+    /// Absolute row count ever written to this pane. Clients use it with
+    /// `ShellMarks` to jump to a prompt without parsing screen text.
+    #[serde(default)]
+    pub total_lines: u64,
     pub scrollback_bytes: u64,
 }
 
@@ -150,6 +154,8 @@ pub struct PaneDelta {
     pub program_status: Option<ProgramStatus>,
     pub alt_screen: bool,
     pub scrollback_len: u64,
+    #[serde(default)]
+    pub total_lines: u64,
     pub scrollback_bytes: u64,
     pub bell: bool,
 }

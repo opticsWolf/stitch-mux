@@ -78,6 +78,7 @@ impl PaneView {
         snapshot.program_status = delta.program_status;
         snapshot.alt_screen = delta.alt_screen;
         snapshot.scrollback_len = delta.scrollback_len;
+        snapshot.total_lines = delta.total_lines;
         snapshot.scrollback_bytes = delta.scrollback_bytes;
         self.last_seq = delta.seq;
         self.bell = delta.bell;
@@ -324,6 +325,7 @@ mod tests {
             program_status: None,
             alt_screen: false,
             scrollback_len: 0,
+            total_lines: 0,
             scrollback_bytes: 0,
         }
     }
@@ -349,6 +351,7 @@ mod tests {
             program_status: None,
             alt_screen: false,
             scrollback_len: 0,
+            total_lines: 0,
             scrollback_bytes: 0,
             bell: false,
         }

@@ -255,6 +255,7 @@ struct PaneSnapshot {
     program_status: Option<ProgramStatus>,
     alt_screen: bool,
     scrollback_len: u64,
+    total_lines: u64,            // absolute rows ever written; optional in v1
     scrollback_bytes: u64,
 }
 
@@ -360,6 +361,7 @@ struct PaneDelta {
     program_status: Option<ProgramStatus>,
     alt_screen: bool,
     scrollback_len: u64,
+    total_lines: u64,            // absolute rows ever written; optional in v1
     scrollback_bytes: u64,
     bell: bool,                  // edge-triggered
 }
@@ -386,7 +388,11 @@ bounds a record to 8 KiB.
 
 `scrollback_bytes` lets a client show memory pressure and lets the daemon enforce
 a bounded scrollback budget. `shell_marks` are absolute scrollback rows; a GUI
-can use them for prompt/command navigation without reparsing the screen.
+can use them for prompt/command navigation without reparsing the screen. Combine
+them with `total_lines` to map an absolute row to a local scroll offset; rows
+evicted from the daemon's scrollback are pruned from the mark lists. The daemon
+derives marks from bounded OSC 133/1337 scans and cwd from the screen's OSC 7 or
+OSC 1337 `CurrentDir=` record.
 
 ### 6.6 `FocusRequest` / `Focus`
 

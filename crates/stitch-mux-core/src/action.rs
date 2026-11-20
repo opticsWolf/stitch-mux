@@ -248,6 +248,12 @@ impl ActionRegistry {
             ActionDefinition::new("mode.exit", "Exit current mode").with_category("mode"),
             ActionDefinition::new("client.detach", "Detach client").with_category("client"),
             ActionDefinition::new("help.which-key", "Show key hints").with_category("help"),
+            ActionDefinition::new("prompt.previous", "Jump to the previous prompt")
+                .with_description("Uses shell-integration marks, never screen-text parsing.")
+                .with_category("navigation"),
+            ActionDefinition::new("prompt.next", "Jump to the next prompt")
+                .with_description("Uses shell-integration marks, never screen-text parsing.")
+                .with_category("navigation"),
         ])
     }
 
@@ -293,6 +299,8 @@ mod tests {
             "pane.zoom-toggle",
             "client.detach",
             "help.which-key",
+            "prompt.previous",
+            "prompt.next",
             "mode.resize",
             "mode.exit",
         ] {

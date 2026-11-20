@@ -537,6 +537,7 @@ mod tests {
             program_status: None,
             alt_screen: false,
             scrollback_len: 0,
+            total_lines: 0,
             scrollback_bytes: 0,
         }
     }
