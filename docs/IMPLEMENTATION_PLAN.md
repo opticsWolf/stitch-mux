@@ -233,8 +233,9 @@ lost connection is recoverable.
 **Estimate:** 5–7 engineer-days.
 
 **Status: Done.** Version `0.1.0` is ready as a candidate; publication needs
-explicit approval. The 30-minute soak is available via `STITCH_MUX_SOAK_MS` and
-remains an operator gate; CI runs the short form on every platform.
+explicit approval. The 30-minute soak completed at `7659f52` via
+`STITCH_MUX_SOAK_MS=1800000`; CI continues to run the short form on every
+platform.
 
 Deliverables:
 
@@ -529,7 +530,8 @@ multi-client size preferences.
 `DetachPane`/`PlacePane`, `ClaimPane`/`ReleasePane` size ownership, placement/
 owner events, capability gating, CLI controls, and GUI background-pane actions
 are in place. Real-PTY tests cover detach/place, detached exit, explicit close,
-and owner failover. The 30-minute soak remains an operator gate.
+and owner failover. The 30-minute soak completed at `7659f52`; publication
+still needs explicit approval.
 
 **Estimate:** 6-9 engineer-days.
 
@@ -769,7 +771,8 @@ bottlenecks, not PTY reads.
 - [x] CHANGELOG and version bumped to `0.1.0`
 - [x] `stitch-pty` dependency pinned to released `0.15.0` from crates.io
 - [ ] Crates.io/PyPI publication explicitly approved (do not publish by default)
-- [ ] 30-minute soak run with `STITCH_MUX_SOAK_MS=1800000` (operator gate)
+- [x] 30-minute soak run with `STITCH_MUX_SOAK_MS=1800000` (operator gate):
+      1686 crash/clean-detach cycles in `1800.6803842s`, exit `0`, at `7659f52`
 
 ## 8. Remaining backlog after v0.3
 

@@ -114,6 +114,13 @@ Not published to crates.io or PyPI. Publication requires explicit approval.
 - Client abort closes both socket halves, so a killed frontend detaches instead
   of leaving a stale registry entry.
 
+### Validation
+
+- The 30-minute operator soak completed at `7659f52` with
+  `STITCH_MUX_SOAK_MS=1800000`: 1686 crash/clean-detach cycles in
+  `1800.6803842s`, exit code `0`. CI continues to run the short form on every
+  platform.
+
 ### Known limitations
 
 - The GUI's wheel history is a bounded local cache; a burst that outpaces the UI
