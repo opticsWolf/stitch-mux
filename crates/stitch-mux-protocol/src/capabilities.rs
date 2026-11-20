@@ -17,6 +17,7 @@ pub mod client {
     pub const EVENTS: u64 = 1 << 14;
     pub const ACTIONS: u64 = 1 << 15;
     pub const DETACHED_PANES: u64 = 1 << 16;
+    pub const MULTI_WINDOW: u64 = 1 << 17;
 }
 
 /// Server capability bits advertised in HelloAck.
@@ -34,6 +35,7 @@ pub mod server {
     pub const EVENTS: u64 = 1 << 10;
     pub const ACTIONS: u64 = 1 << 11;
     pub const DETACHED_PANES: u64 = 1 << 12;
+    pub const MULTI_WINDOW: u64 = 1 << 13;
 }
 
 pub const DEFAULT_CLIENT_CAPABILITIES: u64 = client::STRUCTURED_VIEW
@@ -51,7 +53,8 @@ pub const DEFAULT_CLIENT_CAPABILITIES: u64 = client::STRUCTURED_VIEW
     | client::HYPERLINKS
     | client::EVENTS
     | client::ACTIONS
-    | client::DETACHED_PANES;
+    | client::DETACHED_PANES
+    | client::MULTI_WINDOW;
 
 pub const DEFAULT_SERVER_CAPABILITIES: u64 = server::STRUCTURED_VIEW
     | server::ANSI
@@ -65,7 +68,8 @@ pub const DEFAULT_SERVER_CAPABILITIES: u64 = server::STRUCTURED_VIEW
     | server::HYPERLINKS
     | server::EVENTS
     | server::ACTIONS
-    | server::DETACHED_PANES;
+    | server::DETACHED_PANES
+    | server::MULTI_WINDOW;
 
 #[cfg(test)]
 mod tests {
@@ -76,6 +80,8 @@ mod tests {
         assert_eq!(client::STRUCTURED_VIEW, server::STRUCTURED_VIEW);
         assert_eq!(client::EVENTS, 1 << 14);
         assert_eq!(client::DETACHED_PANES, 1 << 16);
+        assert_eq!(client::MULTI_WINDOW, 1 << 17);
         assert_eq!(server::DETACHED_PANES, 1 << 12);
+        assert_eq!(server::MULTI_WINDOW, 1 << 13);
     }
 }

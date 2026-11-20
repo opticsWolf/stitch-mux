@@ -454,6 +454,8 @@ fn run_session(
                     request_id: 0,
                     command: Command::SetLayout {
                         base_revision,
+                        window_id: None,
+                        floating: None,
                         root,
                     },
                 }));

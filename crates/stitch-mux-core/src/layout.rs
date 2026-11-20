@@ -148,6 +148,11 @@ pub enum LayoutError {
         available: u16,
         minimum: u16,
     },
+    InvalidBounds,
+    TooManyWindows,
+    TooManyLayers,
+    WindowNotFound(u64),
+    LayerNotFound(u64),
 }
 
 impl fmt::Display for LayoutError {
@@ -164,6 +169,11 @@ impl fmt::Display for LayoutError {
                 f,
                 "{axis:?} split needs {minimum} cells per pane, only {available} available"
             ),
+            Self::InvalidBounds => write!(f, "floating bounds must stay inside the viewport"),
+            Self::TooManyWindows => write!(f, "workspace window limit exceeded"),
+            Self::TooManyLayers => write!(f, "window floating-layer limit exceeded"),
+            Self::WindowNotFound(id) => write!(f, "window {id} not found"),
+            Self::LayerNotFound(id) => write!(f, "floating layer {id} not found"),
         }
     }
 }

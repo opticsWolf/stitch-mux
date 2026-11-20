@@ -16,7 +16,7 @@ pub use capabilities::{
     DEFAULT_CLIENT_CAPABILITIES, DEFAULT_SERVER_CAPABILITIES, client as client_caps,
     server as server_caps,
 };
-pub use command::{ClaimMode, Command, CommandRequest, CommandResponse, RunPlacement};
+pub use command::{ClaimMode, Command, CommandRequest, CommandResponse, RunPlacement, WindowFocus};
 pub use connection::{Connection, FrameReader, FrameWriter};
 pub use dto::*;
 pub use endpoint::{Endpoint, EndpointError, Listener, Stream};

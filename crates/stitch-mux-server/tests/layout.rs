@@ -246,6 +246,8 @@ async fn split_focus_zoom_close_and_revision_guard() {
         &endpoint,
         Command::SetLayout {
             base_revision: current.revision.saturating_sub(1),
+            window_id: None,
+            floating: None,
             root: current.root.clone(),
         },
     )
@@ -367,6 +369,8 @@ async fn impossible_layouts_are_rejected() {
         &endpoint,
         Command::SetLayout {
             base_revision: 1,
+            window_id: None,
+            floating: None,
             root: LayoutNode::split(
                 SplitAxis::Columns,
                 5000,

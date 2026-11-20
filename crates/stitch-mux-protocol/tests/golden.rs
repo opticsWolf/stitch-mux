@@ -177,6 +177,8 @@ fn all_fixtures() -> Vec<(MessageKind, String)> {
                     focus: Some(7),
                     root: LayoutNode::leaf(stitch_mux_core::PaneId::new(7)),
                     zoomed_pane: None,
+                    windows: Vec::new(),
+                    active_window_id: None,
                     panes: vec![PaneGeometry {
                         pane_id: 7,
                         outer: Rect::new(0, 0, 80, 23),
@@ -269,6 +271,8 @@ fn all_fixtures() -> Vec<(MessageKind, String)> {
                 MessageKind::SetLayout,
                 &stitch_mux_protocol::SetLayout {
                     base_revision: 4,
+                    window_id: None,
+                    floating: None,
                     root: LayoutNode::leaf(stitch_mux_core::PaneId::new(7)),
                 },
             ),
@@ -418,6 +422,8 @@ fn all_fixtures() -> Vec<(MessageKind, String)> {
                         focus: Some(7),
                         root: LayoutNode::leaf(stitch_mux_core::PaneId::new(7)),
                         zoomed_pane: None,
+                        windows: Vec::new(),
+                        active_window_id: None,
                         panes: vec![PaneGeometry {
                             pane_id: 7,
                             outer: Rect::new(0, 0, 80, 23),
@@ -474,7 +480,7 @@ const EXPECTED: [(u8, &str); 27] = [
     ),
     (
         5,
-        "534d01000500210000009a0104501801020781a46c656166910791940794000050179401014e15a27368c0",
+        "534d01000500230000009c0104501801020781a46c656166910791940794000050179401014e15a27368c090c0",
     ),
     (
         6,
@@ -493,7 +499,7 @@ const EXPECTED: [(u8, &str); 27] = [
     (11, "534d01000b000900000094641ecd0320cd0258"),
     (12, "534d01000c000300000092641e"),
     (13, "534d01000d00020000009107"),
-    (14, "534d01000e000a000000920481a46c6561669107"),
+    (14, "534d01000e000c000000940481a46c6561669107c0c0"),
     (15, "534d01000f000600000091a475736572"),
     (16, "534d01001000110000009307a9636c6970626f617264a4636f7079"),
     (17, "534d010011000a000000930107a6657869746564"),
@@ -512,7 +518,7 @@ const EXPECTED: [(u8, &str); 27] = [
     (24, "534d0100180011000000920191ad6c6973745f73657373696f6e73"),
     (
         25,
-        "534d010019009e0000009c01c3c0919c01a464656d6f5018010001010102950000000000919a07a27368c05018c3a574696c656401c0c0919803b37374697463682d6d75782d6775692d65677569aa73747275637475726564015018070490c09a0105501801020781a46c656166910791940794000050179401014e15a27368c0c09381a470616e65910700c29195aa70616e652e73706c6974a553706c6974c0a470616e65c0c0",
+        "534d01001900a00000009c01c3c0919c01a464656d6f5018010001010102950000000000919a07a27368c05018c3a574696c656401c0c0919803b37374697463682d6d75782d6775692d65677569aa73747275637475726564015018070490c09c0105501801020781a46c656166910791940794000050179401014e15a27368c090c0c09381a470616e65910700c29195aa70616e652e73706c6974a553706c6974c0a470616e65c0c0",
     ),
     (26, "534d01001a000800000093a464656d6fc228"),
     (

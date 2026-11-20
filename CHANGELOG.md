@@ -8,6 +8,11 @@ Python package version in `pyproject.toml`.
 
 ### Added
 
+- **M12 workspace core:** daemon-owned ordered windows with independent tiled
+  trees, bounded fixed-point floating layers with z-order/minimize, window-aware
+  `Run`/`SetLayout`, typed window/layer commands and events, and an active-window
+  projection for terminal clients. Real-PTY tests cover two windows, floating
+  close/tile, z-order changes, and atomic rejection of invalid bounds.
 - **M11 workspace controls:** CLI `detach-pane`/`place-pane`/`claim-pane`/
   `release-pane`, a GUI background-pane window with detach/place/close actions,
   explicit close for detached panes, and a recycled-pane runtime test that

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use stitch_mux_core::action::{ActionError, ActionRegistry};
 use stitch_mux_core::keymap::{ActionInvocation, Keymap as CoreKeymap, KeymapError};
-use stitch_mux_core::{Direction, Size, SplitAxis, layout_leaves};
+use stitch_mux_core::{Direction, LayoutError, Size, SplitAxis, layout_leaves};
 use stitch_mux_protocol::{
     ActionInfo, Attach, CaptureRequest, ClaimMode, ClientInfo, Command, CommandRequest,
     CommandResponse, Connection, DEFAULT_SERVER_CAPABILITIES, Endpoint, EndpointError, ErrorCode,
@@ -1059,7 +1059,12 @@ async fn handle_frame(
                 return Ok(false);
             };
             match session
-                .set_layout(request.root, request.base_revision)
+                .set_layout(
+                    request.root,
+                    request.base_revision,
+                    request.window_id,
+                    request.floating,
+                )
                 .await
             {
                 Ok(layout) => {
@@ -1326,6 +1331,9 @@ fn session_error_code(error: &SessionError) -> ErrorCode {
     match error {
         SessionError::PaneNotFound(_) | SessionError::NotFound(_) => ErrorCode::NotFound,
         SessionError::StaleLayout { .. } => ErrorCode::Busy,
+        SessionError::LayoutMismatch | SessionError::Layout(LayoutError::InvalidBounds) => {
+            ErrorCode::InvalidArgs
+        }
         SessionError::AlreadyExists(_) | SessionError::NotOwner { .. } => ErrorCode::Busy,
         SessionError::PaneNotTiled(_) => ErrorCode::InvalidArgs,
         _ => ErrorCode::Internal,
@@ -1525,17 +1533,20 @@ async fn handle_command(
                 response.sessions = state.infos().await;
                 return response;
             }
-            if window_id.is_some() {
+            if window_id.is_some() && client_caps & capabilities::client::MULTI_WINDOW == 0 {
                 set_error(
                     &mut response,
                     ErrorCode::Unsupported,
-                    "floating windows arrive in M12",
+                    "client lacks MULTI_WINDOW",
                 );
-            } else {
+                response.sessions = state.infos().await;
+                return response;
+            }
+            {
                 let session = state.registry.lock().await.find_by_pane(pane_id);
                 match session {
                     Some(session) => match session
-                        .place_pane(pane_id, anchor_pane_id, axis, ratio_bps)
+                        .place_pane(pane_id, window_id, anchor_pane_id, axis, ratio_bps)
                         .await
                     {
                         Ok(_) => {
@@ -1613,6 +1624,248 @@ async fn handle_command(
             }
             response.sessions = state.infos().await;
         }
+        Command::CreateWindow { session, name } => {
+            if client_caps & capabilities::client::MULTI_WINDOW == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "client lacks MULTI_WINDOW",
+                );
+                response.sessions = state.infos().await;
+                return response;
+            }
+            let session = state.registry.lock().await.get(&session);
+            match session {
+                Some(session) => match session.create_window(name.clone()).await {
+                    Ok(window_id) => {
+                        state.publish_event(
+                            Some(session.id),
+                            "window_created",
+                            serde_json::json!({ "window_id": window_id }),
+                        );
+                        response.layout = Some(response_layout(state, &session, *focus));
+                    }
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "session not found"),
+            }
+            response.sessions = state.infos().await;
+        }
+        Command::CloseWindow { window_id } => {
+            if client_caps & capabilities::client::MULTI_WINDOW == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "client lacks MULTI_WINDOW",
+                );
+                response.sessions = state.infos().await;
+                return response;
+            }
+            let session = state.registry.lock().await.find_by_window(window_id);
+            match session {
+                Some(session) => match session.close_window(window_id).await {
+                    Ok(()) => {
+                        state.publish_event(
+                            Some(session.id),
+                            "window_closed",
+                            serde_json::json!({ "window_id": window_id }),
+                        );
+                        response.layout = Some(response_layout(state, &session, *focus));
+                    }
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "window not found"),
+            }
+            response.sessions = state.infos().await;
+        }
+        Command::RenameWindow { window_id, name } => {
+            if client_caps & capabilities::client::MULTI_WINDOW == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "client lacks MULTI_WINDOW",
+                );
+                response.sessions = state.infos().await;
+                return response;
+            }
+            let session = state.registry.lock().await.find_by_window(window_id);
+            match session {
+                Some(session) => match session.rename_window(window_id, &name) {
+                    Ok(()) => {
+                        state.publish_event(
+                            Some(session.id),
+                            "window_renamed",
+                            serde_json::json!({ "window_id": window_id, "name": name }),
+                        );
+                        response.layout = Some(response_layout(state, &session, *focus));
+                    }
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "window not found"),
+            }
+            response.sessions = state.infos().await;
+        }
+        Command::MoveWindow { window_id, index } => {
+            if client_caps & capabilities::client::MULTI_WINDOW == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "client lacks MULTI_WINDOW",
+                );
+                response.sessions = state.infos().await;
+                return response;
+            }
+            let session = state.registry.lock().await.find_by_window(window_id);
+            match session {
+                Some(session) => match session.move_window(window_id, index) {
+                    Ok(()) => {
+                        state.publish_event(
+                            Some(session.id),
+                            "window_moved",
+                            serde_json::json!({ "window_id": window_id, "index": index }),
+                        );
+                        response.layout = Some(response_layout(state, &session, *focus));
+                    }
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "window not found"),
+            }
+            response.sessions = state.infos().await;
+        }
+        Command::FocusWindow { target } => {
+            if client_caps & capabilities::client::MULTI_WINDOW == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "client lacks MULTI_WINDOW",
+                );
+                response.sessions = state.infos().await;
+                return response;
+            }
+            let session_id = state
+                .clients
+                .lock()
+                .expect("client registry")
+                .get(&client_id)
+                .and_then(|client| client.session_id);
+            let session = match session_id {
+                Some(id) => state.registry.lock().await.get_by_id(id),
+                None => state.registry.lock().await.first(),
+            };
+            match session {
+                Some(session) => match session.focus_window(target) {
+                    Ok(window_id) => {
+                        state.publish_event(
+                            Some(session.id),
+                            "window_focused",
+                            serde_json::json!({ "window_id": window_id }),
+                        );
+                        response.layout = Some(response_layout(state, &session, *focus));
+                    }
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "no active session"),
+            }
+            response.sessions = state.infos().await;
+        }
+        Command::FloatPane { pane_id, bounds } => {
+            if client_caps & capabilities::client::MULTI_WINDOW == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "client lacks MULTI_WINDOW",
+                );
+                response.sessions = state.infos().await;
+                return response;
+            }
+            let session = state.registry.lock().await.find_by_pane(pane_id);
+            match session {
+                Some(session) => match session.float_pane(pane_id, bounds).await {
+                    Ok(_) => {
+                        state.publish_event(
+                            Some(session.id),
+                            "pane_floated",
+                            serde_json::json!({ "pane_id": pane_id }),
+                        );
+                        response.layout = Some(response_layout(state, &session, *focus));
+                    }
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
+            }
+            response.sessions = state.infos().await;
+        }
+        Command::TilePane {
+            pane_id,
+            window_id,
+            anchor_pane_id,
+            axis,
+            ratio_bps,
+        } => {
+            if client_caps & capabilities::client::MULTI_WINDOW == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "client lacks MULTI_WINDOW",
+                );
+                response.sessions = state.infos().await;
+                return response;
+            }
+            let session = state.registry.lock().await.find_by_pane(pane_id);
+            match session {
+                Some(session) => match session
+                    .tile_pane(pane_id, Some(window_id), anchor_pane_id, axis, ratio_bps)
+                    .await
+                {
+                    Ok(_) => {
+                        state.publish_event(
+                            Some(session.id),
+                            "pane_tiled",
+                            serde_json::json!({ "pane_id": pane_id, "window_id": window_id }),
+                        );
+                        response.layout = Some(response_layout(state, &session, *focus));
+                    }
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
+            }
+            response.sessions = state.infos().await;
+        }
+        Command::SetFloatingPane {
+            layer_id,
+            bounds,
+            z,
+            minimized,
+        } => {
+            if client_caps & capabilities::client::MULTI_WINDOW == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "client lacks MULTI_WINDOW",
+                );
+                response.sessions = state.infos().await;
+                return response;
+            }
+            let session = state.registry.lock().await.find_by_layer(layer_id);
+            match session {
+                Some(session) => match session
+                    .set_floating_pane(layer_id, bounds, z, minimized)
+                    .await
+                {
+                    Ok(_) => {
+                        state.publish_event(
+                            Some(session.id),
+                            "floating_changed",
+                            serde_json::json!({ "layer_id": layer_id }),
+                        );
+                        response.layout = Some(response_layout(state, &session, *focus));
+                    }
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "layer not found"),
+            }
+            response.sessions = state.infos().await;
+        }
         Command::ZoomPane { session, pane_id } => {
             let target = state.registry.lock().await.get(&session);
             match target {
@@ -1655,6 +1908,8 @@ async fn handle_command(
         Command::SetLayout {
             base_revision,
             root,
+            window_id,
+            floating,
         } => {
             let session = state.registry.lock().await.find_by_pane(
                 layout_leaves(&root)
@@ -1664,18 +1919,25 @@ async fn handle_command(
                     .unwrap_or(0),
             );
             match session {
-                Some(session) => match session.set_layout(root, base_revision).await {
-                    Ok(_) => response.layout = Some(response_layout(state, &session, *focus)),
-                    Err(SessionError::StaleLayout { expected, current }) => {
-                        set_error(
-                            &mut response,
-                            ErrorCode::Busy,
-                            format!("layout revision {expected} is stale; current is {current}"),
-                        );
-                        response.layout = Some(response_layout(state, &session, *focus));
+                Some(session) => {
+                    match session
+                        .set_layout(root, base_revision, window_id, floating)
+                        .await
+                    {
+                        Ok(_) => response.layout = Some(response_layout(state, &session, *focus)),
+                        Err(SessionError::StaleLayout { expected, current }) => {
+                            set_error(
+                                &mut response,
+                                ErrorCode::Busy,
+                                format!(
+                                    "layout revision {expected} is stale; current is {current}"
+                                ),
+                            );
+                            response.layout = Some(response_layout(state, &session, *focus));
+                        }
+                        Err(err) => set_error(&mut response, session_error_code(&err), err),
                     }
-                    Err(err) => set_error(&mut response, session_error_code(&err), err),
-                },
+                }
                 None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
             }
         }
@@ -1690,45 +1952,124 @@ async fn handle_command(
             wait,
             keep_open,
         } => {
-            let RunPlacement::Split {
-                pane_id,
-                axis,
-                ratio_bps,
-            } = placement
-            else {
+            if !matches!(placement, RunPlacement::Split { .. })
+                && client_caps & capabilities::client::MULTI_WINDOW == 0
+            {
                 set_error(
                     &mut response,
                     ErrorCode::Unsupported,
-                    "new-window placement arrives with multi-window support",
+                    "client lacks MULTI_WINDOW",
                 );
+                response.sessions = state.infos().await;
                 return response;
-            };
-            let session = state
-                .registry
-                .lock()
-                .await
-                .find_by_pane(pane_id)
-                .filter(|session| session.name() == session_name);
-            let Some(session) = session else {
-                set_error(
-                    &mut response,
-                    ErrorCode::NotFound,
-                    "session or pane not found",
-                );
-                return response;
-            };
+            }
             let spec = PaneSpec::new(&program, &args, cwd.as_deref(), env.as_deref());
-            match session.run(pane_id, spec, axis, ratio_bps).await {
-                Ok((new_pane_id, _layout)) => {
+            let spawned = match placement {
+                RunPlacement::Split {
+                    pane_id,
+                    axis,
+                    ratio_bps,
+                } => {
+                    let session = state
+                        .registry
+                        .lock()
+                        .await
+                        .find_by_pane(pane_id)
+                        .filter(|session| session.name() == session_name);
+                    match session {
+                        Some(session) => session
+                            .run(pane_id, spec, axis, ratio_bps)
+                            .await
+                            .map(|(pane_id, layout)| (session, pane_id, 1, layout)),
+                        None => {
+                            set_error(
+                                &mut response,
+                                ErrorCode::NotFound,
+                                "session or pane not found",
+                            );
+                            response.sessions = state.infos().await;
+                            return response;
+                        }
+                    }
+                }
+                RunPlacement::NewWindow => {
+                    let session = state.registry.lock().await.get(&session_name);
+                    let Some(session) = session else {
+                        set_error(&mut response, ErrorCode::NotFound, "session not found");
+                        response.sessions = state.infos().await;
+                        return response;
+                    };
+                    let window_id = match session.create_window(None).await {
+                        Ok(id) => id,
+                        Err(err) => {
+                            set_error(&mut response, session_error_code(&err), err);
+                            response.sessions = state.infos().await;
+                            return response;
+                        }
+                    };
+                    session
+                        .run_in_window(window_id, None, Some(spec), SplitAxis::Columns, 5000)
+                        .await
+                        .map(|(pane_id, layout)| (session, pane_id, window_id, layout))
+                }
+                RunPlacement::Window { window_id } => {
+                    let session = state
+                        .registry
+                        .lock()
+                        .await
+                        .find_by_window(window_id)
+                        .filter(|session| session.name() == session_name);
+                    match session {
+                        Some(session) => session
+                            .run_in_window(window_id, None, Some(spec), SplitAxis::Columns, 5000)
+                            .await
+                            .map(|(pane_id, layout)| (session, pane_id, window_id, layout)),
+                        None => {
+                            set_error(
+                                &mut response,
+                                ErrorCode::NotFound,
+                                "session or window not found",
+                            );
+                            response.sessions = state.infos().await;
+                            return response;
+                        }
+                    }
+                }
+                RunPlacement::Floating { window_id, bounds } => {
+                    let session = state
+                        .registry
+                        .lock()
+                        .await
+                        .find_by_window(window_id)
+                        .filter(|session| session.name() == session_name);
+                    match session {
+                        Some(session) => session
+                            .run_floating(window_id, spec, bounds)
+                            .await
+                            .map(|(pane_id, _, layout)| (session, pane_id, window_id, layout)),
+                        None => {
+                            set_error(
+                                &mut response,
+                                ErrorCode::NotFound,
+                                "session or window not found",
+                            );
+                            response.sessions = state.infos().await;
+                            return response;
+                        }
+                    }
+                }
+            };
+            match spawned {
+                Ok((session, new_pane_id, window_id, _layout)) => {
                     state.watch_session(Arc::clone(&session));
                     state.publish_event(
                         Some(session.id),
                         "pane_created",
-                        serde_json::json!({ "pane_id": new_pane_id, "program": program }),
+                        serde_json::json!({ "pane_id": new_pane_id, "window_id": window_id, "program": program }),
                     );
                     let mut result = RunResult {
                         pane_id: new_pane_id,
-                        window_id: 0,
+                        window_id,
                         exit_code: None,
                         timed_out: false,
                     };
@@ -1751,6 +2092,7 @@ async fn handle_command(
                 }
                 Err(err) => set_error(&mut response, session_error_code(&err), err),
             }
+            response.sessions = state.infos().await;
         }
         Command::Wait { target, timeout_ms } => {
             let deadline = timeout_ms

@@ -12,6 +12,7 @@ pub mod ids;
 pub mod keymap;
 pub mod layout;
 pub mod status;
+pub mod workspace;
 
 pub use action::ActionId;
 pub use capture::CaptureFormat;
@@ -25,3 +26,7 @@ pub use layout::{
     place_leaf, remove_leaf, resolve as resolve_layout, split_leaf, validate as validate_layout,
 };
 pub use status::{ActivitySummary, ProgramState, ProgramStatus, ProgramStatusKind};
+pub use workspace::{
+    FLOAT_BPS, FloatBounds, FloatingPane, MAX_LAYERS_PER_WINDOW, MAX_WINDOWS, MIN_FLOAT_DIM_BPS,
+    Window, Workspace,
+};

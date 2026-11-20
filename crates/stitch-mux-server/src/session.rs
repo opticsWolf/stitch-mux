@@ -9,11 +9,14 @@ use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use stitch_mux_core::{
-    ActivitySummary, Direction, LayoutError, LayoutNode, PaneId, Rect, Size, SplitAxis, close_leaf,
-    first_leaf, layout_contains, layout_leaves, place_leaf, remove_leaf, resolve_layout,
-    split_leaf, validate_layout,
+    ActivitySummary, Direction, FloatBounds, FloatingPane, LayoutError, LayoutNode, PaneId, Rect,
+    Size, SplitAxis, Window, Workspace, close_leaf, first_leaf, layout_contains, layout_leaves,
+    place_leaf, remove_leaf, resolve_layout, validate_layout,
 };
-use stitch_mux_protocol::{Attached, Layout, PaneGeometry, PaneInfo, PanePlacement, SessionInfo};
+use stitch_mux_protocol::{
+    Attached, FloatingPaneInfo, Layout, PaneGeometry, PaneInfo, PanePlacement, SessionInfo,
+    WindowFocus, WindowInfo,
+};
 use thiserror::Error;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::broadcast;
@@ -43,8 +46,12 @@ pub enum SessionError {
     NotFound(String),
     #[error("pane {0} not found")]
     PaneNotFound(u64),
-    #[error("at least one pane must remain")]
-    LastPane,
+    #[error("cannot close the last window")]
+    LastWindow,
+    #[error("window {0} not found")]
+    WindowNotFound(u64),
+    #[error("floating layer {0} not found")]
+    LayerNotFound(u64),
     #[error("layout does not match the session panes")]
     LayoutMismatch,
     #[error("pane {0} is not tiled")]
@@ -61,7 +68,7 @@ pub struct Session {
     cols: AtomicU16,
     rows: AtomicU16,
     pub created_at_unix_ms: u64,
-    layout: StdMutex<LayoutState>,
+    workspace: StdMutex<WorkspaceState>,
     panes: StdMutex<BTreeMap<u64, Arc<PaneRuntime>>>,
     /// Pane placement is independent of the tiled tree: detached panes keep
     /// running but are not leaves in any window.
@@ -77,28 +84,19 @@ pub struct Session {
 }
 
 #[derive(Clone, Debug)]
-struct LayoutState {
-    root: LayoutNode,
-    zoom: Option<u64>,
+struct WorkspaceState {
+    workspace: Workspace,
     revision: u64,
 }
 
-impl LayoutState {
-    /// Zoom shows one pane without changing the tree. A stale zoom target
-    /// (already closed) falls back to the full layout.
-    fn effective(&self) -> LayoutNode {
-        match self.zoom {
-            Some(pane_id) if layout_contains(&self.root, PaneId::new(pane_id)) => {
-                LayoutNode::leaf(PaneId::new(pane_id))
-            }
-            _ => self.root.clone(),
-        }
-    }
-
+impl WorkspaceState {
     fn bump(&mut self) {
         self.revision = self.revision.saturating_add(1).max(1);
     }
 }
+
+static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(2);
+static NEXT_LAYER_ID: AtomicU64 = AtomicU64::new(1);
 
 impl Session {
     pub fn attached(&self, clients: u32, view_mode: stitch_mux_protocol::ViewMode) -> Attached {
@@ -122,7 +120,7 @@ impl Session {
     }
 
     pub fn revision(&self) -> u64 {
-        self.layout.lock().expect("layout").revision
+        self.workspace.lock().expect("workspace").revision
     }
 
     pub fn name(&self) -> String {
@@ -140,18 +138,53 @@ impl Session {
         )
     }
 
+    fn state(&self) -> WorkspaceState {
+        self.workspace.lock().expect("workspace").clone()
+    }
+
+    /// Mutate the workspace atomically. On any validation error the previous
+    /// workspace is restored, so a rejected window/layer operation cannot
+    /// leave half-applied geometry behind.
+    fn apply_workspace<F>(&self, mutate: F) -> Result<(), SessionError>
+    where
+        F: FnOnce(&mut WorkspaceState) -> Result<(), SessionError>,
+    {
+        let mut guard = self.workspace.lock().expect("workspace");
+        let previous = guard.clone();
+        if let Err(err) = mutate(&mut guard) {
+            *guard = previous;
+            return Err(err);
+        }
+        if let Err(err) = guard.workspace.validate() {
+            *guard = previous;
+            return Err(err.into());
+        }
+        guard.bump();
+        Ok(())
+    }
+
     pub fn root(&self) -> LayoutNode {
-        self.layout.lock().expect("layout").root.clone()
+        self.state().workspace.active().root.clone()
+    }
+
+    pub fn has_window(&self, window_id: u64) -> bool {
+        self.state().workspace.windows.contains_key(&window_id)
+    }
+
+    pub fn has_layer(&self, layer_id: u64) -> bool {
+        self.state()
+            .workspace
+            .windows
+            .values()
+            .any(|window| window.floating.contains_key(&layer_id))
+    }
+
+    pub fn active_window_id(&self) -> u64 {
+        self.state().workspace.active_window
     }
 
     fn effective_root(&self) -> LayoutNode {
-        self.layout.lock().expect("layout").effective()
-    }
-
-    /// Resolve the authoritative tree. A viewport too small for a split degrades
-    /// to the first pane instead of producing zero-size PTYs or a panic.
-    fn resolved(&self) -> Vec<stitch_mux_core::ResolvedPane> {
-        self.resolve_root(&self.effective_root(), self.size())
+        self.state().workspace.active().effective_root()
     }
 
     fn resolve_root(&self, root: &LayoutNode, size: Size) -> Vec<stitch_mux_core::ResolvedPane> {
@@ -171,38 +204,73 @@ impl Session {
         }
     }
 
-    pub fn layout(&self, focus: Option<u64>) -> Layout {
-        let (root, revision, size, zoomed_pane) = {
-            let state = self.layout.lock().expect("layout");
-            (
-                state.effective(),
-                state.revision,
-                Size::new(
-                    self.cols.load(Ordering::Relaxed),
-                    self.rows.load(Ordering::Relaxed),
-                ),
-                state
-                    .zoom
-                    .filter(|pane_id| layout_contains(&state.root, PaneId::new(*pane_id))),
-            )
-        };
+    fn window_geometry(&self, window: &Window) -> Vec<PaneGeometry> {
+        let size = self.size();
         let panes = self.panes.lock().expect("panes");
-        let geometry = self
-            .resolve_root(&root, size)
+        let mut geometry: Vec<PaneGeometry> = self
+            .resolve_root(&window.effective_root(), size)
             .into_iter()
-            .map(|resolved| {
-                let title = panes
+            .map(|resolved| PaneGeometry {
+                pane_id: resolved.pane_id,
+                outer: resolved.outer,
+                content: resolved.content,
+                title: panes
                     .get(&resolved.pane_id)
                     .map(|pane| pane.title())
-                    .unwrap_or_default();
-                PaneGeometry {
-                    pane_id: resolved.pane_id,
-                    outer: resolved.outer,
-                    content: resolved.content,
-                    title,
-                }
+                    .unwrap_or_default(),
             })
             .collect();
+        for layer in window.floating.values().filter(|layer| !layer.minimized) {
+            let rect = layer.bounds.to_rect(size);
+            geometry.push(PaneGeometry {
+                pane_id: layer.pane_id,
+                outer: rect,
+                content: rect,
+                title: panes
+                    .get(&layer.pane_id)
+                    .map(|pane| pane.title())
+                    .unwrap_or_default(),
+            });
+        }
+        geometry
+    }
+
+    /// The active-window projection is always present for terminal clients;
+    /// `windows` carries the full workspace for GUI clients.
+    pub fn layout(&self, focus: Option<u64>) -> Layout {
+        let state = self.state();
+        let revision = state.revision;
+        let size = self.size();
+        let windows: Vec<WindowInfo> = state
+            .workspace
+            .windows
+            .values()
+            .map(|window| WindowInfo {
+                id: window.id,
+                name: window.name.clone(),
+                root: window.effective_root(),
+                zoomed_pane: window
+                    .zoom
+                    .filter(|pane_id| layout_contains(&window.root, PaneId::new(*pane_id))),
+                floating: window
+                    .floating
+                    .values()
+                    .map(|layer| FloatingPaneInfo {
+                        layer_id: layer.layer_id,
+                        pane_id: layer.pane_id,
+                        bounds: layer.bounds,
+                        z: layer.z,
+                        minimized: layer.minimized,
+                    })
+                    .collect(),
+                panes: self.window_geometry(window),
+            })
+            .collect();
+        let active = windows
+            .iter()
+            .find(|window| window.id == state.workspace.active_window)
+            .expect("active window is projected")
+            .clone();
         Layout {
             session_id: self.id,
             revision,
@@ -211,9 +279,11 @@ impl Session {
             status_rows: 0,
             attached_clients: 0,
             focus,
-            root,
-            panes: geometry,
-            zoomed_pane,
+            root: active.root,
+            panes: active.panes,
+            zoomed_pane: active.zoomed_pane,
+            windows,
+            active_window_id: Some(active.id),
         }
     }
 
@@ -245,34 +315,51 @@ impl Session {
             .collect()
     }
 
-    /// Panes present in the currently effective layout. Zoom hides the others.
+    /// Panes present in the active window, including visible floating layers.
     pub fn visible_pane_ids(&self) -> Vec<u64> {
-        layout_leaves(&self.effective_root())
+        let state = self.state();
+        let window = state.workspace.active();
+        let mut ids: Vec<u64> = layout_leaves(&window.effective_root())
             .into_iter()
             .map(PaneId::get)
-            .collect()
+            .collect();
+        ids.extend(
+            window
+                .floating
+                .values()
+                .filter(|layer| !layer.minimized)
+                .map(|layer| layer.pane_id),
+        );
+        ids
     }
 
     fn resize_panes(&self) {
-        let geometry = self.resolved();
+        let state = self.state();
+        let size = self.size();
         let panes = self.panes.lock().expect("panes");
-        for resolved in geometry {
-            if let Some(pane) = panes.get(&resolved.pane_id) {
-                pane.resize(resolved.content.cols, resolved.content.rows);
+        for window in state.workspace.windows.values() {
+            for resolved in self.resolve_root(&window.effective_root(), size) {
+                if let Some(pane) = panes.get(&resolved.pane_id) {
+                    pane.resize(resolved.content.cols, resolved.content.rows);
+                }
+            }
+            for layer in window.floating.values() {
+                let rect = layer.bounds.to_rect(size);
+                if let Some(pane) = panes.get(&layer.pane_id) {
+                    pane.resize(rect.cols.max(1), rect.rows.max(1));
+                }
             }
         }
     }
 
-    /// Resize only when the canonical size actually changed.
-    ///
-    /// Attach/detach recomputation runs often; a no-op must not burn a layout
-    /// revision or resize every PTY.
+    /// Resize only when the canonical size actually changed. Floating bounds
+    /// are fractions, so this one pass updates every window and layer.
     pub fn resize(&self, cols: u16, rows: u16) {
         if cols == 0 || rows == 0 {
             return;
         }
         {
-            let mut state = self.layout.lock().expect("layout");
+            let mut guard = self.workspace.lock().expect("workspace");
             if cols == self.cols.load(Ordering::Relaxed)
                 && rows == self.rows.load(Ordering::Relaxed)
             {
@@ -280,7 +367,7 @@ impl Session {
             }
             self.cols.store(cols, Ordering::Relaxed);
             self.rows.store(rows, Ordering::Relaxed);
-            state.bump();
+            guard.bump();
         }
         self.resize_panes();
         self.publish_layout();
@@ -289,6 +376,10 @@ impl Session {
     pub fn focus_direction(&self, pane_id: u64, direction: Direction) -> Option<u64> {
         stitch_mux_core::focus_direction(&self.resolved(), PaneId::new(pane_id), direction)
             .map(PaneId::get)
+    }
+
+    fn resolved(&self) -> Vec<stitch_mux_core::ResolvedPane> {
+        self.resolve_root(&self.effective_root(), self.size())
     }
 
     pub fn placement(&self, pane_id: u64) -> PanePlacement {
@@ -346,42 +437,181 @@ impl Session {
         }
     }
 
-    /// Remove a pane from the window tree without killing its child. The last
-    /// pane can be detached: the window becomes explicitly empty.
+    pub async fn create_window(&self, name: Option<String>) -> Result<u64, SessionError> {
+        let window_id = NEXT_WINDOW_ID.fetch_add(1, Ordering::SeqCst);
+        let name = name.unwrap_or_else(|| format!("window {window_id}"));
+        self.apply_workspace(|state| {
+            state.workspace.windows.insert(
+                window_id,
+                Window::new(window_id, name.clone(), LayoutNode::empty()),
+            );
+            state.workspace.order.push(window_id);
+            Ok(())
+        })?;
+        self.resize_panes();
+        self.publish_layout();
+        Ok(window_id)
+    }
+
+    pub async fn close_window(&self, window_id: u64) -> Result<(), SessionError> {
+        let panes: Vec<Arc<PaneRuntime>> = {
+            let state = self.state();
+            if state.workspace.windows.len() == 1 {
+                return Err(SessionError::LastWindow);
+            }
+            let Some(window) = state.workspace.windows.get(&window_id) else {
+                return Err(SessionError::WindowNotFound(window_id));
+            };
+            let mut ids: Vec<u64> = layout_leaves(&window.root)
+                .into_iter()
+                .map(PaneId::get)
+                .collect();
+            ids.extend(window.floating.values().map(|layer| layer.pane_id));
+            ids.iter()
+                .filter_map(|id| self.panes.lock().expect("panes").get(id).cloned())
+                .collect()
+        };
+        self.apply_workspace(|state| {
+            state.workspace.windows.remove(&window_id);
+            state.workspace.order.retain(|id| *id != window_id);
+            if state.workspace.active_window == window_id {
+                state.workspace.active_window = state.workspace.order[0];
+            }
+            Ok(())
+        })?;
+        {
+            let mut placed = self.placements.lock().expect("placements");
+            let mut owners = self.owners.lock().expect("owners");
+            for pane in &panes {
+                placed.remove(&pane.id);
+                owners.remove(&pane.id);
+            }
+        }
+        {
+            let mut tiled = self.panes.lock().expect("panes");
+            for pane in &panes {
+                tiled.remove(&pane.id);
+            }
+        }
+        for pane in panes {
+            pane.kill().await;
+        }
+        self.resize_panes();
+        self.publish_layout();
+        Ok(())
+    }
+
+    pub fn rename_window(&self, window_id: u64, name: &str) -> Result<(), SessionError> {
+        self.apply_workspace(|state| {
+            let window = state
+                .workspace
+                .windows
+                .get_mut(&window_id)
+                .ok_or(SessionError::WindowNotFound(window_id))?;
+            window.name = name.to_owned();
+            Ok(())
+        })
+    }
+
+    pub fn move_window(&self, window_id: u64, index: usize) -> Result<(), SessionError> {
+        self.apply_workspace(|state| {
+            state.workspace.move_window(window_id, index)?;
+            Ok(())
+        })
+    }
+
+    pub fn focus_window(&self, target: WindowFocus) -> Result<u64, SessionError> {
+        let next = {
+            let mut state = self.workspace.lock().expect("workspace");
+            let previous = state.clone();
+            let result = match target {
+                WindowFocus::Id(id) if state.workspace.windows.contains_key(&id) => {
+                    state.workspace.active_window = id;
+                    Ok(id)
+                }
+                WindowFocus::Id(id) => Err(SessionError::WindowNotFound(id)),
+                WindowFocus::Next => state
+                    .workspace
+                    .focus_step(1)
+                    .map(|()| state.workspace.active_window)
+                    .map_err(Into::into),
+                WindowFocus::Previous => state
+                    .workspace
+                    .focus_step(-1)
+                    .map(|()| state.workspace.active_window)
+                    .map_err(Into::into),
+            };
+            match result {
+                Ok(id) => {
+                    if let Err(err) = state.workspace.validate() {
+                        *state = previous;
+                        return Err(err.into());
+                    }
+                    state.bump();
+                    id
+                }
+                Err(err) => {
+                    *state = previous;
+                    return Err(err);
+                }
+            }
+        };
+        self.resize_panes();
+        self.publish_layout();
+        Ok(next)
+    }
+
+    fn window_id_for_pane(&self, pane_id: u64) -> Result<u64, SessionError> {
+        self.state()
+            .workspace
+            .window_for_pane(pane_id)
+            .ok_or(SessionError::PaneNotFound(pane_id))
+    }
+
+    /// Remove a pane from whichever window owns it, without killing the child.
     pub async fn detach_pane(&self, pane_id: u64) -> Result<Layout, SessionError> {
         let _op = self.ops.lock().await;
         if !self.panes.lock().expect("panes").contains_key(&pane_id) {
             return Err(SessionError::PaneNotFound(pane_id));
         }
-        if self.placement(pane_id) != PanePlacement::Tiled {
+        let placement = self.placement(pane_id);
+        if matches!(
+            placement,
+            PanePlacement::Detached | PanePlacement::Floating { .. }
+        ) {
             return Err(SessionError::PaneNotTiled(pane_id));
         }
-        let root = {
-            let state = self.layout.lock().expect("layout");
-            remove_leaf(&state.root, PaneId::new(pane_id))?
-        };
+        self.apply_workspace(|state| {
+            let window_id = state
+                .workspace
+                .window_for_pane(pane_id)
+                .ok_or(SessionError::PaneNotFound(pane_id))?;
+            let window = state
+                .workspace
+                .windows
+                .get_mut(&window_id)
+                .ok_or(SessionError::WindowNotFound(window_id))?;
+            window.root = remove_leaf(&window.root, PaneId::new(pane_id))?;
+            if window.zoom == Some(pane_id) {
+                window.zoom = None;
+            }
+            Ok(())
+        })?;
         self.placements
             .lock()
             .expect("placements")
             .insert(pane_id, PanePlacement::Detached);
         self.owners.lock().expect("owners").remove(&pane_id);
-        {
-            let mut state = self.layout.lock().expect("layout");
-            state.root = root;
-            if state.zoom == Some(pane_id) {
-                state.zoom = None;
-            }
-            state.bump();
-        }
         self.resize_panes();
         self.publish_layout();
         Ok(self.layout(None))
     }
 
-    /// Place a detached tiled pane back into this session's window tree.
+    /// Place a detached pane back into a window's tiled tree.
     pub async fn place_pane(
         &self,
         pane_id: u64,
+        window_id: Option<u64>,
         anchor_pane_id: Option<u64>,
         axis: SplitAxis,
         ratio_bps: u16,
@@ -393,25 +623,156 @@ impl Session {
         if matches!(self.placement(pane_id), PanePlacement::Floating { .. }) {
             return Err(SessionError::PaneNotTiled(pane_id));
         }
-        let root = {
-            let state = self.layout.lock().expect("layout");
-            place_leaf(
-                &state.root,
+        self.apply_workspace(|state| {
+            let target = window_id.unwrap_or(state.workspace.active_window);
+            let window = state
+                .workspace
+                .windows
+                .get_mut(&target)
+                .ok_or(SessionError::WindowNotFound(target))?;
+            window.root = place_leaf(
+                &window.root,
                 anchor_pane_id.map(PaneId::new),
                 PaneId::new(pane_id),
                 axis,
                 ratio_bps,
-            )?
-        };
+            )?;
+            Ok(())
+        })?;
         self.placements
             .lock()
             .expect("placements")
             .insert(pane_id, PanePlacement::Tiled);
-        {
-            let mut state = self.layout.lock().expect("layout");
-            state.root = root;
-            state.bump();
+        self.resize_panes();
+        self.publish_layout();
+        Ok(self.layout(None))
+    }
+
+    /// Convert a tiled pane into a bounded floating layer in the same window.
+    pub async fn float_pane(
+        &self,
+        pane_id: u64,
+        bounds: FloatBounds,
+    ) -> Result<Layout, SessionError> {
+        let _op = self.ops.lock().await;
+        bounds.validate()?;
+        if !self.panes.lock().expect("panes").contains_key(&pane_id) {
+            return Err(SessionError::PaneNotFound(pane_id));
         }
+        if self.placement(pane_id) != PanePlacement::Tiled {
+            return Err(SessionError::PaneNotTiled(pane_id));
+        }
+        let layer_id = NEXT_LAYER_ID.fetch_add(1, Ordering::SeqCst);
+        self.apply_workspace(|state| {
+            let window_id = state
+                .workspace
+                .window_for_pane(pane_id)
+                .ok_or(SessionError::PaneNotFound(pane_id))?;
+            let window = state
+                .workspace
+                .windows
+                .get_mut(&window_id)
+                .ok_or(SessionError::WindowNotFound(window_id))?;
+            window.root = remove_leaf(&window.root, PaneId::new(pane_id))?;
+            if window.zoom == Some(pane_id) {
+                window.zoom = None;
+            }
+            window.floating.insert(
+                layer_id,
+                FloatingPane {
+                    layer_id,
+                    pane_id,
+                    bounds,
+                    z: window.max_z().saturating_add(1),
+                    minimized: false,
+                },
+            );
+            Ok(())
+        })?;
+        self.placements
+            .lock()
+            .expect("placements")
+            .insert(pane_id, PanePlacement::Floating { layer_id });
+        self.resize_panes();
+        self.publish_layout();
+        Ok(self.layout(None))
+    }
+
+    /// Return a floating pane to a window's tiled tree.
+    pub async fn tile_pane(
+        &self,
+        pane_id: u64,
+        window_id: Option<u64>,
+        anchor_pane_id: Option<u64>,
+        axis: SplitAxis,
+        ratio_bps: u16,
+    ) -> Result<Layout, SessionError> {
+        let _op = self.ops.lock().await;
+        let PanePlacement::Floating { layer_id } = self.placement(pane_id) else {
+            return Err(SessionError::PaneNotTiled(pane_id));
+        };
+        self.apply_workspace(|state| {
+            let target = window_id.unwrap_or(state.workspace.active_window);
+            let window = state
+                .workspace
+                .windows
+                .get_mut(&target)
+                .ok_or(SessionError::WindowNotFound(target))?;
+            window
+                .floating
+                .remove(&layer_id)
+                .ok_or(SessionError::LayerNotFound(layer_id))?;
+            window.root = place_leaf(
+                &window.root,
+                anchor_pane_id.map(PaneId::new),
+                PaneId::new(pane_id),
+                axis,
+                ratio_bps,
+            )?;
+            Ok(())
+        })?;
+        self.placements
+            .lock()
+            .expect("placements")
+            .insert(pane_id, PanePlacement::Tiled);
+        self.resize_panes();
+        self.publish_layout();
+        Ok(self.layout(None))
+    }
+
+    pub async fn set_floating_pane(
+        &self,
+        layer_id: u64,
+        bounds: Option<FloatBounds>,
+        z: Option<u32>,
+        minimized: Option<bool>,
+    ) -> Result<Layout, SessionError> {
+        let _op = self.ops.lock().await;
+        if let Some(bounds) = bounds {
+            bounds.validate()?;
+        }
+        self.apply_workspace(|state| {
+            let mut found = false;
+            for window in state.workspace.windows.values_mut() {
+                if let Some(layer) = window.floating.get_mut(&layer_id) {
+                    if let Some(bounds) = bounds {
+                        layer.bounds = bounds;
+                    }
+                    if let Some(z) = z {
+                        layer.z = z;
+                    }
+                    if let Some(minimized) = minimized {
+                        layer.minimized = minimized;
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Err(SessionError::LayerNotFound(layer_id));
+            }
+            Ok(())
+        })?;
         self.resize_panes();
         self.publish_layout();
         Ok(self.layout(None))
@@ -423,32 +784,54 @@ impl Session {
         axis: SplitAxis,
         ratio_bps: u16,
     ) -> Result<Layout, SessionError> {
+        let window_id = self.window_id_for_pane(pane_id)?;
+        self.run_in_window(window_id, Some(pane_id), None, axis, ratio_bps)
+            .await
+            .map(|(_, layout)| layout)
+    }
+
+    /// Spawn a child into a window's tiled tree. `anchor` splits an existing
+    /// pane; `None` creates a new split against the whole window.
+    pub async fn run_in_window(
+        &self,
+        window_id: u64,
+        anchor_pane_id: Option<u64>,
+        spec: Option<PaneSpec>,
+        axis: SplitAxis,
+        ratio_bps: u16,
+    ) -> Result<(u64, Layout), SessionError> {
         let _op = self.ops.lock().await;
-        let spec = {
-            let panes = self.panes.lock().expect("panes");
-            panes
-                .get(&pane_id)
-                .ok_or(SessionError::PaneNotFound(pane_id))?
-                .spec()
-                .clone()
+        let spec = match spec {
+            Some(spec) => spec,
+            None => {
+                let panes = self.panes.lock().expect("panes");
+                let anchor = anchor_pane_id.ok_or(SessionError::PaneNotFound(0))?;
+                panes
+                    .get(&anchor)
+                    .ok_or(SessionError::PaneNotFound(anchor))?
+                    .spec()
+                    .clone()
+            }
         };
         let new_id = next_pane_id();
-        let (root, size) = {
-            let state = self.layout.lock().expect("layout");
-            (
-                split_leaf(
-                    &state.root,
-                    PaneId::new(pane_id),
-                    PaneId::new(new_id),
-                    axis,
-                    ratio_bps,
-                )?,
-                self.size(),
-            )
+        let root = {
+            let state = self.state();
+            let window = state
+                .workspace
+                .windows
+                .get(&window_id)
+                .ok_or(SessionError::WindowNotFound(window_id))?;
+            place_leaf(
+                &window.root,
+                anchor_pane_id.map(PaneId::new),
+                PaneId::new(new_id),
+                axis,
+                ratio_bps,
+            )?
         };
         let (cols, rows) = resolve_layout(
             &root,
-            Rect::new(0, 0, size.cols, size.rows),
+            Rect::new(0, 0, self.size().cols, self.size().rows),
             MIN_PANE,
             PANE_BORDER,
         )
@@ -466,19 +849,64 @@ impl Session {
             .lock()
             .expect("placements")
             .insert(new_id, PanePlacement::Tiled);
-        {
-            let mut state = self.layout.lock().expect("layout");
-            state.root = root;
-            state.zoom = None;
-            state.bump();
-        }
+        self.apply_workspace(|state| {
+            let window = state
+                .workspace
+                .windows
+                .get_mut(&window_id)
+                .ok_or(SessionError::WindowNotFound(window_id))?;
+            window.root = root.clone();
+            window.zoom = None;
+            Ok(())
+        })?;
         self.resize_panes();
         self.publish_layout();
-        Ok(self.layout(Some(pane_id)))
+        Ok((new_id, self.layout(Some(new_id))))
     }
 
-    /// Spawn an explicitly specified child into a new split pane. Used by
-    /// `Command::Run`; the session stays daemon-owned and detach-safe.
+    /// Spawn a new floating pane with deterministic bounds.
+    pub async fn run_floating(
+        &self,
+        window_id: u64,
+        spec: PaneSpec,
+        bounds: FloatBounds,
+    ) -> Result<(u64, u64, Layout), SessionError> {
+        let _op = self.ops.lock().await;
+        bounds.validate()?;
+        let layer_id = NEXT_LAYER_ID.fetch_add(1, Ordering::SeqCst);
+        let pane_id = next_pane_id();
+        let rect = bounds.to_rect(self.size());
+        let pane =
+            PaneRuntime::spawn(self.id, pane_id, &spec, rect.cols.max(1), rect.rows.max(1)).await?;
+        self.panes.lock().expect("panes").insert(pane_id, pane);
+        self.placements
+            .lock()
+            .expect("placements")
+            .insert(pane_id, PanePlacement::Floating { layer_id });
+        self.apply_workspace(|state| {
+            let window = state
+                .workspace
+                .windows
+                .get_mut(&window_id)
+                .ok_or(SessionError::WindowNotFound(window_id))?;
+            window.floating.insert(
+                layer_id,
+                FloatingPane {
+                    layer_id,
+                    pane_id,
+                    bounds,
+                    z: window.max_z().saturating_add(1),
+                    minimized: false,
+                },
+            );
+            Ok(())
+        })?;
+        self.resize_panes();
+        self.publish_layout();
+        Ok((pane_id, layer_id, self.layout(Some(pane_id))))
+    }
+
+    /// Backwards-compatible `Run` entry point: split against the anchor pane.
     pub async fn run(
         &self,
         pane_id: u64,
@@ -486,69 +914,23 @@ impl Session {
         axis: SplitAxis,
         ratio_bps: u16,
     ) -> Result<(u64, Layout), SessionError> {
-        let _op = self.ops.lock().await;
-        if !self.panes.lock().expect("panes").contains_key(&pane_id) {
-            return Err(SessionError::PaneNotFound(pane_id));
-        }
-        let new_id = next_pane_id();
-        let (root, size) = {
-            let state = self.layout.lock().expect("layout");
-            (
-                split_leaf(
-                    &state.root,
-                    PaneId::new(pane_id),
-                    PaneId::new(new_id),
-                    axis,
-                    ratio_bps,
-                )?,
-                self.size(),
-            )
-        };
-        let (cols, rows) = resolve_layout(
-            &root,
-            Rect::new(0, 0, size.cols, size.rows),
-            MIN_PANE,
-            PANE_BORDER,
-        )
-        .ok()
-        .and_then(|panes| {
-            panes
-                .into_iter()
-                .find(|pane| pane.pane_id == new_id)
-                .map(|pane| (pane.content.cols.max(1), pane.content.rows.max(1)))
-        })
-        .unwrap_or((2, 1));
-        let pane = PaneRuntime::spawn(self.id, new_id, &spec, cols, rows).await?;
-        self.panes.lock().expect("panes").insert(new_id, pane);
-        self.placements
-            .lock()
-            .expect("placements")
-            .insert(new_id, PanePlacement::Tiled);
-        {
-            let mut state = self.layout.lock().expect("layout");
-            state.root = root;
-            state.zoom = None;
-            state.bump();
-        }
-        self.resize_panes();
-        self.publish_layout();
-        Ok((new_id, self.layout(Some(pane_id))))
+        let window_id = self.window_id_for_pane(pane_id)?;
+        self.run_in_window(window_id, Some(pane_id), Some(spec), axis, ratio_bps)
+            .await
     }
 
     pub async fn close(&self, pane_id: u64) -> Result<Option<Layout>, SessionError> {
         let _op = self.ops.lock().await;
-        let placement = self
-            .placements
-            .lock()
-            .expect("placements")
-            .get(&pane_id)
-            .copied();
-        // Detached panes are not in the tiled tree; closing one must leave the
-        // window layout untouched. Closing the last pane is explicit and
-        // returns `None`, which tells the daemon to remove the empty session.
-        let next_root = if placement == Some(PanePlacement::Tiled) {
-            let state = self.layout.lock().expect("layout");
-            close_leaf(&state.root, PaneId::new(pane_id))?
+        let placement = self.placement(pane_id);
+        let window_id = self.state().workspace.window_for_pane(pane_id);
+        let next_root = if placement == PanePlacement::Tiled {
+            let state = self.state();
+            let window = state
+                .workspace
+                .windows
+                .get(&window_id.ok_or(SessionError::PaneNotFound(pane_id))?)
+                .ok_or(SessionError::PaneNotFound(pane_id))?;
+            close_leaf(&window.root, PaneId::new(pane_id))?
         } else {
             None
         };
@@ -561,21 +943,30 @@ impl Session {
         self.placements.lock().expect("placements").remove(&pane_id);
         self.owners.lock().expect("owners").remove(&pane_id);
         let empty = self.panes.lock().expect("panes").is_empty();
-        {
-            let mut state = self.layout.lock().expect("layout");
+        self.apply_workspace(|state| {
             if empty {
-                state.root = LayoutNode::empty();
-                state.zoom = None;
+                for window in state.workspace.windows.values_mut() {
+                    window.root = LayoutNode::empty();
+                    window.zoom = None;
+                    window.floating.clear();
+                }
             } else if let Some(next_root) = &next_root {
-                state.root = next_root.clone();
-                if state.zoom == Some(pane_id) {
-                    state.zoom = None;
+                let window = state
+                    .workspace
+                    .windows
+                    .get_mut(&window_id.ok_or(SessionError::PaneNotFound(pane_id))?)
+                    .ok_or(SessionError::PaneNotFound(pane_id))?;
+                window.root = next_root.clone();
+                if window.zoom == Some(pane_id) {
+                    window.zoom = None;
+                }
+            } else if let PanePlacement::Floating { layer_id } = placement {
+                for window in state.workspace.windows.values_mut() {
+                    window.floating.remove(&layer_id);
                 }
             }
-            if empty || next_root.is_some() {
-                state.bump();
-            }
-        }
+            Ok(())
+        })?;
         pane.kill().await;
         if empty {
             self.publish_layout();
@@ -590,29 +981,75 @@ impl Session {
         &self,
         root: LayoutNode,
         base_revision: u64,
+        window_id: Option<u64>,
+        floating: Option<Vec<FloatingPaneInfo>>,
     ) -> Result<Layout, SessionError> {
         let _op = self.ops.lock().await;
         self.check_revision(base_revision)?;
         validate_layout(&root)?;
         let requested: BTreeSet<u64> = layout_leaves(&root).into_iter().map(PaneId::get).collect();
-        let known: BTreeSet<u64> = self.panes.lock().expect("panes").keys().copied().collect();
-        if requested != known {
+        let state = self.state();
+        let target = window_id.unwrap_or(state.workspace.active_window);
+        let window = state
+            .workspace
+            .windows
+            .get(&target)
+            .ok_or(SessionError::WindowNotFound(target))?;
+        let current: BTreeSet<u64> = layout_leaves(&window.root)
+            .into_iter()
+            .map(PaneId::get)
+            .collect();
+        if requested != current {
             return Err(SessionError::LayoutMismatch);
         }
-        {
-            let mut state = self.layout.lock().expect("layout");
-            // A canonical resize can bump the revision while this layout is
-            // validated; never apply a request that was already stale.
-            if base_revision != state.revision {
-                return Err(SessionError::StaleLayout {
-                    expected: base_revision,
-                    current: state.revision,
-                });
+        let layers = floating.map(|layers| {
+            layers
+                .into_iter()
+                .map(|layer| {
+                    (
+                        layer.layer_id,
+                        FloatingPane {
+                            layer_id: layer.layer_id,
+                            pane_id: layer.pane_id,
+                            bounds: layer.bounds,
+                            z: layer.z,
+                            minimized: layer.minimized,
+                        },
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        });
+        if let Some(layers) = &layers {
+            let requested_layers: BTreeSet<u64> = window
+                .floating
+                .values()
+                .map(|layer| layer.layer_id)
+                .collect();
+            let supplied_layers: BTreeSet<u64> = layers.keys().copied().collect();
+            if requested_layers != supplied_layers {
+                return Err(SessionError::LayoutMismatch);
             }
-            state.root = root;
-            state.zoom = None;
-            state.bump();
+            for layer in layers.values() {
+                layer.bounds.validate()?;
+                if !matches!(self.placement(layer.pane_id), PanePlacement::Floating { layer_id } if layer_id == layer.layer_id)
+                {
+                    return Err(SessionError::PaneNotTiled(layer.pane_id));
+                }
+            }
         }
+        self.apply_workspace(|state| {
+            let window = state
+                .workspace
+                .windows
+                .get_mut(&target)
+                .ok_or(SessionError::WindowNotFound(target))?;
+            window.root = root.clone();
+            window.zoom = None;
+            if let Some(layers) = &layers {
+                window.floating = layers.clone();
+            }
+            Ok(())
+        })?;
         self.resize_panes();
         self.publish_layout();
         Ok(self.layout(None))
@@ -636,11 +1073,10 @@ impl Session {
         {
             return Err(SessionError::PaneNotFound(id));
         }
-        {
-            let mut state = self.layout.lock().expect("layout");
-            state.zoom = pane_id;
-            state.bump();
-        }
+        self.apply_workspace(|state| {
+            state.workspace.active_mut().zoom = pane_id;
+            Ok(())
+        })?;
         self.resize_panes();
         self.publish_layout();
         Ok(self.layout(pane_id))
@@ -664,6 +1100,7 @@ impl Session {
             .unwrap_or(self.created_at_unix_ms);
         let placements = self.placements.lock().expect("placements");
         let owners = self.owners.lock().expect("owners");
+        let state = self.state();
         let infos: Vec<PaneInfo> = panes
             .iter()
             .map(|pane| {
@@ -679,7 +1116,7 @@ impl Session {
                         .get(&pane.id)
                         .copied()
                         .unwrap_or(PanePlacement::Tiled),
-                    window_id: Some(1),
+                    window_id: state.workspace.window_for_pane(pane.id),
                     owner_client_id: owners.get(&pane.id).copied(),
                     program_status: pane.program_status(),
                 }
@@ -693,8 +1130,11 @@ impl Session {
             cols: self.cols.load(Ordering::Relaxed),
             rows: self.rows.load(Ordering::Relaxed),
             pane_count: infos.len() as u32,
-            detached_pane_count: 0,
-            window_count: 1,
+            detached_pane_count: infos
+                .iter()
+                .filter(|info| info.placement == PanePlacement::Detached)
+                .count() as u32,
+            window_count: state.workspace.windows.len() as u32,
             attached_clients,
             created_at_unix_ms: self.created_at_unix_ms,
             last_activity_unix_ms,
@@ -713,6 +1153,31 @@ pub struct SessionRegistry {
 impl SessionRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn get_by_id(&self, id: u64) -> Option<Arc<Session>> {
+        self.sessions
+            .values()
+            .find(|session| session.id == id)
+            .cloned()
+    }
+
+    pub fn find_by_window(&self, window_id: u64) -> Option<Arc<Session>> {
+        self.sessions
+            .values()
+            .find(|session| session.has_window(window_id))
+            .cloned()
+    }
+
+    pub fn find_by_layer(&self, layer_id: u64) -> Option<Arc<Session>> {
+        self.sessions
+            .values()
+            .find(|session| session.has_layer(layer_id))
+            .cloned()
+    }
+
+    pub fn first(&self) -> Option<Arc<Session>> {
+        self.sessions.values().next().cloned()
     }
 
     pub fn len(&self) -> usize {
@@ -776,9 +1241,8 @@ impl SessionRegistry {
             cols: AtomicU16::new(cols),
             rows: AtomicU16::new(rows),
             created_at_unix_ms: now_unix_ms(),
-            layout: StdMutex::new(LayoutState {
-                root: LayoutNode::leaf(PaneId::new(pane_id)),
-                zoom: None,
+            workspace: StdMutex::new(WorkspaceState {
+                workspace: Workspace::new(LayoutNode::leaf(PaneId::new(pane_id))),
                 revision: 1,
             }),
             panes: StdMutex::new(panes),
@@ -846,7 +1310,7 @@ mod tests {
         for _ in 0..8 {
             session.detach_pane(pane_id).await.expect("detach");
             session
-                .place_pane(pane_id, None, SplitAxis::Columns, 5000)
+                .place_pane(pane_id, None, None, SplitAxis::Columns, 5000)
                 .await
                 .expect("place");
         }

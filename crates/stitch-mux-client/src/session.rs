@@ -507,6 +507,8 @@ mod tests {
                 },
             ],
             zoomed_pane: None,
+            windows: Vec::new(),
+            active_window_id: None,
         });
         assert_eq!(
             focus_in_direction(&view, Direction::Right),

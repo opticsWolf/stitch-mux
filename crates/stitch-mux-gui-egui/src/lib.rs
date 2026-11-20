@@ -752,6 +752,8 @@ impl eframe::App for MuxApp {
                     .unwrap_or(view.layout_revision);
                 self.send_command(Command::SetLayout {
                     base_revision,
+                    window_id: None,
+                    floating: None,
                     root: set_ratio(&drag.node, &drag.node, drag.ratio_bps),
                 });
                 self.split_drag = None;

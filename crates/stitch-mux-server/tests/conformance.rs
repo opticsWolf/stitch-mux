@@ -56,6 +56,8 @@ fn scene(cols: u16, rows: u16, title: &str, alt_screen: bool) -> (Attached, Layo
             title: title.into(),
         }],
         zoomed_pane: None,
+        windows: Vec::new(),
+        active_window_id: None,
     };
     let snapshot = PaneSnapshot {
         pane_id: 101,

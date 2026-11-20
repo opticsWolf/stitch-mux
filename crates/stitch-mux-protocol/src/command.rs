@@ -1,11 +1,11 @@
 //! Control-command DTOs shared by the CLI and the daemon.
 
 use crate::dto::{
-    ActionArgs, ActionInfo, CaptureResponse, ClientInfo, ErrorInfo, Keymap, Layout, PaneInfo,
-    RunResult, SessionInfo, WaitResult, WaitTarget,
+    ActionArgs, ActionInfo, CaptureResponse, ClientInfo, ErrorInfo, FloatingPaneInfo, Keymap,
+    Layout, PaneInfo, RunResult, SessionInfo, WaitResult, WaitTarget,
 };
 use serde::{Deserialize, Serialize};
-use stitch_mux_core::{CaptureFormat, LayoutNode};
+use stitch_mux_core::{CaptureFormat, FloatBounds, LayoutNode, SplitAxis};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -13,9 +13,24 @@ pub enum RunPlacement {
     NewWindow,
     Split {
         pane_id: u64,
-        axis: stitch_mux_core::SplitAxis,
+        axis: SplitAxis,
         ratio_bps: u16,
     },
+    Window {
+        window_id: u64,
+    },
+    Floating {
+        window_id: u64,
+        bounds: FloatBounds,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowFocus {
+    Id(u64),
+    Next,
+    Previous,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -113,6 +128,50 @@ pub enum Command {
     SetLayout {
         base_revision: u64,
         root: LayoutNode,
+        /// Target window; omitted means the session's active window.
+        #[serde(default)]
+        window_id: Option<u64>,
+        /// Full floating-layer state for that window. `None` leaves it alone.
+        #[serde(default)]
+        floating: Option<Vec<FloatingPaneInfo>>,
+    },
+    CreateWindow {
+        session: String,
+        name: Option<String>,
+    },
+    CloseWindow {
+        window_id: u64,
+    },
+    RenameWindow {
+        window_id: u64,
+        name: String,
+    },
+    MoveWindow {
+        window_id: u64,
+        index: usize,
+    },
+    FocusWindow {
+        target: WindowFocus,
+    },
+    FloatPane {
+        pane_id: u64,
+        bounds: FloatBounds,
+    },
+    TilePane {
+        pane_id: u64,
+        window_id: u64,
+        anchor_pane_id: Option<u64>,
+        axis: SplitAxis,
+        ratio_bps: u16,
+    },
+    SetFloatingPane {
+        layer_id: u64,
+        #[serde(default)]
+        bounds: Option<FloatBounds>,
+        #[serde(default)]
+        z: Option<u32>,
+        #[serde(default)]
+        minimized: Option<bool>,
     },
     DetachPane {
         pane_id: u64,

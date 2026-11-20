@@ -6,8 +6,8 @@
 use crate::frame::{Frame, FrameError, MessageKind, decode_message};
 use serde::{Deserialize, Serialize};
 use stitch_mux_core::{
-    ActivitySummary, Attrs, CaptureFormat, Cell, Color, Cursor, LayoutNode, Modes, ProgramStatus,
-    Rect, Row,
+    ActivitySummary, Attrs, CaptureFormat, Cell, Color, Cursor, FloatBounds, LayoutNode, Modes,
+    ProgramStatus, Rect, Row,
 };
 
 pub use stitch_mux_core::PanePlacement;
@@ -71,6 +71,28 @@ pub struct PaneGeometry {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FloatingPaneInfo {
+    pub layer_id: u64,
+    pub pane_id: u64,
+    pub bounds: FloatBounds,
+    pub z: u32,
+    pub minimized: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WindowInfo {
+    pub id: u64,
+    pub name: String,
+    pub root: LayoutNode,
+    #[serde(default)]
+    pub zoomed_pane: Option<u64>,
+    #[serde(default)]
+    pub floating: Vec<FloatingPaneInfo>,
+    #[serde(default)]
+    pub panes: Vec<PaneGeometry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     pub session_id: u64,
     pub revision: u64,
@@ -87,6 +109,12 @@ pub struct Layout {
     /// single-pane one without this field.
     #[serde(default)]
     pub zoomed_pane: Option<u64>,
+    /// Full workspace for GUI clients. Older peers ignore these fields and
+    /// read `root`/`panes` as the active-window projection.
+    #[serde(default)]
+    pub windows: Vec<WindowInfo>,
+    #[serde(default)]
+    pub active_window_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -299,6 +327,10 @@ pub struct ResizeEvent {
 pub struct SetLayout {
     pub base_revision: u64,
     pub root: stitch_mux_core::LayoutNode,
+    #[serde(default)]
+    pub window_id: Option<u64>,
+    #[serde(default)]
+    pub floating: Option<Vec<FloatingPaneInfo>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

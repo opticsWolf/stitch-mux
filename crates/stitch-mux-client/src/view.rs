@@ -549,6 +549,8 @@ mod tests {
                 title: "sh".into(),
             }],
             zoomed_pane: None,
+            windows: Vec::new(),
+            active_window_id: None,
         });
         assert!(view.pane(1).is_some());
         assert!(view.pane(2).is_none());

@@ -203,9 +203,35 @@ struct Layout {
     status_rows: u16,
     attached_clients: u32,       // registry count at broadcast time
     focus: Option<PaneId>,       // focus for THIS client
-    root: LayoutNode,            // server-owned binary split tree
-    panes: Vec<PaneGeometry>,
+    root: LayoutNode,            // active-window binary split tree
+    panes: Vec<PaneGeometry>,    // active-window projection for terminal peers
     zoomed_pane: Option<PaneId>, // set while zoomed; `root` is then one leaf
+    windows: Vec<WindowInfo>,    // full workspace for GUI peers
+    active_window_id: Option<u64>,
+}
+
+struct WindowInfo {
+    id: u64,
+    name: String,
+    root: LayoutNode,
+    zoomed_pane: Option<u64>,
+    floating: Vec<FloatingPaneInfo>,
+    panes: Vec<PaneGeometry>,
+}
+
+struct FloatingPaneInfo {
+    layer_id: u64,
+    pane_id: u64,
+    bounds: FloatBounds,        // basis-point fractions of the viewport
+    z: u32,
+    minimized: bool,
+}
+
+struct FloatBounds {
+    x_bps: u16,
+    y_bps: u16,
+    w_bps: u16,
+    h_bps: u16,
 }
 
 struct PaneGeometry {
@@ -540,6 +566,8 @@ a hostile frame from exhausting the decoder's stack.
 struct SetLayout {
     base_revision: u64,
     root: LayoutNode,
+    window_id: Option<u64>,      // default: active window
+    floating: Option<Vec<FloatingPaneInfo>>, // full replacement for that window
 }
 
 enum LayoutNode {
@@ -752,6 +780,14 @@ enum Command {
     },
     ClaimPane { pane_id: u64, mode: ClaimMode }, // v0.2
     ReleasePane { pane_id: u64 },                // v0.2
+    CreateWindow { session: String, name: Option<String> }, // v0.3
+    CloseWindow { window_id: u64 },              // v0.3
+    RenameWindow { window_id: u64, name: String },
+    MoveWindow { window_id: u64, index: usize },
+    FocusWindow { target: WindowFocus },         // id, next, previous
+    FloatPane { pane_id: u64, bounds: FloatBounds },
+    TilePane { pane_id: u64, window_id: u64, anchor_pane_id: Option<u64>, axis: SplitAxis, ratio_bps: u16 },
+    SetFloatingPane { layer_id: u64, bounds: Option<FloatBounds>, z: Option<u32>, minimized: Option<bool> },
     ListActions,
     GetKeymap,
     InvokeAction { action: String, args: Option<ActionArgs> },
@@ -969,7 +1005,9 @@ The local CLI and agent skill use these control commands:
 sends `Event` (kind 27) frames with a monotonic daemon-wide `seq` and a typed
 payload. Implemented v0.2 kinds: `session_list` (initial state),
 `program_status_changed`, `activity_changed`, `pane_created`, `pane_exited`,
-`pane_placement_changed`, `pane_owner_changed`, `action_invoked`,
+`pane_placement_changed`, `pane_owner_changed`, `window_created`,
+`window_closed`, `window_renamed`, `window_moved`, `window_focused`,
+`pane_floated`, `pane_tiled`, `floating_changed`, `action_invoked`,
 `keymap_changed`, `actions_changed`, and `event_gap`.
 Layout, window and owner events arrive with those features. Events are carried
 by a 256-entry broadcast queue; a subscriber that falls behind receives
@@ -1039,6 +1077,7 @@ Client capabilities (requested):
 | 7 | `BRACKETED_PASTE` | Can send paste events |
 | 8 | `LAYOUT_CONTROL` | May send `SetLayout` |
 | 16 | `DETACHED_PANES` | May detach/place panes and claim size ownership |
+| 17 | `MULTI_WINDOW` | May create/focus windows and manage floating layers |
 | 9 | `CAPTURE` | Supports `CaptureRequest` |
 | 10 | `RESYNC` | Supports `Resync` |
 | 11 | `PROGRAM_STATUS` | Can display OSC 7501 status/activity |
@@ -1064,6 +1103,7 @@ Server capabilities (advertised):
 | 10 | `EVENTS` | Supports `SubscribeEvents`/`Event` |
 | 11 | `ACTIONS` | Supports `ListActions`/`InvokeAction` |
 | 12 | `DETACHED_PANES` | Supports detach/place/claim (v0.2) |
+| 13 | `MULTI_WINDOW` | Supports windows and floating layers (v0.3) |
 
 A structured client must request and be granted `STRUCTURED_VIEW`; a terminal
 client must request `ANSI`. `SetLayout` requires `LAYOUT_CONTROL`; the daemon

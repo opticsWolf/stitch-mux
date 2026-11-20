@@ -118,6 +118,8 @@ fn valid_frames() -> Vec<Frame> {
         root: LayoutNode::leaf(stitch_mux_core::PaneId::new(7)),
         panes: Vec::new(),
         zoomed_pane: None,
+        windows: Vec::new(),
+        active_window_id: None,
     };
     let input = InputEvent::Key(KeyEvent {
         code: KeyCode::Char('a'),
@@ -134,6 +136,8 @@ fn valid_frames() -> Vec<Frame> {
             MessageKind::SetLayout,
             &SetLayout {
                 base_revision: 2,
+                window_id: None,
+                floating: None,
                 root: LayoutNode::leaf(stitch_mux_core::PaneId::new(7)),
             },
         )
