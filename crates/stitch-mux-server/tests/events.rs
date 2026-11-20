@@ -144,6 +144,66 @@ async fn status_activity_and_exit_events_are_monotonic() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unscoped_subscribers_receive_the_initial_session_list() {
+    let (endpoint, socket) = test_endpoint("list");
+    let listener = endpoint.bind().await.expect("bind");
+    let server = tokio::spawn(stitch_mux_server::serve(listener));
+
+    let created = command(
+        &endpoint,
+        Command::NewSession {
+            name: "listed".into(),
+            program: env!("CARGO_BIN_EXE_status_fixture").into(),
+            args: Vec::new(),
+            cwd: None,
+            env: None,
+            cols: 80,
+            rows: 24,
+        },
+    )
+    .await
+    .expect("new session");
+    assert!(created.ok, "{:?}", created.error);
+
+    let mut connection = connect(&endpoint, hello(DEFAULT_CLIENT_CAPABILITIES))
+        .await
+        .expect("control connection")
+        .0;
+    connection
+        .send(
+            MessageKind::SubscribeEvents,
+            &SubscribeEvents {
+                session: None,
+                all: false,
+                since_seq: None,
+            },
+        )
+        .await
+        .expect("subscribe");
+
+    let event = next_event(&mut connection, Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("session_list");
+    assert_eq!(event.kind, "session_list");
+    assert!(event.seq > 0);
+
+    let killed = command(
+        &endpoint,
+        Command::KillSession {
+            name: "listed".into(),
+        },
+    )
+    .await
+    .expect("kill");
+    assert!(killed.ok, "{:?}", killed.error);
+
+    server.abort();
+    if let Some(path) = socket {
+        let _ = tokio::fs::remove_dir_all(path.parent().expect("parent")).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subscription_requires_the_events_capability() {
     let (endpoint, socket) = test_endpoint("cap");
     let listener = endpoint.bind().await.expect("bind");

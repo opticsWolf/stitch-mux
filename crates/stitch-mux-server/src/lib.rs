@@ -530,7 +530,9 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                     filter
                         .session_id
                         .is_none_or(|id| event.session_id == Some(id))
-                        && (filter.all || event.session_id.is_some())
+                        && (filter.all
+                            || event.session_id.is_some()
+                            || event.kind == "session_list")
                 });
                 if wanted && let Err(err) = writer.send(MessageKind::Event, event.as_ref()).await {
                     failure = Some(ServerError::Frame(err));

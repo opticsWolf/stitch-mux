@@ -5,13 +5,15 @@ so local scripts and coding agents can drive the same sessions a human uses in
 the GUI. It is **not** a remote API, an SSH gateway, a multi-user control plane,
 or a hosted agent service.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the daemon model and
-[PROTOCOL.md](PROTOCOL.md) for the control messages.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the daemon model,
+[PROTOCOL.md](PROTOCOL.md) for the control messages, and
+[STITCH_PTY_GAPS.md](STITCH_PTY_GAPS.md) for upstream API gaps found while
+implementing status and automation.
 
 **v0.1 status:** the CLI/control-command subset and file log are implemented.
-The bounded event stream (`SubscribeEvents`/`Event`) and program status are now
-implemented too. Named actions/keymaps and the agent skill below are v0.2 work;
-they are not v0.1 release gates.
+**v0.2 work landed:** program status, the bounded event stream, `run`/`wait`/
+`send`/`send-keys`/`capture`/`events --json`, and the local agent skill. Named
+actions/keymaps remain M9; no privileged hook is required for automation.
 
 ## 1. What the automation surface is for
 
@@ -50,17 +52,17 @@ The initial automation-oriented commands are:
 
 ```sh
 stitch-mux new -s work -- bash
-stitch-mux run -t work --wait -- cargo test
-stitch-mux run -t work --split=right -- htop
-stitch-mux wait -t work -p 3 --timeout 10m
-stitch-mux capture -t work -p 3 --format text --lines 200
-stitch-mux capture -t work -p 3 --format json
-stitch-mux send -t work -p 3 -- "make test"
-stitch-mux send-keys -t work -p 3 -- enter
+PANE=$(stitch-mux ls | python -c 'import json,sys; print(json.load(sys.stdin)["sessions"][0]["panes"][0]["id"])')
+stitch-mux run -s work --wait -- cargo test
+stitch-mux run -s work --target "$PANE" --axis columns -- htop
+stitch-mux wait --target "$PANE" --timeout-ms 10000
+stitch-mux capture --target "$PANE" --format text --lines 200
+stitch-mux capture --target "$PANE" --format json
+stitch-mux send --target "$PANE" 'make test'
+stitch-mux send-keys --target "$PANE" ctrl+c enter
 stitch-mux ls --json
-stitch-mux events --json -t work
-stitch-mux actions -t work
-stitch-mux invoke -t work split-right
+stitch-mux events --session work --timeout-ms 30000
+# M9: stitch-mux actions -s work / stitch-mux invoke -s work split-right
 ```
 
 ### 3.1 `run` and `wait`
@@ -70,12 +72,13 @@ with multi-window support), starts a program, and optionally waits for the child
 to exit:
 
 ```sh
-stitch-mux run -t build --wait -- go test ./...
+stitch-mux run -s build --wait -- go test ./...
 ```
 
 - `--wait` returns the child's exit status.
 - `--keep-open` leaves the pane visible after exit.
-- `--split=right|left|above|below` places the pane beside an existing one.
+- `--axis columns|rows` and `--ratio 0..10000` choose the split direction and
+  proportion; `--target PANE_ID` selects the pane to split (default: first pane).
 - `--label` gives the pane a human-readable name.
 - Without `--wait`, the command returns after the pane is created.
 
@@ -114,14 +117,12 @@ Exit statuses are stable:
 | Status | Meaning |
 |---:|---|
 | 0 | Success |
-| 1 | Command/program failed |
+| 1 | CLI/protocol error, typed daemon error, or timed-out wait |
 | 2 | Invalid arguments |
-| 3 | Session/pane not found or ambiguous |
 | 4 | Daemon unavailable |
-| 130 | Interrupted |
 
-`run --wait` and `wait` return the child's status when it exits, or a timeout
-status when the timeout expires.
+`run --wait` and `wait` return the child's 0–255 exit code when it exits. A
+timeout returns 1 with `timed_out: true` and does not kill the pane.
 
 ## 4. Event stream
 
@@ -129,9 +130,9 @@ status when the timeout expires.
 local event stream**, not a replay log.
 
 ```json
-{"seq":41,"type":"program_status_changed","session_id":1,"pane_id":7,"status":{"state":"blocked","kind":"permission","app":"cargo","message":"allow network access?"}}
-{"seq":42,"type":"pane_exited","session_id":1,"pane_id":7,"exit_code":0}
-{"seq":43,"type":"activity_changed","session_id":1,"activity":{"idle":2,"working":1,"blocked":0,"done":1,"error":0}}
+{"seq":41,"session_id":1,"kind":"program_status_changed","payload":{"pane_id":7,"status":{"state":"blocked","kind":"permission","app":"cargo","message":"allow network access?"}}}
+{"seq":42,"session_id":1,"kind":"pane_exited","payload":{"pane_id":7,"reason":"exited with 0"}}
+{"seq":43,"session_id":1,"kind":"activity_changed","payload":{"activity":{"idle":2,"working":1,"blocked":0,"done":1,"error":0}}}
 ```
 
 Event categories:
@@ -190,9 +191,18 @@ The agent interface is a small skill plus the CLI:
 - explain that sessions survive detach, so opening a pane is not a transient
   side effect.
 
-The first skill target can use the common `SKILL.md` layout under
-`agent-skill/`, with per-agent installation instructions added later. It is
-plain local documentation; no privileged daemon hook is required.
+The portable skill lives at `agent-skill/stitch-mux/SKILL.md`. Install it with:
+
+```sh
+stitch-mux skill-install --targets claude,codex,opencode,pi
+# or: sh agent-skill/stitch-mux/scripts/install.sh
+# STITCH_MUX_SKILL_TARGETS / STITCH_MUX_SKILL_ROOT override the script defaults
+# skill-install supports --root DIR and --targets LIST and skips unchanged files
+```
+
+The installer is idempotent and copies only local documentation. Pi also
+discovers `~/.agents/skills/` and project `.agents/skills/`; the same directory
+layout works for the other agent targets. No privileged daemon hook is required.
 
 A session started by an agent should have a clear label, for example the task or
 repository name. An optional later feature can let the agent rename its own

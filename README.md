@@ -115,7 +115,7 @@ stitch-mux/
 │   ├── IMPLEMENTATION_PLAN.md # milestones, tasks, acceptance criteria
 │   ├── IMPLEMENTATION_PROTOCOL.md # living execution rules and decision log
 │   └── REFERENCES.md          # rmux/Zellij/WezTerm/Rex evaluation
-├── agent-skill/               # local agent instructions and hooks (v0.2)
+├── agent-skill/               # portable local agent skill and installer
 └── crates/
     ├── stitch-mux-core/       # IDs, layout, frame/cell model
     ├── stitch-mux-protocol/   # framing, messages, capabilities
@@ -146,6 +146,12 @@ cargo run -p stitch-mux -- clients -s demo
 cargo run -p stitch-mux -- close -t 102
 cargo run -p stitch-mux -- rename --from demo --to work
 cargo run -p stitch-mux -- kill -t work
+
+# Local automation (no GUI needed)
+cargo run -p stitch-mux -- run -s task --wait -- sh -c 'exit 7'  # exits 7
+cargo run -p stitch-mux -- capture -t 101 --lines 200 --text
+cargo run -p stitch-mux -- events --session task --timeout-ms 5000
+cargo run -p stitch-mux -- skill-install --targets pi,claude
 ```
 
 On Windows use `cmd.exe` instead of `sh`. `stitch-mux gui -s demo` skips the
@@ -208,6 +214,7 @@ See [Python SDK](docs/PYTHON.md), [parity](docs/PARITY.md), and the
 - [GPUI spike](docs/GPUI-SPIKE.md) — optional second-native-toolkit boundary.
 - [Conformance](docs/CONFORMANCE.md) — M4 terminal corpus and interactive checks.
 - [Automation](docs/AUTOMATION.md) — local CLI, event stream, and agent skill.
+- [stitch-pty API gaps](docs/STITCH_PTY_GAPS.md) — upstream findings from status and automation work.
 - [Implementation plan](docs/IMPLEMENTATION_PLAN.md) — milestones and order of
   work.
 - [Implementation protocol](docs/IMPLEMENTATION_PROTOCOL.md) — living operating

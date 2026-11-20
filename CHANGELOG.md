@@ -18,9 +18,14 @@ Python package version in `pyproject.toml`.
 - Explicit `KillSession` now publishes `pane_exited` instead of racing the exit
   watcher with task cancellation.
 
-- **M8 server primitives:** `Run` (split placement) and `Wait` (pane/session,
-  optional timeout) return authoritative exit codes and terminal state;
-  `pane_created` joins the local event stream.
+- **M8 local automation:** `run`, `wait`, `send`, `send-keys`, `capture`,
+  `events --json`, and `skill-install`. `run --wait`/`wait` adopt the child's
+  exit status; daemon `Run` (split placement) and `Wait` (pane/session with
+  timeout) return authoritative state. `pane_created`, `pane_exited`,
+  `program_status_changed`, and `activity_changed` stream to local subscribers,
+  and unscoped subscribers always receive the initial `session_list`. The
+  portable agent skill installs idempotently into Claude Code, Codex, OpenCode,
+  and Pi skill directories.
 
 ## 0.1.0 (v0.1 candidate, 2026-11-20)
 

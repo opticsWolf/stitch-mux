@@ -3395,6 +3395,7 @@ dependencies = [
  "stitch-mux-protocol",
  "stitch-mux-server",
  "stitch-mux-terminal",
+ "stitch-pty",
  "tokio",
  "tracing",
 ]
