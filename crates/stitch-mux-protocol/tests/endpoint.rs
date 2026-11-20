@@ -20,7 +20,9 @@ fn endpoint(label: &str) -> Endpoint {
     if cfg!(windows) {
         Endpoint::from_override(&unique)
     } else {
-        Endpoint::Unix(std::env::temp_dir().join(format!("{unique}.sock")))
+        // A dedicated parent lets bind() create it with 0700; using /tmp
+        // directly would assert the mode of a pre-existing shared directory.
+        Endpoint::Unix(std::env::temp_dir().join(&unique).join("default.sock"))
     }
 }
 
@@ -83,5 +85,5 @@ async fn unix_endpoint_permissions_are_owner_only() {
     assert_eq!(dir_mode, 0o700, "socket directory must be owner-only");
     assert_eq!(socket_mode, 0o600, "socket must be owner-only");
     drop(listener);
-    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_dir_all(parent);
 }
