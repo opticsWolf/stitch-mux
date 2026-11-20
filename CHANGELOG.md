@@ -15,6 +15,10 @@ Python package version in `pyproject.toml`.
   capability checks, typed argument errors, and local change events.
   The CLI, terminal frontend, and egui frontend share the daemon's keymap; the
   GUI adds a command palette and which-key/mode indicators.
+
+- **M10 capture/export:** `capture --format vt` emits SGR-styled text,
+  `--format html` emits escaped styled rows, and scrollback is bounded by
+  `STITCH_MUX_SCROLLBACK` (default 2000 history rows).
 - **M7 program status and activity:** bounded mux-side OSC 7501 scanner,
   current-status propagation to panes/sessions/GUI, textual attention badges,
   activity filtering and local unread state in the reference GUI, a sourceable

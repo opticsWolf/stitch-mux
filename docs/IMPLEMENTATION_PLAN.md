@@ -479,6 +479,10 @@ client.
 **Goal:** cover the normal terminal behaviors a GUI user expects, without
 chasing graphics protocols.
 
+**Status: In progress.** Styled `vt`/`html` capture, HTML escaping, a
+configurable bounded scrollback budget, and range-cap tests are implemented;
+metadata extraction, selection/copy, and link handling remain.
+
 **Estimate:** 5-7 engineer-days.
 
 Deliverables:

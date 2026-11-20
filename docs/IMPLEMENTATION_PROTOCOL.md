@@ -6,7 +6,7 @@ This is the **operating protocol** for turning the design in
 document: update it in the **same commit** as the work it describes. It is not
 the wire protocol; that contract lives in [PROTOCOL.md](PROTOCOL.md).
 
-Last updated: **2026-11-20** — M0–M9 complete; version `0.1.0`. Two post-M5
+Last updated: **2026-11-20** — M0–M9 complete, M10 in progress; version `0.1.0`. Two post-M5
 review passes fixed split axes, viewport-delta drift, per-client delta seeding,
 named ANSI colors, egui/Qt input and scrolling, layout and pane-ID races,
 Windows endpoint concurrency, unbounded frame/input queues, and unbounded layout
@@ -236,6 +236,7 @@ Before marking a task Ready for review:
 | 2026-11-20 | CLI automation returns the child's exit status | `run --wait` and `wait` map a 0–255 child exit code to the process exit status; timeouts return 1 with `timed_out: true` and never kill the pane. `capture --text` prints rows only, other commands print one stable JSON envelope |
 | 2026-11-20 | Action commands are capability-gated and validate before side effects | `ListActions`, `GetKeymap`, `InvokeAction`, and `ReloadKeymap` require `client::ACTIONS` (now in the default mask). `pane.split` arguments with an unknown axis return `ErrorCode::InvalidArgs`; client-only actions return `Unsupported` instead of pretending the daemon detached a frontend |
 | 2026-11-20 | Keymap reload publishes change events | `ReloadKeymap` replaces the effective table from a user JSON file, publishes `keymap_changed` and `actions_changed`, and returns the new keymap. The daemon never restarts sessions, and an invalid file never partially applies |
+| 2026-11-20 | Capture exports are style-preserving and bounded | `Vt` captures emit SGR from the authoritative cell styles; `Html` escapes user text and carries inline color/attribute styles. `start` is absolute, `lines` is capped at 1000, and `HistoryScreen` keeps at most `STITCH_MUX_SCROLLBACK` history rows (100..20000, default 2000) |
 | 2026-11-20 | Frontends dispatch through one daemon-owned keymap | Terminal and egui translate host keys into canonical `KeySpec`s, ask the same core dispatcher for actions, and send `InvokeAction` for server-side work. Client-only actions (`client.detach`, `help.which-key`, `mode.*`) are handled locally; no frontend parses ANSI or hard-codes a shortcut's effect |
 | 2026-11-20 | Keymap reload is a live operation | `stitch-mux reload-keymap --path FILE` and `STITCH_MUX_KEYMAP` replace bindings without restarting the daemon or GUI; `keymap_changed`/`actions_changed` tell subscribers to refetch. Invalid arguments and unknown actions are rejected before any side effect |
 | 2026-11-20 | Actions are typed schemas, not stringly-typed handlers | `ActionRegistry` owns public action names, titles, categories, and argument specs; `pane.split` requires an `axis` enum and `ratio_bps` so invalid bindings are rejected at load/load-reload time, before execution. Internal `_prefix` stays out of palettes |
@@ -268,7 +269,7 @@ Before marking a task Ready for review:
 | M7 — Program status and activity | **Done** | Bounded OSC 7501 scanner, current-status propagation, activity aggregation, textual GUI attention UI, shell helper, real-PTY replacement test, and a 256-entry local event stream with `session_list`/`program_status_changed`/`activity_changed`/`pane_exited`, monotonic seq, and typed `Busy` on lag; `tests/events.rs` covers the stream and capability gate |
 | M8 — Local automation and agent CLI | **Done** | `run`/`wait`/`send`/`send-keys`/`capture`/`ls --json`/`events --json` with stable IDs and child exit codes; daemon-side `Run` (split placement), `Wait` (pane/session + timeout), authoritative exit state, `pane_created`/`pane_exited`/`program_status_changed`/`activity_changed` events; unscoped subscribers always receive `session_list`; portable agent skill with idempotent install; `tests/automation.rs`, `tests/events.rs`, and `tests/skill.rs` cover the gates |
 | M9 — Actions, keymaps, and command palette | **Done** | Typed action registry and argument validation; canonical key names, JSON keymap merge/reload, modes, sequences, double-prefix passthrough, and bounded hints; capability-gated `ListActions`/`GetKeymap`/`InvokeAction`/`ReloadKeymap` with local change events; CLI `actions`/`get-keymap`/`invoke`/`reload-keymap`; terminal and egui frontends dispatch the same daemon keymap, with palette and mode/hint UI; `tests/actions.rs` plus core/GUI unit tests cover the acceptance gates |
-| M10–M12 — v0.2/v0.3 | Backlog | Only after v0.1 is published |
+| M10 — Terminal fidelity and scrollback/export | In progress | `capture` now emits real `vt` SGR and escaped `html` projections alongside text/cells/json; scrollback is bounded by `STITCH_MUX_SCROLLBACK` (default 2000 history rows) and capture ranges stay capped at 1000 rows; `tests/capture.rs` covers formats and bounds |
 
 Blocked items must be recorded here with owner and next action; an empty
 blocker cell means the task is not blocked.

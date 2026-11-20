@@ -97,10 +97,12 @@ returns a distinct status and does not kill the pane.
 | `text` | Plain text, optionally trimmed/unwrapped |
 | `cells` | Structured rows for tooling |
 | `json` | Rows plus cursor, modes, title, activity, and cwd |
-| `vt` | Terminal control sequences for replay/export |
-| `html` | Styled text for logs and reports |
+| `vt` | SGR-styled terminal text for replay/export |
+| `html` | Escaped, styled `<pre>` rows for logs and reports |
 
-The daemon enforces a maximum range and frame size. Full-screen/alternate-screen
+The daemon enforces a maximum range (1000 rows) and frame size. Scrollback
+history is bounded by `STITCH_MUX_SCROLLBACK` rows (default 2000, clamped to
+100..20000); capture `total_lines` includes the live viewport. Full-screen/alternate-screen
 programs have no scrollback; capture returns the visible screen.
 
 ### 3.3 `send` and `send-keys`

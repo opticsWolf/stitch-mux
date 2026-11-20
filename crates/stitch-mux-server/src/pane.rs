@@ -32,6 +32,9 @@ const UPDATE_QUEUE: usize = 256;
 const READ_CHUNK: usize = 16 * 1024;
 /// Bounded so a child that stops reading cannot grow memory without limit.
 const INPUT_QUEUE: usize = 256;
+/// Default scrollback budget. A child can write forever without growing the
+/// screen model past this many history rows.
+const DEFAULT_SCROLLBACK: usize = 2000;
 
 #[derive(Debug, Error)]
 pub enum PaneError {
@@ -236,7 +239,7 @@ impl PaneRuntime {
             }
         };
         let session = Arc::new(session);
-        let screen = HistoryScreen::new(cols as usize, rows as usize, 2000);
+        let screen = HistoryScreen::new(cols as usize, rows as usize, scrollback_budget());
         let (updates, _) = broadcast::channel(UPDATE_QUEUE);
         let (status_tx, _) = broadcast::channel(16);
         let (input_tx, mut input_rx) = mpsc::channel::<Vec<u8>>(INPUT_QUEUE);
@@ -505,19 +508,11 @@ impl PaneRuntime {
                 wrapped: false,
             })
             .collect();
-        let text = match format {
-            CaptureFormat::Text | CaptureFormat::Vt | CaptureFormat::Html => Some(
-                tuples
-                    .iter()
-                    .map(|line| {
-                        line.iter()
-                            .map(|(text, _, _, _)| text.as_str())
-                            .collect::<String>()
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
-            CaptureFormat::Cells | CaptureFormat::Json => None,
+        let (text, html) = match format {
+            CaptureFormat::Text => (Some(plain_text(&rows)), None),
+            CaptureFormat::Vt => (Some(vt_text(&rows)), None),
+            CaptureFormat::Html => (None, Some(html_text(&rows))),
+            CaptureFormat::Cells | CaptureFormat::Json => (None, None),
         };
         CaptureResponse {
             pane_id: self.id,
@@ -526,7 +521,7 @@ impl PaneRuntime {
             format,
             rows,
             text,
-            html: None,
+            html,
         }
     }
 
@@ -691,6 +686,177 @@ fn changed_rows(
             wrapped: false,
         })
         .collect()
+}
+
+fn scrollback_budget() -> usize {
+    let configured = std::env::var("STITCH_MUX_SCROLLBACK")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_SCROLLBACK);
+    configured.clamp(100, 20_000)
+}
+
+fn plain_text(rows: &[CapturedRow]) -> String {
+    rows.iter()
+        .map(|row| {
+            row.cells
+                .iter()
+                .filter(|cell| !cell.is_continuation())
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn sgr_style(cell: &Cell) -> String {
+    let mut codes = vec![0_u16];
+    push_sgr_color(&mut codes, 38, cell.fg);
+    push_sgr_color(&mut codes, 48, cell.bg);
+    for (flag, code) in [
+        (Attrs::BOLD, 1),
+        (Attrs::DIM, 2),
+        (Attrs::ITALIC, 3),
+        (Attrs::UNDERLINE, 4),
+        (Attrs::BLINK, 5),
+        (Attrs::REVERSE, 7),
+        (Attrs::HIDDEN, 8),
+        (Attrs::STRIKETHROUGH, 9),
+    ] {
+        if cell.attrs.contains(flag) {
+            codes.push(code);
+        }
+    }
+    format!(
+        "\x1b[{}m",
+        codes
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(";")
+    )
+}
+
+fn push_sgr_color(codes: &mut Vec<u16>, base: u16, color: Color) {
+    match color {
+        Color::Default => {}
+        Color::Indexed(value) => codes.extend([base, 5, value.into()]),
+        Color::Rgb(red, green, blue) => {
+            codes.extend([base, 2, red.into(), green.into(), blue.into()]);
+        }
+    }
+}
+
+fn vt_text(rows: &[CapturedRow]) -> String {
+    let mut out = String::new();
+    let mut current = String::new();
+    for (y, row) in rows.iter().enumerate() {
+        if y > 0 {
+            out.push('\n');
+        }
+        for cell in row.cells.iter().filter(|cell| !cell.is_continuation()) {
+            let style = sgr_style(cell);
+            if style != current {
+                out.push_str(&style);
+                current = style;
+            }
+            out.push_str(if cell.text.is_empty() {
+                " "
+            } else {
+                &cell.text
+            });
+        }
+    }
+    if current != "\x1b[0m" {
+        out.push_str("\x1b[0m");
+    }
+    out
+}
+
+fn escape_html(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(character),
+        }
+    }
+    out
+}
+
+fn css_color(color: Color) -> Option<String> {
+    match color {
+        Color::Default => None,
+        Color::Indexed(index) => {
+            const PALETTE: &[&str] = &[
+                "#000000", "#800000", "#008000", "#808000", "#000080", "#800080", "#008080",
+                "#c0c0c0", "#808080", "#ff0000", "#00ff00", "#ffff00", "#0000ff", "#ff00ff",
+                "#00ffff", "#ffffff",
+            ];
+            Some(
+                PALETTE
+                    .get(index as usize)
+                    .copied()
+                    .unwrap_or("#ffffff")
+                    .to_owned(),
+            )
+        }
+        Color::Rgb(red, green, blue) => Some(format!("#{red:02x}{green:02x}{blue:02x}")),
+    }
+}
+
+fn cell_style(cell: &Cell) -> String {
+    let mut styles = Vec::new();
+    if let Some(color) = css_color(cell.fg) {
+        styles.push(format!("color:{color}"));
+    }
+    if let Some(color) = css_color(cell.bg) {
+        styles.push(format!("background-color:{color}"));
+    }
+    if cell.attrs.contains(Attrs::BOLD) {
+        styles.push("font-weight:bold".into());
+    }
+    if cell.attrs.contains(Attrs::ITALIC) {
+        styles.push("font-style:italic".into());
+    }
+    if cell.attrs.contains(Attrs::UNDERLINE) {
+        styles.push("text-decoration:underline".into());
+    }
+    if cell.attrs.contains(Attrs::STRIKETHROUGH) {
+        styles.push("text-decoration:line-through".into());
+    }
+    if cell.attrs.contains(Attrs::REVERSE) {
+        styles.push("filter:invert(1)".into());
+    }
+    if styles.is_empty() {
+        String::new()
+    } else {
+        format!(" style=\"{}\"", styles.join(";"))
+    }
+}
+
+fn html_text(rows: &[CapturedRow]) -> String {
+    let mut out = String::from("<pre class=\"stitch-mux-capture\">");
+    for row in rows {
+        out.push_str("<span class=\"row\">");
+        for cell in row.cells.iter().filter(|cell| !cell.is_continuation()) {
+            out.push_str("<span");
+            out.push_str(&cell_style(cell));
+            out.push('>');
+            out.push_str(&escape_html(if cell.text.is_empty() {
+                " "
+            } else {
+                &cell.text
+            }));
+            out.push_str("</span>");
+        }
+        out.push_str("</span>\n");
+    }
+    out.push_str("</pre>");
+    out
 }
 
 fn cells_from_row(line: &[(String, String, String, u8)]) -> Vec<Cell> {
