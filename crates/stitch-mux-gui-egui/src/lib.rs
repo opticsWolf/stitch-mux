@@ -10,7 +10,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 use stitch_mux_client::{ClientSession, Outbound, SessionView, command, size_from_pixels};
-use stitch_mux_core::{Color, Direction, LayoutNode, PaneId, Rect, Row, Size, SplitAxis};
+use stitch_mux_core::{
+    ActivitySummary, Color, Direction, LayoutNode, PaneId, ProgramState, ProgramStatus,
+    ProgramStatusKind, Rect, Row, Size, SplitAxis,
+};
 use stitch_mux_protocol::{
     Command, CommandRequest, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, InputEvent, KeyCode,
     KeyEvent, KeyEventKind, Layout, PaneGeometry, SessionInfo, ViewMode,
@@ -96,6 +99,10 @@ struct MuxApp {
     show_diagnostics: bool,
     endpoint_text: String,
     log_path_text: String,
+    /// Session picker filter and local unread/attention bookkeeping.
+    session_filter: String,
+    attention_only: bool,
+    seen_activity: HashMap<String, u64>,
 }
 
 impl MuxApp {
@@ -128,6 +135,9 @@ impl MuxApp {
             show_diagnostics: false,
             endpoint_text,
             log_path_text,
+            session_filter: String::new(),
+            attention_only: false,
+            seen_activity: HashMap::new(),
         };
         if !selected.is_empty() {
             app.attach(&selected);
@@ -281,6 +291,9 @@ impl MuxApp {
             Ok(response) => {
                 if response.ok {
                     self.sessions = response.sessions;
+                    let names: std::collections::BTreeSet<_> =
+                        self.sessions.iter().map(|info| info.name.clone()).collect();
+                    self.seen_activity.retain(|name, _| names.contains(name));
                 } else {
                     self.error = response.error.map(|err| err.message);
                 }
@@ -368,6 +381,18 @@ impl eframe::App for MuxApp {
         // the user moves the mouse.
         ui.ctx().request_repaint_after(Duration::from_millis(16));
         let view = receiver.borrow_and_update().clone();
+        // Reading a session's status marks it seen. Unread state is local to
+        // this GUI; the daemon only publishes the current status record.
+        for pane in view.panes.values() {
+            if let Some(status) = pane
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.program_status.as_ref())
+            {
+                let seen = self.seen_activity.entry(view.name.clone()).or_insert(0);
+                *seen = (*seen).max(status.updated_at_unix_ms);
+            }
+        }
         self.maybe_reconnect(&view);
         if view.connection == stitch_mux_client::ConnectionState::Lost {
             self.lost_ui(ui, &view);
@@ -490,20 +515,50 @@ impl MuxApp {
 
     fn picker_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("stitch-mux");
-        if self.sessions.is_empty() {
-            ui.label("No sessions. Run `stitch-mux new -s demo -- sh` first.");
+        ui.horizontal(|ui| {
+            ui.label("Filter");
+            ui.text_edit_singleline(&mut self.session_filter);
+            ui.checkbox(&mut self.attention_only, "Needs attention/new");
+        });
+        let filter = self.session_filter.clone();
+        let attention_only = self.attention_only;
+        let now = now_unix_ms();
+        let sessions = self.sessions.clone();
+        let visible: Vec<_> = sessions
+            .iter()
+            .filter(|info| session_matches(info, &filter, attention_only, now, &self.seen_activity))
+            .cloned()
+            .collect();
+        if visible.is_empty() {
+            ui.label("No matching sessions. Run `stitch-mux new -s demo -- sh` first.");
         } else {
             ui.label("Pick a session:");
-            for info in self.sessions.clone() {
+            for info in visible {
                 let panes = info
                     .panes
                     .iter()
-                    .map(|pane| format!("{} ({}) {}x{}", pane.title, pane.id, pane.cols, pane.rows))
+                    .map(|pane| {
+                        format!(
+                            "{}{} ({}) {}x{}",
+                            status_badge(pane.program_status.as_ref()),
+                            pane.title,
+                            pane.id,
+                            pane.cols,
+                            pane.rows
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
-                let label =
-                    session_label(&info, self.lost_session.as_deref(), now_unix_ms(), &panes);
+                let unread = info.last_activity_unix_ms
+                    > self
+                        .seen_activity
+                        .get(&info.name)
+                        .copied()
+                        .unwrap_or(info.last_activity_unix_ms);
+                let label = session_label(&info, self.lost_session.as_deref(), now, unread, &panes);
                 if ui.button(label).clicked() {
+                    self.seen_activity
+                        .insert(info.name.clone(), info.last_activity_unix_ms);
                     self.attach(&info.name);
                 }
             }
@@ -711,7 +766,11 @@ fn draw_panes(
         }
         let title_width = (button_x - title_rect.min.x - 4.0).max(0.0);
         let state = scroll.entry(pane_id).or_default();
-        let mut title = format!("{} ({})", geometry.title, pane_id);
+        let status = view
+            .pane(pane_id)
+            .and_then(|pane| pane.snapshot.as_ref())
+            .and_then(|snapshot| snapshot.program_status.as_ref());
+        let mut title = format!("{}{} ({})", status_badge(status), geometry.title, pane_id);
         if state.offset > 0 {
             title.push_str(&format!(" ↑{}", state.offset));
         }
@@ -959,14 +1018,14 @@ fn cell_rect(grid: egui::Rect, cell: Rect, cell_w: f32, cell_h: f32) -> egui::Re
 fn status_text(view: &SessionView) -> String {
     let bell = view.panes.values().any(|pane| pane.bell);
     format!(
-        "session: {} {:?} {}x{} r{} clients: {}  working: {}  bell: {}",
+        "session: {} {:?} {}x{} r{} clients: {}  {}  bell: {}",
         view.name,
         view.connection,
         view.size.cols,
         view.size.rows,
         view.layout_revision,
         view.attached_clients,
-        view.activity.working,
+        activity_label(&view.activity),
         bell
     )
 }
@@ -986,10 +1045,63 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn status_badge(status: Option<&ProgramStatus>) -> &'static str {
+    match status.map(|status| (status.state, status.kind)) {
+        Some((ProgramState::Error, _)) => "[!]",
+        Some((ProgramState::Blocked, Some(ProgramStatusKind::Question))) => "[?]",
+        Some((ProgramState::Blocked, Some(ProgramStatusKind::Permission))) => "[key]",
+        Some((ProgramState::Blocked, Some(ProgramStatusKind::Auth))) => "[auth]",
+        Some((ProgramState::Blocked, None)) => "[wait]",
+        Some((ProgramState::Working, _)) => "[~]",
+        Some((ProgramState::Done, _)) => "[ok]",
+        Some((ProgramState::Idle, _)) | None => "",
+    }
+}
+
+fn activity_label(activity: &ActivitySummary) -> String {
+    format!(
+        "working {} blocked {} done {} error {}",
+        activity.working, activity.blocked, activity.done, activity.error
+    )
+}
+
+fn session_matches(
+    info: &SessionInfo,
+    filter: &str,
+    attention_only: bool,
+    now_ms: u64,
+    seen: &HashMap<String, u64>,
+) -> bool {
+    let query = filter.trim().to_ascii_lowercase();
+    let text_match = query.is_empty()
+        || info.name.to_ascii_lowercase().contains(&query)
+        || info
+            .panes
+            .iter()
+            .any(|pane| pane.title.to_ascii_lowercase().contains(&query));
+    if !text_match {
+        return false;
+    }
+    if !attention_only {
+        return true;
+    }
+    let unread = info.last_activity_unix_ms
+        > seen
+            .get(&info.name)
+            .copied()
+            .unwrap_or(info.last_activity_unix_ms);
+    info.activity.working > 0
+        || info.activity.blocked > 0
+        || info.activity.error > 0
+        || unread
+        || age_label_at(info.last_activity_unix_ms, now_ms) == "just now"
+}
+
 fn session_label(
     info: &SessionInfo,
     lost_session: Option<&str>,
     now_ms: u64,
+    unread: bool,
     panes: &str,
 ) -> String {
     let lost = if lost_session == Some(info.name.as_str()) {
@@ -997,15 +1109,19 @@ fn session_label(
     } else {
         ""
     };
+    let new = if unread { " [new]" } else { "" };
     format!(
-        "{}{} — {}x{}, {} pane(s), {} client(s), working {}\nlast activity {}\n{}",
+        "{}{}{} — {}x{}, {} pane(s), {} client(s), {}
+last activity {}
+{}",
         info.name,
         lost,
+        new,
         info.cols,
         info.rows,
         info.pane_count,
         info.attached_clients,
-        info.activity.working,
+        activity_label(&info.activity),
         age_label_at(info.last_activity_unix_ms, now_ms),
         panes
     )
@@ -1357,7 +1473,7 @@ mod tests {
 
     #[test]
     fn picker_marks_only_the_lost_session_and_shows_activity() {
-        let label = session_label(&info("demo"), Some("demo"), 181_000, "vim (7) 60x38");
+        let label = session_label(&info("demo"), Some("demo"), 181_000, false, "vim (7) 60x38");
         assert!(label.contains("demo [last session lost]"), "{label}");
         assert!(
             label.contains("120x40, 2 pane(s), 3 client(s), working 1"),
@@ -1366,8 +1482,67 @@ mod tests {
         assert!(label.contains("last activity 1m ago"), "{label}");
         assert!(label.contains("vim (7) 60x38"), "{label}");
 
-        let other = session_label(&info("other"), Some("demo"), 181_000, "");
+        let other = session_label(&info("other"), Some("demo"), 181_000, false, "");
         assert!(!other.contains("last session lost"), "{other}");
+    }
+
+    #[test]
+    fn status_badges_are_textual_and_distinguish_attention_states() {
+        let status = |state, kind| {
+            Some(ProgramStatus {
+                state,
+                kind,
+                ..ProgramStatus::default()
+            })
+        };
+        assert_eq!(status_badge(None), "");
+        assert_eq!(
+            status_badge(status(ProgramState::Working, None).as_ref()),
+            "[~]"
+        );
+        assert_eq!(
+            status_badge(status(ProgramState::Done, None).as_ref()),
+            "[ok]"
+        );
+        assert_eq!(
+            status_badge(status(ProgramState::Error, None).as_ref()),
+            "[!]"
+        );
+        assert_eq!(
+            status_badge(status(ProgramState::Blocked, Some(ProgramStatusKind::Question)).as_ref(),),
+            "[?]"
+        );
+        assert_eq!(
+            status_badge(
+                status(ProgramState::Blocked, Some(ProgramStatusKind::Permission)).as_ref(),
+            ),
+            "[key]"
+        );
+        assert_eq!(
+            activity_label(&ActivitySummary {
+                working: 1,
+                blocked: 2,
+                error: 3,
+                ..ActivitySummary::default()
+            }),
+            "working 1 blocked 2 done 0 error 3"
+        );
+    }
+
+    #[test]
+    fn picker_filters_by_name_and_attention() {
+        let info = info("demo");
+        assert!(session_matches(&info, "dem", false, 0, &HashMap::new()));
+        assert!(!session_matches(&info, "other", false, 0, &HashMap::new()));
+        assert!(session_matches(&info, "", true, 0, &HashMap::new()));
+        let mut quiet = info.clone();
+        quiet.activity = ActivitySummary::default();
+        quiet.last_activity_unix_ms = 0;
+        let mut seen = HashMap::new();
+        seen.insert("demo".to_owned(), 10_u64);
+        assert!(!session_matches(&quiet, "", true, 60_000, &seen));
+        let label = session_label(&quiet, None, 60_000, true, "");
+        assert!(label.contains("[new]"), "{label}");
     }
 
     #[test]
@@ -1391,7 +1566,10 @@ mod tests {
         assert!(text.contains("session: demo"), "{text}");
         assert!(text.contains("168x66 r307"), "{text}");
         assert!(text.contains("clients: 1"), "{text}");
-        assert!(text.contains("working: 0"), "{text}");
+        assert!(
+            text.contains("working 0 blocked 0 done 0 error 0"),
+            "{text}"
+        );
         assert!(text.contains("bell: false"), "{text}");
         assert!(!text.contains('\n'));
     }

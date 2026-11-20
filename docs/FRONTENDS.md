@@ -351,8 +351,11 @@ painter, the architecture is working.
 ## 9. Implemented adapter status
 
 - egui: reference structured GUI from M1–M3. M6 adds F1/status-bar diagnostics
-  (endpoint, connection state, log path, session list) and a shared file log;
-  the adapter still consumes only `SessionView` and the toolkit-neutral client.
+  (endpoint, connection state, log path, session list) and a shared file log.
+  M7 adds textual per-pane status badges, all activity counts in the status bar,
+  a session-picker filter with a needs-attention/new toggle, and local
+  unread/seen state. The adapter still consumes only `SessionView` and the
+  toolkit-neutral client.
 - ANSI terminal: compatibility projection from M4; server-composed frames.
 - PySide6: second-toolkit proof from M5. The Rust SDK publishes batched
   `SessionView` dicts to Qt; see [PYTHON.md](PYTHON.md).

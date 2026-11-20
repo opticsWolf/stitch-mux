@@ -11,7 +11,7 @@ parity.
 | Per-client focus | Yes | Yes (`Ctrl-]` arrows) | Yes (click/focus API) | Geometry only |
 | Attach/detach/reattach | Yes | Yes | Yes | n/a (spike) |
 | Resize via smallest-client policy | Yes | Yes | Yes | n/a |
-| Activity/status hooks | Status bar | Status in composed border | Status label | n/a |
+| Activity/status hooks | Text badges + picker filter + status bar | Status in composed border | Status label | n/a |
 | Command palette | Status-bar buttons | `Ctrl-]` prefixes | `Ctrl+P` stub | n/a |
 | Native selection/copy | Planned v0.2 | n/a | Planned v0.2 | n/a |
 | OSC 8 links | Planned v0.2 | Planned v0.2 | Planned v0.2 | n/a |
