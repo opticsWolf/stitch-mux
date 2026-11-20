@@ -1,15 +1,23 @@
 //! Server-side primitives for the M8 local automation CLI.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use stitch_mux_client::command;
 use stitch_mux_core::CaptureFormat;
 use stitch_mux_protocol::{Command, Endpoint, RunPlacement, WaitTarget};
 
+static ENDPOINT_SEQ: AtomicU64 = AtomicU64::new(0);
+
 fn test_endpoint(label: &str) -> (Endpoint, Option<PathBuf>) {
+    // Three tests in this file start daemons in parallel. A clock-only suffix
+    // can collide on coarse-grained platform clocks, so include the process
+    // and a monotonically increasing counter as well.
     let unique = format!(
-        "m8a{label}{}",
+        "m8a{label}{}-{}-{}",
+        std::process::id(),
+        ENDPOINT_SEQ.fetch_add(1, Ordering::Relaxed),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")

@@ -174,6 +174,7 @@ Before marking a task Ready for review:
 
 | Date | Decision | Context | Consequence |
 |---|---|---|---|
+| 2026-11-20 | Parallel test endpoints include a process and counter suffix | The three automation tests derive Unix socket paths from a clock-only suffix; coarse clock granularity let two tests bind the same path and fail with `AlreadyExists`. Their helper now includes `std::process::id()` and an atomic counter alongside the clock value, so each test gets a distinct local endpoint |
 | 2026-11-20 | The 30-minute soak is an explicit operator gate, now closed | CI runs the 12-cycle detach/abort form on all three platforms; a 30-minute run would slow every PR and consume a local shell for half an hour. The operator run used `STITCH_MUX_SOAK_MS=1800000` at `7659f52`, completed 1686 cycles in `1800.6803842s`, and exited `0`. Publication still requires separate explicit approval |
 | 2026-11-18 | Use tokio's Unix socket / Windows named pipe instead of `interprocess` | Async endpoint already in the runtime; one abstraction over both platforms | `interprocess` remains a documented fallback; no blocking bridge needed |
 | 2026-11-18 | `Render` wires a 13-byte binary prefix plus raw ANSI, not MessagePack | Keeps ANSI bytes unescaped while carrying `seq`/size/full | Decoded DTO stays in `dto::Render`; golden fixture records the prefix |
