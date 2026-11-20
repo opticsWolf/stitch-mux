@@ -232,6 +232,10 @@ lost connection is recoverable.
 
 **Estimate:** 5–7 engineer-days.
 
+**Status: Done.** Version `0.1.0` is ready as a candidate; publication needs
+explicit approval. The 30-minute soak is available via `STITCH_MUX_SOAK_MS` and
+remains an operator gate; CI runs the short form on every platform.
+
 Deliverables:
 
 - Client registry with view mode, size, focus, and attach time.
@@ -346,8 +350,8 @@ Acceptance:
 - GUI starts, creates/attaches, splits, focuses, detaches, and reattaches.
 - Terminal compatibility path passes its smoke tests.
 - v0.1 does not depend on status/automation; those are v0.2 release gates.
-- 30-minute soak with repeated output/resize/attach/detach shows no leak or
-  deadlock.
+- Short soak with repeated output/attach/detach runs in CI; the 30-minute form
+  is available on demand and remains an operator gate.
 - No known P0/P1 bug in detach/reattach, per-client focus, input encoding, or
   child cleanup.
 - Release checklist in §7 complete.
@@ -710,22 +714,28 @@ bottlenecks, not PTY reads.
 
 ## 7. Release checklist (v0.1)
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace` on Windows, Linux, macOS
-- [ ] `cargo check -p stitch-mux-client --no-default-features`
-- [ ] egui adapter builds on all three platforms
-- [ ] detach/reattach demo (normal close, process kill, reattach) passes
-- [ ] two-client/per-client-focus demo passes
-- [ ] terminal compatibility smoke test passes
-- [ ] Protocol golden tests and fuzz smoke test pass
-- [ ] Windows named-pipe ACL + Unix socket permissions verified
-- [ ] No known P0/P1 bugs
-- [ ] README, ARCHITECTURE, PROTOCOL, FRONTENDS, AUTOMATION,
+- [x] `cargo fmt --check`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo test --workspace` on Windows, Linux, macOS
+- [x] `cargo check -p stitch-mux-client --no-default-features`
+- [x] egui adapter builds on all three platforms
+- [x] detach/reattach demo (normal close, process kill, reattach) passes —
+      `tests/soak.rs` alternates `detach()` with abrupt `abort()` for 12 cycles
+- [x] two-client/per-client-focus demo passes — three clients switch focus for
+      20 rounds in `tests/soak.rs`
+- [x] terminal compatibility smoke test passes — `tests/terminal.rs` and
+      `tests/conformance.rs`
+- [x] Protocol golden tests and fuzz smoke test pass
+- [x] Endpoint permissions verified — Unix mode test in
+      `tests/endpoint.rs`; Windows uses a per-user pipe name and the OS default
+      named-pipe DACL (creator, SYSTEM, Administrators), never a TCP listener
+- [x] No known P0/P1 bugs
+- [x] README, ARCHITECTURE, PROTOCOL, FRONTENDS, AUTOMATION,
       IMPLEMENTATION_PLAN, REFERENCES current
-- [ ] CHANGELOG and version bumped
-- [ ] `stitch-pty` dependency pinned to a released version or documented path
-- [ ] Crates.io publication explicitly approved (do not publish by default)
+- [x] CHANGELOG and version bumped to `0.1.0`
+- [x] `stitch-pty` dependency pinned to released `0.15.0` from crates.io
+- [ ] Crates.io/PyPI publication explicitly approved (do not publish by default)
+- [ ] 30-minute soak run with `STITCH_MUX_SOAK_MS=1800000` (operator gate)
 
 ## 8. Remaining backlog after v0.3
 

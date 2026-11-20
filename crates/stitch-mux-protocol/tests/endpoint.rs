@@ -58,3 +58,30 @@ async fn concurrent_connects_do_not_exhaust_the_endpoint() {
         .expect("accept task");
     assert_eq!(streams.len(), CLIENTS);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_endpoint_permissions_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let endpoint = endpoint("perm");
+    let Endpoint::Unix(path) = &endpoint else {
+        panic!("unix endpoint");
+    };
+    let listener = endpoint.bind().await.expect("bind");
+    let parent = path.parent().expect("socket parent");
+    let dir_mode = std::fs::metadata(parent)
+        .expect("parent metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    let socket_mode = std::fs::metadata(path)
+        .expect("socket metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(dir_mode, 0o700, "socket directory must be owner-only");
+    assert_eq!(socket_mode, 0o600, "socket must be owner-only");
+    drop(listener);
+    let _ = std::fs::remove_file(path);
+}

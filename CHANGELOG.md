@@ -1,0 +1,50 @@
+# Changelog
+
+All notable changes to stitch-mux are documented here. The project is local-only
+and single-user; versions follow the workspace version in `Cargo.toml` and the
+Python package version in `pyproject.toml`.
+
+## 0.1.0 (v0.1 candidate, 2026-11-20)
+
+Not published to crates.io or PyPI. Publication requires explicit approval.
+
+### Added
+
+- Owner-scoped local IPC: Unix sockets (`0700` directory, `0600` socket) and
+  Windows named pipes with a per-user name. No TCP listener and no accounts.
+- Daemon-authoritative sessions, panes, tiled layout, per-client focus, zoom,
+  bounded snapshot/delta streams, captures, and typed errors.
+- Detach/reattach: children and pane contents survive GUI close, GUI process
+  kill, and client crashes. Lost sessions are never silently recreated.
+- Structured toolkit-neutral client (`stitch-mux-client`) plus a disposable egui
+  reference GUI, an ANSI terminal client, and a PyO3/PySide6 adapter.
+- Server-composed ANSI projection for terminal clients; clients never parse the
+  screen or encode keys.
+- GUI diagnostics (F1 or status-bar button): endpoint, connection state, log
+  path, and a fresh daemon session list. A shared file log is available to every
+  process via `STITCH_MUX_LOG` or the platform state directory.
+- Deterministic protocol fuzz smoke, golden frames, concurrent layout/pane-ID
+  tests, a 10 MiB two-client stress with a stalled-client `Busy` proof, a
+  12-cycle crash/clean-detach soak, and a three-client focus stress. All run in
+  three-platform CI.
+
+### Fixed during hardening
+
+- Concurrent splits no longer drop subtrees; pane IDs are process-wide.
+- Named-pipe bursts no longer fail with `ERROR_PIPE_BUSY`.
+- Control resizes defer to attached clients; pane input, frame queues, and
+  layout decoding are bounded.
+- Coalescer snapshots cannot roll back newer state; viewport diffs and
+  per-client delta sequences survive scroll and reattach.
+- Modified keys, ANSI colors, nested split axes, pane buttons, status geometry,
+  and live repaint are correct in the egui and Qt adapters.
+- Client abort closes both socket halves, so a killed frontend detaches instead
+  of leaving a stale registry entry.
+
+### Known limitations
+
+- The GUI's wheel history is a bounded local cache; a burst that outpaces the UI
+  can leave gaps until a server-side viewport/scrollback protocol lands.
+- Session restoration after a daemon crash is explicitly out of scope.
+- The 30-minute soak is opt-in with `STITCH_MUX_SOAK_MS=1800000`; CI runs the
+  short form on every platform.

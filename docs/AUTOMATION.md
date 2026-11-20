@@ -8,6 +8,10 @@ or a hosted agent service.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the daemon model and
 [PROTOCOL.md](PROTOCOL.md) for the control messages.
 
+**v0.1 status:** the CLI/control-command subset and file log are implemented.
+The event stream, named actions/keymaps, and agent skill below are v0.2 design;
+they are not v0.1 release gates.
+
 ## 1. What the automation surface is for
 
 - Start a command in a new pane or split and wait for its exit status.

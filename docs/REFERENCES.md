@@ -1,5 +1,9 @@
 # Reference Evaluation
 
+The v0.1 implementation follows these conclusions for local, single-user
+sessions. Remote/multi-user features described below were evaluated and
+excluded by the scope decision in [ARCHITECTURE.md](ARCHITECTURE.md).
+
 Survey date: **2026-11-15**. Versions observed during the survey:
 
 | Project | Version / source |

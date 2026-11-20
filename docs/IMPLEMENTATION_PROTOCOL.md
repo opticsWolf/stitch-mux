@@ -6,11 +6,13 @@ This is the **operating protocol** for turning the design in
 document: update it in the **same commit** as the work it describes. It is not
 the wire protocol; that contract lives in [PROTOCOL.md](PROTOCOL.md).
 
-Last updated: **2026-11-19** — M0–M5 complete, M6 ready. Two post-M5 review
-passes fixed split axes, viewport-delta drift, per-client delta seeding, named
-ANSI colors, egui/Qt input and scrolling, layout and pane-ID races, Windows
-endpoint concurrency, unbounded frame/input queues, and unbounded layout
-decoding.
+Last updated: **2026-11-20** — M0–M6 complete; version `0.1.0`. Two post-M5
+review passes fixed split axes, viewport-delta drift, per-client delta seeding,
+named ANSI colors, egui/Qt input and scrolling, layout and pane-ID races,
+Windows endpoint concurrency, unbounded frame/input queues, and unbounded layout
+decoding. M6 added deterministic fuzz smoke, a detach/reattach soak, local
+diagnostics and a shared log file. Publication is not performed without explicit
+approval.
 
 ## 1. Standing rules
 
@@ -247,7 +249,7 @@ Before marking a task Ready for review:
 | M4 — terminal ANSI compatibility | **Done** | 82 tests on Unix / 79 on Windows plus one release-only 10 MiB stress; bounded server compositor emits full and diff ANSI frames, terminal adapter writes them without parsing or key encoding, real-endpoint test attaches terminal + structured clients and asserts identical layout geometry/output/detach, deterministic conformance corpus covers bash/zsh, vim, less, htop/top and git log patterns, and CLI `attach` replaces the M4 stub; main CI `44598420738` green on all nine jobs |
 | M5 — Qt/PySide6 + optional GPUI | **Done** | 83 tests on Unix / 80 on Windows plus 10 Python tests (including a real-daemon attach/input/resize/detach/reattach SDK test and offscreen Qt widget tests) and one release-only 10 MiB stress; PySide6 paints style runs from the same `SessionView`, maps keys/IME/mouse, shows activity and a `Ctrl+P` command-palette stub, and requires no protocol change; GPUI stays a feature-gated boundary spike; CI `44607326689` green on all ten jobs |
 | Post-M5 review hardening | **Done** | `tests/concurrency.rs` covers concurrent splits, pane-ID uniqueness, the control-resize policy, and four simultaneous attaches; `tests/endpoint.rs` opens six concurrent connections; `tests/viewport.rs` covers scroll drift and reattach deltas; layout decoding is depth-limited; frame and pane-input queues are bounded; the Qt adapter has modified-key, clipping, and wheel tests; CI `44635966975` green on all ten jobs |
-| M6 — hardening / v0.1 | Backlog | Release checklist in `IMPLEMENTATION_PLAN.md` §7 |
+| M6 — hardening / v0.1 | **Done** | Deterministic decoder fuzz (`tests/fuzz.rs`), 12-cycle crash/clean-detach soak plus 20-round three-client focus test (`tests/soak.rs`, `STITCH_MUX_SOAK_MS` extends to 30 minutes), 10 MiB stress, golden frames, three-platform CI, and local diagnostics with a file log; version `0.1.0`; main CI `44688437812` green on all ten jobs including the soak. Publication approval and the 30-minute manual soak remain explicit operator gates |
 | M7–M12 — v0.2/v0.3 | Backlog | Only after v0.1 is published |
 
 Blocked items must be recorded here with owner and next action; an empty

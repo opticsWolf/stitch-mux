@@ -3379,7 +3379,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stitch-mux"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "clap",
  "serde_json",
@@ -3395,7 +3395,7 @@ dependencies = [
 
 [[package]]
 name = "stitch-mux-client"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "stitch-mux-core",
  "stitch-mux-protocol",
@@ -3405,7 +3405,7 @@ dependencies = [
 
 [[package]]
 name = "stitch-mux-core"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "rmp-serde",
  "serde",
@@ -3413,7 +3413,7 @@ dependencies = [
 
 [[package]]
 name = "stitch-mux-gui-egui"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
@@ -3426,7 +3426,7 @@ dependencies = [
 
 [[package]]
 name = "stitch-mux-gui-gpui"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "stitch-mux-client",
  "stitch-mux-core",
@@ -3434,7 +3434,7 @@ dependencies = [
 
 [[package]]
 name = "stitch-mux-protocol"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "libc",
  "rmp-serde",
@@ -3450,7 +3450,7 @@ dependencies = [
 
 [[package]]
 name = "stitch-mux-py"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "pyo3",
  "pythonize",
@@ -3464,7 +3464,7 @@ dependencies = [
 
 [[package]]
 name = "stitch-mux-server"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "stitch-mux-client",
  "stitch-mux-core",
@@ -3478,7 +3478,7 @@ dependencies = [
 
 [[package]]
 name = "stitch-mux-terminal"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "crossterm",
  "stitch-mux-client",

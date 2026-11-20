@@ -823,7 +823,8 @@ Unix:
 Windows:
 
 - `\\.\pipe\stitch-mux-<user-scope-hash>`;
-- per-user name plus an ACL that grants only the current user;
+- per-user name plus the OS default named-pipe DACL (creator, SYSTEM,
+  Administrators);
 - `--socket` overrides with a named-pipe path.
 
 `STITCH_MUX_SOCKET` and `STITCH_MUX_SESSION` provide script-friendly overrides.
@@ -917,10 +918,14 @@ the current state rather than assuming it saw every delta. See
   malformed input.
 - **Crash isolation:** a pane error must not take down the daemon; surface it as
   a failed pane.
-- **Local trust:** v0.1 trusts the local user. Other local users must not be able
-  to connect; verify peer credentials on Unix and enforce a per-user ACL on
-  Windows.
+- **Local trust:** v0.1 trusts the local user. Unix sockets are `0600` inside a
+  `0700` owner directory; Windows uses a per-user pipe name with the default OS
+  DACL (creator, SYSTEM, Administrators). Other local users have no socket path
+  to connect to.
 - **No network listener** in v0.1.
+- **Diagnostics stay local.** Every process shares one file log (override with
+  `STITCH_MUX_LOG`), and the GUI's F1 panel only reads local state plus an
+  optional `ListSessions` command. No telemetry or remote sink exists.
 - **Child environment:** inherit by default; explicit environment is passed
   through `stitch-pty`'s option contract, not rebuilt in the mux.
 

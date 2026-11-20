@@ -2,15 +2,18 @@
 
 A terminal multiplexer built on top of [`stitch-pty`](../stitch-pty).
 
-> **Status: M5 Python/Qt adapter implemented.** The daemon keeps a client
-> registry, sizes sessions to the smallest attached client, bounds and coalesces
-> each client's updates, and exposes `ListClients`, `DetachClient`, session
-> rename, and typed shutdown. The reference GUI retries lost sessions with
-> backoff and never silently recreates them. A 10 MiB two-client stress test,
-> a stalled-client `Busy` proof, terminal DA/DSR replies, and GUI backoff/picker
-> tests run in CI. The terminal frontend writes server-composed ANSI frames and
-> shares sessions, layout, and focus with the GUI. A PyO3 SDK and PySide6 adapter
-> prove the frontend boundary with a second toolkit, with no protocol changes.
+> **Status: v0.1 candidate (`0.1.0`).** The daemon keeps a client registry,
+> sizes sessions to the smallest attached client, bounds and coalesces each
+> client's updates, and exposes `ListClients`, `DetachClient`, session rename,
+> and typed shutdown. The reference GUI retries lost sessions with backoff and
+> never silently recreates them. A 10 MiB two-client stress test, a
+> stalled-client `Busy` proof, deterministic decoder fuzzing, a crash/clean-detach
+> soak, and a three-client focus stress run in CI on Linux, macOS, and Windows.
+> The terminal frontend writes server-composed ANSI frames and shares sessions,
+> layout, and focus with the GUI. A PyO3 SDK and PySide6 adapter prove the
+> frontend boundary with a second toolkit, with no protocol changes. Local
+> diagnostics and a file log are built in. Publication is not performed without
+> explicit approval.
 
 ## Why another multiplexer?
 
@@ -98,7 +101,7 @@ Remote/multi-user features from Rex are deliberately excluded: SSH, Tailscale,
 VPN/HTTP listeners, personal/shared/login server modes, PAM/accounts, remote
 hosts, port forwarding, the web client, and the iOS client.
 
-## Planned repository layout
+## Repository layout
 
 ```text
 stitch-mux/
@@ -112,7 +115,7 @@ stitch-mux/
 │   ├── IMPLEMENTATION_PLAN.md # milestones, tasks, acceptance criteria
 │   ├── IMPLEMENTATION_PROTOCOL.md # living execution rules and decision log
 │   └── REFERENCES.md          # rmux/Zellij/WezTerm/Rex evaluation
-├── agent-skill/               # local agent instructions and hooks (later)
+├── agent-skill/               # local agent instructions and hooks (v0.2)
 └── crates/
     ├── stitch-mux-core/       # IDs, layout, frame/cell model
     ├── stitch-mux-protocol/   # framing, messages, capabilities
@@ -150,12 +153,14 @@ picker. In the GUI, click a pane to focus it, use `Ctrl+Arrow` to move focus,
 drag a splitter to change its ratio, and use each pane's title bar for
 left/right (`LR`), top/bottom (`TB`), close (`X`), and zoom (`Z`/`U`). The top
 status bar shows session size, revision, clients, activity, and bell state;
-`Detach` leaves the session alive. Ctrl-C, Alt-key, and punctuation keys are
-sent as semantic modified keys, and the pane keeps repainting while output
-arrives. Wheel-up shows a bounded local scrollback cache; the daemon still owns
-authoritative scrollback, so a burst that outpaces the UI can leave gaps until
-the viewport protocol lands. The egui adapter is a disposable reference; the
-protocol and client state are toolkit-neutral.
+`Detach` leaves the session alive. `F1` or the `Diagnostics` button opens a
+local panel with the endpoint in use, connection state, log path, and a fresh
+session list. Ctrl-C, Alt-key, and punctuation keys are sent as semantic modified
+keys, and the pane keeps repainting while output arrives. Wheel-up shows a
+bounded local scrollback cache; the daemon still owns authoritative scrollback,
+so a burst that outpaces the UI can leave gaps until the viewport protocol lands.
+The egui adapter is a disposable reference; the protocol and client state are
+toolkit-neutral.
 
 The terminal view can be open at the same time as the GUI. It enters the
 alternate screen and restores it on detach. `Ctrl-]` is the local prefix:
@@ -171,11 +176,30 @@ uv sync --extra test
 uv run python -m stitch_mux.qt --session demo
 ```
 
+### Logs and diagnostics
+
+All processes write to a local file: `$XDG_STATE_HOME/stitch-mux/stitch-mux.log`
+on Unix (falling back to `$HOME/.local/state` and then the temp directory),
+`%LOCALAPPDATA%/stitch-mux/stitch-mux.log` on Windows. Set `STITCH_MUX_LOG` to
+override the path. No log events are sent over the network. CLI failures print
+the log path; the GUI diagnostics panel shows it and the active endpoint.
+
+### Verification
+
+`cargo test --workspace` runs the unit and real-PTY integration suites. The
+release stress job additionally runs the 10 MiB flood and the short
+detach/reattach soak on three platforms. For the 30-minute acceptance soak:
+
+```sh
+STITCH_MUX_SOAK_MS=1800000 cargo test --release -p stitch-mux-server --test soak -- --ignored
+```
+
 See [Python SDK](docs/PYTHON.md), [parity](docs/PARITY.md), and the
 [GPUI spike](docs/GPUI-SPIKE.md) for scope and licensing notes.
 
 ## Documentation map
 
+- [Changelog](CHANGELOG.md) — v0.1.0 feature and hardening history.
 - [Architecture](docs/ARCHITECTURE.md) — the design and the reasoning.
 - [Protocol](docs/PROTOCOL.md) — the local wire protocol.
 - [Frontends](docs/FRONTENDS.md) — egui, GPUI, and Qt/PySide6 adapter design.

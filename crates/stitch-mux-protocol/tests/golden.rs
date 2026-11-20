@@ -123,7 +123,7 @@ fn all_fixtures() -> Vec<(MessageKind, String)> {
                 MessageKind::HelloAck,
                 &HelloAck {
                     protocol_version: 1,
-                    server_version: "0.1.0-dev".into(),
+                    server_version: "0.1.0".into(),
                     capabilities: 3,
                     sessions: 2,
                 },
@@ -458,7 +458,7 @@ const EXPECTED: [(u8, &str); 27] = [
         1,
         "534d010001001e0000009901a6676f6c64656ea4696e7374aa737472756374757265645018000001",
     ),
-    (2, "534d010002000e0000009401a9302e312e302d6465760302"),
+    (2, "534d010002000a0000009401a5302e312e300302"),
     (3, "534d010003000700000092a464656d6fc2"),
     (
         4,

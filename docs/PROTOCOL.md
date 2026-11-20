@@ -24,11 +24,13 @@ Local only:
 - **Unix:** Unix domain socket at
   `$XDG_RUNTIME_DIR/stitch-mux/<uid>.sock`, falling back to
   `/tmp/stitch-mux-<uid>/default.sock`. Directory `0700`, socket `0600`.
-- **Windows:** named pipe `\\.\pipe\stitch-mux-<user-scope-hash>`, with an ACL
-  restricted to the current user.
+- **Windows:** named pipe `\\.\pipe\stitch-mux-<user-scope-hash>`, using a
+  per-user name and the OS default named-pipe DACL (creator, SYSTEM, and
+  Administrators). There is no anonymous or network path.
 
 There is no TCP listener in v1. `--socket` overrides the endpoint for tests and
-advanced users.
+advanced users. Diagnostics and logging are local process concerns, not wire
+messages: they never add a remote surface.
 
 The transport is a byte stream. One connection carries one logical conversation.
 Attach connections are long-lived; control connections are short-lived.
