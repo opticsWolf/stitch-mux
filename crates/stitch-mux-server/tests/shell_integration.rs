@@ -78,6 +78,11 @@ async fn shell_marks_and_cwd_survive_the_snapshot_pipeline() {
                         .as_ref()
                         .is_some_and(|marks| !marks.prompt_rows.is_empty())
                     && snapshot.total_lines > 0
+                    && snapshot.cells.iter().any(|row| {
+                        row.cells
+                            .iter()
+                            .any(|cell| cell.link.as_deref() == Some("https://example.com/docs"))
+                    })
             }) {
                 return;
             }
@@ -110,6 +115,14 @@ async fn shell_marks_and_cwd_survive_the_snapshot_pipeline() {
             .all(|row| *row >= marks.prompt_rows[0])
     );
     assert!(snapshot.total_lines >= snapshot.scrollback_len);
+    assert!(
+        snapshot.cells.iter().any(|row| {
+            row.cells
+                .iter()
+                .any(|cell| cell.link.as_deref() == Some("https://example.com/docs"))
+        }),
+        "OSC 8 URI was not attached to any cell"
+    );
 
     client.detach().await;
     server.abort();

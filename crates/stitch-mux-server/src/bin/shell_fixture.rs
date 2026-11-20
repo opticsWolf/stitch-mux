@@ -19,6 +19,10 @@ fn main() {
     osc("133;C");
     print!("hi\r\n");
     osc("133;D;0");
+    // OSC 8 hyperlink metadata; the text itself is ordinary screen output.
+    osc("8;;https://example.com/docs");
+    print!("docs");
+    osc("8;;");
     loop {
         std::thread::sleep(Duration::from_secs(60));
     }

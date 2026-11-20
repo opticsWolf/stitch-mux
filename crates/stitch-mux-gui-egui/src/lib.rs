@@ -274,6 +274,8 @@ struct MuxApp {
     key_hints: Vec<String>,
     show_palette: bool,
     palette_filter: String,
+    /// A custom-scheme OSC 8 URI awaiting explicit user confirmation.
+    pending_link: Option<String>,
 }
 
 impl MuxApp {
@@ -316,6 +318,7 @@ impl MuxApp {
             key_hints: Vec::new(),
             show_palette: false,
             palette_filter: String::new(),
+            pending_link: None,
         };
         if !selected.is_empty() {
             app.attach(&selected);
@@ -635,6 +638,13 @@ impl eframe::App for MuxApp {
         }
         self.sync_scroll(&view);
         let actions = draw_panes(ui, &view, grid, &mut self.pane_scroll);
+        if let Some(uri) = actions.link {
+            if safe_link_scheme(&uri) {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(uri));
+            } else {
+                self.pending_link = Some(uri);
+            }
+        }
         for action in actions.panes {
             match action {
                 PaneAction::Focus(pane_id) => self.send(Outbound::Focus(pane_id)),
@@ -686,6 +696,7 @@ impl eframe::App for MuxApp {
         }
         self.palette_ui(ui, &view);
         self.diagnostics_ui(ui.ctx(), &view);
+        self.link_ui(ui.ctx());
     }
 
     fn on_exit(&mut self) {
@@ -847,6 +858,31 @@ impl MuxApp {
         }
     }
 
+    fn link_ui(&mut self, ctx: &egui::Context) {
+        let Some(uri) = self.pending_link.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut confirmed = false;
+        let mut cancel = false;
+        egui::Window::new("Open link?")
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("This terminal link uses a custom scheme:");
+                ui.code(&uri);
+                ui.horizontal(|ui| {
+                    confirmed = ui.button("Open").clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+        if confirmed || cancel || !open {
+            self.pending_link = None;
+        }
+        if confirmed {
+            ctx.open_url(egui::OpenUrl::new_tab(uri));
+        }
+    }
+
     fn status_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) -> (bool, bool) {
         let mut detach = false;
         let mut diagnostics = false;
@@ -910,6 +946,7 @@ struct SplitDrag {
 struct DrawActions {
     panes: Vec<PaneAction>,
     drag: Option<SplitDrag>,
+    link: Option<String>,
 }
 
 fn draw_panes(
@@ -921,6 +958,7 @@ fn draw_panes(
     let mut actions = DrawActions {
         panes: Vec::new(),
         drag: None,
+        link: None,
     };
     ui.painter()
         .rect_filled(grid, 0.0, egui::Color32::from_gray(12));
@@ -1135,6 +1173,20 @@ fn draw_panes(
                 egui::FontId::monospace(FONT_SIZE.min(cell_h)),
                 color,
             );
+        }
+        if let Some(pos) = click_pos
+            && actions.link.is_none()
+            && content.contains(pos)
+        {
+            let x = ((pos.x - content.min.x) / cell_w.max(1.0)) as usize;
+            let y = ((pos.y - content.min.y) / cell_h.max(1.0)) as usize;
+            if let Some(index) = (start..end).nth(y)
+                && let Some(row) = scroll_row(&state.history, &snapshot.cells, index)
+                && let Some(cell) = row.cells.get(x)
+                && let Some(uri) = cell.link.as_deref()
+            {
+                actions.link = Some(uri.to_owned());
+            }
         }
         if state.offset == 0 && snapshot.cursor.visible {
             let cursor_rect = egui::Rect::from_min_size(
@@ -1651,6 +1703,13 @@ fn send_keys(client: &ClientSession, keys: &[KeySpec]) {
 }
 
 /// Returns `true` when the action detached this client locally.
+/// Only ubiquitous web/mail schemes open without a confirmation dialog. A
+/// child-controlled custom scheme must never be launched implicitly.
+fn safe_link_scheme(uri: &str) -> bool {
+    let lower = uri.to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
+}
+
 /// Move the focused pane's local scrollback window to a shell prompt mark.
 ///
 /// Marks are absolute screen rows published by the daemon; this never parses
@@ -1864,7 +1923,7 @@ fn scrollbar_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stitch_mux_core::{ActivitySummary, Cursor, Modes, Row};
+    use stitch_mux_core::{ActivitySummary, Cell, Cursor, Modes, Row};
     use stitch_mux_protocol::{PaneInfo, PanePlacement, PaneSnapshot, ShellMarks};
 
     fn info(name: &str) -> SessionInfo {
@@ -1923,6 +1982,25 @@ mod tests {
             total_lines,
             scrollback_bytes: 0,
         }
+    }
+
+    #[test]
+    fn only_web_and_mail_links_open_without_confirmation() {
+        assert!(safe_link_scheme("HTTPS://example.com"));
+        assert!(safe_link_scheme("http://example.com"));
+        assert!(safe_link_scheme("mailto:ops@example.com"));
+        assert!(!safe_link_scheme("file:///etc/passwd"));
+        assert!(!safe_link_scheme("custom:payload"));
+        assert_eq!(
+            Cell {
+                text: "x".into(),
+                link: Some("https://example.com".into()),
+                ..Cell::blank()
+            }
+            .link
+            .as_deref(),
+            Some("https://example.com")
+        );
     }
 
     #[test]

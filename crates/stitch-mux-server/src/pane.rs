@@ -3,6 +3,7 @@
 //! `PtySession` is transport-only. The screen, keyboard flags, scrollback and
 //! structured snapshot/delta stream belong here, not in a frontend.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -27,6 +28,7 @@ use tokio::sync::{Notify, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use unicode_width::UnicodeWidthChar;
 
+use crate::link_scan::LinkScanner;
 use crate::shell_scan::ShellScanner;
 use crate::status_scan::StatusScanner;
 
@@ -77,6 +79,41 @@ pub enum PaneUpdate {
     Exit(SessionExit),
 }
 
+/// Bounded absolute-cell → OSC 8 URI projection. Keys use the canonical pane
+/// width at the time the character was printed; a resize clears the map.
+#[derive(Default)]
+struct LinkCells {
+    cells: BTreeMap<u64, String>,
+}
+
+impl LinkCells {
+    const MAX_CELLS: usize = 20_000;
+
+    fn extend(&mut self, spans: Vec<(u64, String)>) {
+        for (cell, uri) in spans {
+            self.cells.insert(cell, uri);
+        }
+        while self.cells.len() > Self::MAX_CELLS {
+            let oldest = *self.cells.keys().next().expect("non-empty");
+            self.cells.remove(&oldest);
+        }
+    }
+
+    fn get(&self, row: u64, col: usize, cols: usize) -> Option<&str> {
+        let index = row.saturating_mul(cols as u64).saturating_add(col as u64);
+        self.cells.get(&index).map(String::as_str)
+    }
+
+    fn prune(&mut self, oldest_row: u64, cols: usize) {
+        let cutoff = oldest_row.saturating_mul(cols as u64);
+        self.cells.retain(|cell, _| *cell >= cutoff);
+    }
+
+    fn clear(&mut self) {
+        self.cells.clear();
+    }
+}
+
 struct PaneState {
     screen: HistoryScreen,
     seq: u64,
@@ -91,6 +128,8 @@ struct PaneState {
     /// only a bounded tail; no event history lives here.
     shell_scan: ShellScanner,
     shell_cwd: Option<String>,
+    link_scan: LinkScanner,
+    links: LinkCells,
     /// Authoritative terminal state, recorded before any task cancellation.
     exit: Option<SessionExit>,
     exit_code: Option<i32>,
@@ -266,6 +305,8 @@ impl PaneRuntime {
                 queries: QueryScanner::default(),
                 shell_scan: ShellScanner::default(),
                 shell_cwd: None,
+                link_scan: LinkScanner::default(),
+                links: LinkCells::default(),
                 program_status: None,
                 status_scan: StatusScanner::default(),
                 exit: None,
@@ -296,10 +337,13 @@ impl PaneRuntime {
                 match reader_runtime.session.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        let (dirty, events, responses) = {
+                        let (dirty, events, responses, link_changed) = {
                             let mut state = reader_runtime.lock_state();
+                            let screen_cursor = state.screen.cursor();
                             let origin_row = state.screen.history_size() as u64
-                                + u64::from(state.screen.cursor().y.min(u16::MAX as usize) as u16);
+                                + u64::from(screen_cursor.y.min(u16::MAX as usize) as u16);
+                            let origin_col = screen_cursor.x.min(u16::MAX as usize);
+                            let cols = state.screen.columns().max(1);
                             state.screen.feed(&buf[..n]);
                             let cursor = {
                                 let cursor = state.screen.cursor();
@@ -315,16 +359,31 @@ impl PaneRuntime {
                             if shell.cwd.is_some() {
                                 state.shell_cwd = shell.cwd;
                             }
+                            let link =
+                                state
+                                    .link_scan
+                                    .scan(&buf[..n], origin_row, origin_col, cols);
+                            let link_changed = link.changed;
+                            state.links.extend(link.spans);
+                            let oldest_row = state.screen.total_lines().saturating_sub(
+                                scrollback_budget().saturating_add(state.screen.lines()),
+                            ) as u64;
+                            state.links.prune(oldest_row, cols);
                             (
                                 state.screen.take_dirty_rows(),
                                 state.screen.take_events(),
                                 responses,
+                                link_changed,
                             )
                         };
                         for response in responses {
                             reader_runtime.write(response);
                         }
-                        reader_runtime.publish_delta(dirty, &events);
+                        if link_changed {
+                            reader_runtime.publish_snapshot();
+                        } else {
+                            reader_runtime.publish_delta(dirty, &events);
+                        }
                     }
                     Err(err) => {
                         tracing::warn!("pane read failed: {err}");
@@ -465,6 +524,8 @@ impl PaneRuntime {
         }
         let mut state = self.lock_state();
         state.screen.resize(rows as usize, cols as usize);
+        // Absolute cell indices depend on the old width; drop stale links.
+        state.links.clear();
         state.last_viewport = state
             .screen
             .styled_range(state.screen.history_size(), state.screen.lines());
@@ -517,8 +578,14 @@ impl PaneRuntime {
         let total_lines = state.screen.total_lines() as u64;
         let rows: Vec<CapturedRow> = tuples
             .iter()
-            .map(|line| CapturedRow {
-                cells: cells_from_row(line),
+            .enumerate()
+            .map(|(index, line)| CapturedRow {
+                cells: cells_from_row(
+                    line,
+                    Some(&state.links),
+                    start.saturating_add(index) as u64,
+                    state.screen.columns(),
+                ),
                 wrapped: false,
             })
             .collect();
@@ -565,6 +632,21 @@ impl PaneRuntime {
         let _ = self.updates.send(Arc::new(update));
     }
 
+    /// Publish a full snapshot. OSC 8 link changes need a repaint of the
+    /// affected cells; one bounded snapshot is simpler than a second link
+    /// history for delta comparison.
+    fn publish_snapshot(&self) {
+        let mut state = self.lock_state();
+        state.seq = state.seq.saturating_add(1);
+        state.last_activity_unix_ms = now_unix_ms();
+        state.last_viewport = state
+            .screen
+            .styled_range(state.screen.history_size(), state.screen.lines());
+        let snapshot = snapshot_from(&state, self.id, state.seq);
+        drop(state);
+        self.publish(PaneUpdate::Snapshot(snapshot));
+    }
+
     /// `_dirty` is drained only to keep the parser set bounded; the delta rows
     /// come from a viewport diff so scroll-shifted rows are never dropped.
     fn publish_delta(&self, _dirty: Vec<usize>, events: &[TermEvent]) {
@@ -574,7 +656,13 @@ impl PaneRuntime {
         let seq = state.seq;
         let screen = &state.screen;
         let visible = screen.styled_range(screen.history_size(), screen.lines());
-        let rows = changed_rows(&state.last_viewport, &visible);
+        let rows = changed_rows(
+            &state.last_viewport,
+            &visible,
+            &state.links,
+            screen.history_size() as u64,
+            screen.columns(),
+        );
         for event in events {
             // Title/cwd/alt-screen changes are already applied to the screen
             // by the parser and are read back below.
@@ -649,8 +737,14 @@ fn snapshot_from(state: &PaneState, pane_id: u64, seq: u64) -> PaneSnapshot {
     let cells = screen
         .styled_range(start, screen.lines())
         .iter()
-        .map(|line| Row {
-            cells: cells_from_row(line),
+        .enumerate()
+        .map(|(index, line)| Row {
+            cells: cells_from_row(
+                line,
+                Some(&state.links),
+                start.saturating_add(index) as u64,
+                screen.columns(),
+            ),
             wrapped: false,
         })
         .collect();
@@ -715,14 +809,36 @@ fn now_unix_ms() -> u64 {
 fn changed_rows(
     previous: &[Vec<(String, String, String, u8)>],
     visible: &[Vec<(String, String, String, u8)>],
+    links: &LinkCells,
+    row_base: u64,
+    cols: usize,
 ) -> Vec<RowUpdate> {
     visible
         .iter()
         .enumerate()
-        .filter(|(index, line)| previous.get(*index) != Some(*line))
-        .map(|(index, line)| RowUpdate {
+        .map(|(index, line)| {
+            let cells = cells_from_row(
+                line,
+                Some(links),
+                row_base.saturating_add(index as u64),
+                cols,
+            );
+            (index, cells)
+        })
+        .filter(|(index, cells)| {
+            let previous_line = previous.get(*index);
+            previous_line.is_none_or(|line| line.len() != cells.len())
+                || cells.iter().enumerate().any(|(x, cell)| {
+                    previous_line.is_none_or(|line| {
+                        line.get(x).is_none_or(|(text, _, _, attrs)| {
+                            text != &cell.text || *attrs as u32 != cell.attrs.0
+                        })
+                    })
+                })
+        })
+        .map(|(index, cells)| RowUpdate {
             row: index as u16,
-            cells: cells_from_row(line),
+            cells,
             wrapped: false,
         })
         .collect()
@@ -899,10 +1015,16 @@ fn html_text(rows: &[CapturedRow]) -> String {
     out
 }
 
-fn cells_from_row(line: &[(String, String, String, u8)]) -> Vec<Cell> {
+fn cells_from_row(
+    line: &[(String, String, String, u8)],
+    links: Option<&LinkCells>,
+    row: u64,
+    cols: usize,
+) -> Vec<Cell> {
     let mut cells = Vec::with_capacity(line.len());
     let mut previous_wide = false;
-    for (text, fg, bg, attrs) in line {
+    let mut previous_link: Option<String> = None;
+    for (x, (text, fg, bg, attrs)) in line.iter().enumerate() {
         let width = text
             .chars()
             .next()
@@ -910,13 +1032,21 @@ fn cells_from_row(line: &[(String, String, String, u8)]) -> Vec<Cell> {
             .unwrap_or(1);
         let continuation = previous_wide && (text.is_empty() || text == " ");
         previous_wide = width >= 2;
+        let link = if continuation {
+            previous_link.clone()
+        } else {
+            links
+                .and_then(|map| map.get(row, x, cols))
+                .map(str::to_owned)
+        };
+        previous_link = link.clone();
         cells.push(Cell {
             text: text.clone(),
             fg: parse_color(fg),
             bg: parse_color(bg),
             attrs: Attrs(*attrs as u32),
             width: if continuation { 0 } else { width.min(2) as u8 },
-            link: None,
+            link,
         });
     }
     cells
@@ -978,7 +1108,7 @@ mod tests {
         let previous = vec![row("a"), row("b"), row("c"), row("d")];
         // One line scrolled off: the parser reports only row 3 as dirty.
         let visible = vec![row("b"), row("c"), row("d"), row("e")];
-        let updates = changed_rows(&previous, &visible);
+        let updates = changed_rows(&previous, &visible, &LinkCells::default(), 0, 1);
         assert_eq!(
             updates.iter().map(|update| update.row).collect::<Vec<_>>(),
             vec![0, 1, 2, 3]
@@ -987,11 +1117,11 @@ mod tests {
         assert_eq!(updates[3].cells[0].text, "e");
 
         // A no-op repaint reports nothing.
-        assert!(changed_rows(&visible, &visible).is_empty());
+        assert!(changed_rows(&visible, &visible, &LinkCells::default(), 0, 1).is_empty());
 
         // A viewport of a different height does not panic and reports the tail.
         let shorter = vec![row("c"), row("d")];
-        let updates = changed_rows(&previous, &shorter);
+        let updates = changed_rows(&previous, &shorter, &LinkCells::default(), 0, 1);
         assert_eq!(updates.len(), 2);
     }
 
@@ -1002,7 +1132,7 @@ mod tests {
             (" ".to_owned(), "default".into(), "default".into(), 0),
             ("a".to_owned(), "default".into(), "default".into(), 0),
         ];
-        let cells = cells_from_row(&line);
+        let cells = cells_from_row(&line, None, 0, 1);
         assert_eq!(cells[0].width, 2);
         assert_eq!(cells[1].width, 0);
         assert_eq!(cells[2].width, 1);

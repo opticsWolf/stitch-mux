@@ -24,6 +24,10 @@ Python package version in `pyproject.toml`.
   marks and cwd in pane snapshots, and `total_lines` lets clients map absolute
   marks to scrollback offsets. The GUI adds `prompt.previous`/`prompt.next`
   (`C-b [`/`C-b ]`) and ‹P/P› status-bar buttons; no screen text is parsed.
+- **M10 hyperlinks:** bounded OSC 8 scans attach URIs to authoritative cells.
+  Web/mail links open directly; custom schemes require an explicit
+  confirmation dialog. A new [terminal fidelity](docs/TERMINAL-FIDELITY.md)
+  document records the supported surface and its limits.
 - **M7 program status and activity:** bounded mux-side OSC 7501 scanner,
   current-status propagation to panes/sessions/GUI, textual attention badges,
   activity filtering and local unread state in the reference GUI, a sourceable

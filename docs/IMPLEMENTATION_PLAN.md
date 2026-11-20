@@ -480,9 +480,9 @@ client.
 chasing graphics protocols.
 
 **Status: In progress.** Styled `vt`/`html` capture, bounded scrollback,
-shell-integration metadata (OSC 133 prompt/command marks and OSC 1337 cwd), and
-GUI prompt jumps are implemented. OSC 8 link handling, notifications/progress,
-selection/copy, and reflow remain.
+shell-integration metadata (OSC 133 prompt/command marks and OSC 1337 cwd), GUI
+prompt jumps, and OSC 8 link metadata with safe click handling are implemented.
+Notifications/progress, native selection/copy, and reflow remain.
 
 **Estimate:** 5-7 engineer-days.
 

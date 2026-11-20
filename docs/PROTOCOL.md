@@ -386,6 +386,10 @@ The GUI keeps unread/seen state locally. A pane with no OSC 7501 report has
 `None` status. The daemon's OSC 7501 scanner discards malformed records and
 bounds a record to 8 KiB.
 
+`Cell.link` carries an OSC 8 URI from a bounded mux-side scan. A link change
+publishes a full snapshot; frontends must not open custom schemes without
+explicit confirmation. See `TERMINAL-FIDELITY.md`.
+
 `scrollback_bytes` lets a client show memory pressure and lets the daemon enforce
 a bounded scrollback budget. `shell_marks` are absolute scrollback rows; a GUI
 can use them for prompt/command navigation without reparsing the screen. Combine

@@ -219,6 +219,8 @@ See [Python SDK](docs/PYTHON.md), [parity](docs/PARITY.md), and the
 - [Automation](docs/AUTOMATION.md) — local CLI, event stream, and agent skill.
 - [stitch-pty API gaps](docs/STITCH_PTY_GAPS.md) — upstream findings from status and automation work.
 - [Keymaps](docs/KEYMAP.md) — action names, JSON bindings, modes, and reload.
+- [Terminal fidelity](docs/TERMINAL-FIDELITY.md) — capture formats, links, and
+  explicit fidelity limits.
 - [Implementation plan](docs/IMPLEMENTATION_PLAN.md) — milestones and order of
   work.
 - [Implementation protocol](docs/IMPLEMENTATION_PROTOCOL.md) — living operating
