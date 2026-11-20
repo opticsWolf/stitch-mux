@@ -8,6 +8,7 @@ pub mod ansi;
 pub mod client_updates;
 pub mod pane;
 pub mod session;
+pub mod status_scan;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

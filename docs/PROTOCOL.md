@@ -378,8 +378,11 @@ rather than a partial delta.
 
 `program_status` is the **current** status, not an event queue. A later value
 replaces an earlier one. Activity aggregation is derived from the current pane
-statuses; the GUI keeps unread/seen state locally. A pane with no OSC 7501
-report has `None` status.
+statuses: `PaneInfo.program_status`, `SessionInfo.activity`, and
+`Attached.activity` all reflect the latest record, not a transition history.
+The GUI keeps unread/seen state locally. A pane with no OSC 7501 report has
+`None` status. The daemon's OSC 7501 scanner discards malformed records and
+bounds a record to 8 KiB.
 
 `scrollback_bytes` lets a client show memory pressure and lets the daemon enforce
 a bounded scrollback budget. `shell_marks` are absolute scrollback rows; a GUI

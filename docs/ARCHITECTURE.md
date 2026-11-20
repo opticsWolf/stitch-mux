@@ -445,6 +445,11 @@ The daemon recognizes **OSC 7501**, Rex's generic program-status protocol. A
 program reports a state (`idle`, `working`, `done`, `blocked`, `error`), an
 optional kind (`permission`, `question`, `auth`), an app name, and a message.
 The pane keeps the latest record as `ProgramStatus` and updates it in place.
+`stitch-pty` does not expose a status-record sink, so the daemon observes the
+same PTY bytes with a bounded 8 KiB OSC scanner. Records may arrive with a BEL
+or ST terminator, may be split across reads, and may carry unknown `key=value`
+fields; unknown fields are ignored and a record without a valid `state` is
+discarded. The scanner stores one current record, never a queue.
 
 This is state, not a notification stream:
 

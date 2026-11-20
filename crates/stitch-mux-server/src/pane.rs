@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use stitch_mux_core::{Attrs, CaptureFormat, Cell, Color, Cursor, CursorShape, Modes, Row};
+use stitch_mux_core::{
+    Attrs, CaptureFormat, Cell, Color, Cursor, CursorShape, Modes, ProgramStatus, Row,
+};
 use stitch_mux_protocol::{
     CaptureResponse, CapturedRow, PaneDelta, PaneSnapshot, ProcessInfo, RowUpdate, SessionExit,
 };
@@ -23,6 +25,8 @@ use thiserror::Error;
 use tokio::sync::{Notify, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use unicode_width::UnicodeWidthChar;
+
+use crate::status_scan::StatusScanner;
 
 const UPDATE_QUEUE: usize = 256;
 const READ_CHUNK: usize = 16 * 1024;
@@ -75,6 +79,9 @@ struct PaneState {
     bell: bool,
     last_activity_unix_ms: u64,
     queries: QueryScanner,
+    /// Latest OSC 7501 record. Current state only, never a queue.
+    program_status: Option<ProgramStatus>,
+    status_scan: StatusScanner,
     /// Viewport rows as they were last published. The parser's dirty-row set
     /// only names rows that were written, not rows that shifted when the
     /// screen scrolled, so deltas are computed by comparing viewports.
@@ -241,6 +248,8 @@ impl PaneRuntime {
                 bell: false,
                 last_activity_unix_ms: now_unix_ms(),
                 queries: QueryScanner::default(),
+                program_status: None,
+                status_scan: StatusScanner::default(),
             }),
             updates,
             input_tx,
@@ -274,6 +283,10 @@ impl PaneRuntime {
                                 (cursor.y, cursor.x)
                             };
                             let responses = state.queries.scan(&buf[..n], cursor);
+                            let status = state.status_scan.scan(&buf[..n]);
+                            if let Some(status) = &status {
+                                state.program_status = Some(status.clone());
+                            }
                             (
                                 state.screen.take_dirty_rows(),
                                 state.screen.take_events(),
@@ -446,6 +459,11 @@ impl PaneRuntime {
         self.lock_state().last_activity_unix_ms
     }
 
+    /// Current OSC 7501 record, without cloning the screen.
+    pub fn program_status(&self) -> Option<ProgramStatus> {
+        self.lock_state().program_status.clone()
+    }
+
     pub fn capture(&self, start: u64, lines: u32, format: CaptureFormat) -> CaptureResponse {
         let state = self.lock_state();
         let start = start as usize;
@@ -566,7 +584,7 @@ fn common_fields(state: &PaneState, pane_id: u64, seq: u64) -> PaneDelta {
             cwd: screen.cwd().map(str::to_owned),
         }),
         shell_marks: None,
-        program_status: None,
+        program_status: state.program_status.clone(),
         alt_screen: screen.alt_screen(),
         scrollback_len: screen.history_size() as u64,
         scrollback_bytes: (screen.total_lines() * screen.columns() * 4) as u64,

@@ -162,11 +162,9 @@ same machine.
 Programs can report status with **OSC 7501**:
 
 ```sh
-status() {
-  printf '\e]7501;state=%s:msg=%s\e\\' "$1" "$(printf '%s' "$2" | base64 | tr -d '\n')"
-}
-status working "Running tests"
-cargo test && status done "Tests passed" || status error "Tests failed"
+. ./scripts/stitch-mux-status.sh
+stitch_status working "Running tests"
+cargo test && stitch_status done "Tests passed" || stitch_status error "Tests failed"
 ```
 
 States: `idle`, `working`, `done`, `blocked`, `error`. Kinds: `permission`,

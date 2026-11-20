@@ -91,6 +91,12 @@ impl LayoutState {
 
 impl Session {
     pub fn attached(&self, clients: u32, view_mode: stitch_mux_protocol::ViewMode) -> Attached {
+        let statuses: Vec<_> = self
+            .panes()
+            .into_iter()
+            .map(|pane| pane.program_status())
+            .collect();
+        let activity = ActivitySummary::from_statuses(statuses.iter().map(Option::as_ref));
         Attached {
             session_id: self.id,
             session_name: self.name(),
@@ -100,7 +106,7 @@ impl Session {
             status_rows: 0,
             attached_clients: clients,
             layout_revision: self.revision(),
-            activity: ActivitySummary::default(),
+            activity,
         }
     }
 
@@ -454,10 +460,12 @@ impl Session {
                     placement: PanePlacement::Tiled,
                     window_id: Some(1),
                     owner_client_id: None,
-                    program_status: None,
+                    program_status: pane.program_status(),
                 }
             })
             .collect();
+        let activity =
+            ActivitySummary::from_statuses(infos.iter().map(|info| info.program_status.as_ref()));
         SessionInfo {
             id: self.id,
             name: self.name(),
@@ -469,7 +477,7 @@ impl Session {
             attached_clients,
             created_at_unix_ms: self.created_at_unix_ms,
             last_activity_unix_ms,
-            activity: ActivitySummary::default(),
+            activity,
             panes: infos,
         }
     }
