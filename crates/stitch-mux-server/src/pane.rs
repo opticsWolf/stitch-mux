@@ -410,7 +410,7 @@ impl PaneRuntime {
         state.last_viewport = state
             .screen
             .styled_range(state.screen.history_size(), state.screen.lines());
-        let seq = state.seq + 1;
+        let seq = state.seq.saturating_add(1);
         state.seq = seq;
         let snapshot = snapshot_from(&state, self.id, seq);
         drop(state);

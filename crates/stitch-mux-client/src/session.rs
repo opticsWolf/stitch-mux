@@ -266,6 +266,13 @@ impl ClientSession {
         self.dropped_outbound.load(Ordering::Relaxed)
     }
 
+    /// Simulate an abruptly killed frontend: abort the actor, which closes the
+    /// connection without sending `Detach`.
+    pub async fn abort(self) {
+        self.task.abort();
+        let _ = self.task.await;
+    }
+
     /// Ask the daemon to detach, then wait for the actor to finish.
     ///
     /// If the outbound queue is full the detach frame cannot be queued; aborting

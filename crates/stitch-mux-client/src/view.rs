@@ -49,10 +49,13 @@ impl PaneView {
         if delta.seq <= self.last_seq {
             return Ok(()); // duplicate or stale; the authoritative state is newer
         }
-        if delta.seq != self.last_seq + 1 {
+        // A hostile or corrupted peer can send u64::MAX; plain `+ 1` would
+        // panic in debug builds and wrap into a valid-looking sequence.
+        let expected = self.last_seq.saturating_add(1);
+        if delta.seq != expected {
             return Err(ApplyError::Gap(SequenceGap {
                 pane_id: self.pane_id,
-                expected: self.last_seq + 1,
+                expected,
                 got: delta.seq,
             }));
         }
@@ -208,7 +211,7 @@ impl SessionView {
         if seq <= self.render_seq {
             return;
         }
-        if seq > self.render_seq + 1 && self.render_seq != 0 {
+        if seq > self.render_seq.saturating_add(1) && self.render_seq != 0 {
             self.needs_resync = true;
         }
         self.render_seq = seq;
@@ -340,6 +343,23 @@ mod tests {
         assert_eq!(view.pane_cells(1).unwrap()[0].cells[0].text, "z");
         assert_eq!(view.pane_cells(2).unwrap()[0].cells[0].text, "b");
         assert_eq!(view.pane(1).unwrap().last_seq, 4);
+        assert!(!view.needs_resync);
+    }
+
+    #[test]
+    fn extreme_sequences_from_a_corrupt_peer_do_not_panic() {
+        let mut view = SessionView::default();
+        let mut snapshot = snapshot(1, u64::MAX, "a");
+        snapshot.cells[0].cells[0].text = "z".into();
+        view.apply_snapshot(snapshot);
+
+        // A smaller sequence is stale, not a gap; neither path may overflow.
+        assert_eq!(view.apply_delta(delta(1, 1, "b")), Ok(()));
+        assert_eq!(view.pane(1).unwrap().last_seq, u64::MAX);
+        assert_eq!(view.pane_cells(1).unwrap()[0].cells[0].text, "z");
+        view.apply_render_seq(u64::MAX);
+        view.apply_render_seq(1);
+        assert_eq!(view.render_seq, u64::MAX);
         assert!(!view.needs_resync);
     }
 
