@@ -336,6 +336,60 @@ impl Session {
         Ok(self.layout(Some(pane_id)))
     }
 
+    /// Spawn an explicitly specified child into a new split pane. Used by
+    /// `Command::Run`; the session stays daemon-owned and detach-safe.
+    pub async fn run(
+        &self,
+        pane_id: u64,
+        spec: PaneSpec,
+        axis: SplitAxis,
+        ratio_bps: u16,
+    ) -> Result<(u64, Layout), SessionError> {
+        let _op = self.ops.lock().await;
+        if !self.panes.lock().expect("panes").contains_key(&pane_id) {
+            return Err(SessionError::PaneNotFound(pane_id));
+        }
+        let new_id = next_pane_id();
+        let (root, size) = {
+            let state = self.layout.lock().expect("layout");
+            (
+                split_leaf(
+                    &state.root,
+                    PaneId::new(pane_id),
+                    PaneId::new(new_id),
+                    axis,
+                    ratio_bps,
+                )?,
+                self.size(),
+            )
+        };
+        let (cols, rows) = resolve_layout(
+            &root,
+            Rect::new(0, 0, size.cols, size.rows),
+            MIN_PANE,
+            PANE_BORDER,
+        )
+        .ok()
+        .and_then(|panes| {
+            panes
+                .into_iter()
+                .find(|pane| pane.pane_id == new_id)
+                .map(|pane| (pane.content.cols.max(1), pane.content.rows.max(1)))
+        })
+        .unwrap_or((2, 1));
+        let pane = PaneRuntime::spawn(self.id, new_id, &spec, cols, rows).await?;
+        self.panes.lock().expect("panes").insert(new_id, pane);
+        {
+            let mut state = self.layout.lock().expect("layout");
+            state.root = root;
+            state.zoom = None;
+            state.bump();
+        }
+        self.resize_panes();
+        self.publish_layout();
+        Ok((new_id, self.layout(Some(pane_id))))
+    }
+
     pub async fn close(&self, pane_id: u64) -> Result<Option<Layout>, SessionError> {
         let _op = self.ops.lock().await;
         let next_root = {

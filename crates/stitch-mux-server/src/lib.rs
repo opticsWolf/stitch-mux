@@ -15,15 +15,15 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use stitch_mux_core::{Size, layout_leaves};
 use stitch_mux_protocol::{
     Attach, CaptureRequest, ClientInfo, Command, CommandRequest, CommandResponse, Connection,
     DEFAULT_SERVER_CAPABILITIES, Endpoint, EndpointError, ErrorCode, ErrorInfo, Event as WireEvent,
     Frame, FrameError, FrameWriter, Hello, HelloAck, InputEvent, Layout, MessageKind,
-    PROTOCOL_VERSION, ResizeRequest, Stream, SubscribeEvents, ViewMode, capabilities,
-    decode_message,
+    PROTOCOL_VERSION, ResizeRequest, RunPlacement, RunResult, Stream, SubscribeEvents, ViewMode,
+    WaitResult, WaitTarget, capabilities, decode_message,
 };
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
@@ -1096,6 +1096,39 @@ fn route_input(session: &Session, focus: Option<u64>, event: InputEvent) {
     }
 }
 
+async fn wait_for_pane(pane: Arc<PaneRuntime>, deadline: Option<Instant>) -> (Option<i32>, bool) {
+    let mut updates = pane.subscribe();
+    loop {
+        if let Some((_, code)) = pane.exit_snapshot() {
+            return (code, false);
+        }
+        let update = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match tokio::time::timeout(remaining, updates.recv()).await {
+                    Ok(update) => update,
+                    Err(_) => return (None, true),
+                }
+            }
+            None => updates.recv().await,
+        };
+        match update {
+            Ok(update) if matches!(update.as_ref(), PaneUpdate::Exit(_)) => {
+                return pane
+                    .exit_snapshot()
+                    .map_or((None, false), |(_, code)| (code, false));
+            }
+            Ok(_) => {}
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => {
+                return pane
+                    .exit_snapshot()
+                    .map_or((None, false), |(_, code)| (code, false));
+            }
+        }
+    }
+}
+
 fn session_error_code(error: &SessionError) -> ErrorCode {
     match error {
         SessionError::PaneNotFound(_) | SessionError::NotFound(_) => ErrorCode::NotFound,
@@ -1310,6 +1343,130 @@ async fn handle_command(
                 },
                 None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
             }
+        }
+        Command::Run {
+            session: session_name,
+            program,
+            args,
+            cwd,
+            env,
+            placement,
+            label: _,
+            wait,
+            keep_open,
+        } => {
+            let RunPlacement::Split {
+                pane_id,
+                axis,
+                ratio_bps,
+            } = placement
+            else {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "new-window placement arrives with multi-window support",
+                );
+                return response;
+            };
+            let session = state
+                .registry
+                .lock()
+                .await
+                .find_by_pane(pane_id)
+                .filter(|session| session.name() == session_name);
+            let Some(session) = session else {
+                set_error(
+                    &mut response,
+                    ErrorCode::NotFound,
+                    "session or pane not found",
+                );
+                return response;
+            };
+            let spec = PaneSpec::new(&program, &args, cwd.as_deref(), env.as_deref());
+            match session.run(pane_id, spec, axis, ratio_bps).await {
+                Ok((new_pane_id, _layout)) => {
+                    state.watch_session(Arc::clone(&session));
+                    state.publish_event(
+                        Some(session.id),
+                        "pane_created",
+                        serde_json::json!({ "pane_id": new_pane_id, "program": program }),
+                    );
+                    let mut result = RunResult {
+                        pane_id: new_pane_id,
+                        window_id: 0,
+                        exit_code: None,
+                        timed_out: false,
+                    };
+                    if wait {
+                        let pane = session
+                            .pane(new_pane_id)
+                            .expect("newly spawned pane is registered");
+                        let (exit_code, timed_out) = wait_for_pane(Arc::clone(&pane), None).await;
+                        result.exit_code = exit_code;
+                        result.timed_out = timed_out;
+                        if !keep_open
+                            && !timed_out
+                            && let Err(err) = session.close(new_pane_id).await
+                        {
+                            set_error(&mut response, session_error_code(&err), err);
+                        }
+                    }
+                    response.run = Some(result);
+                    response.layout = Some(response_layout(state, &session, focus));
+                }
+                Err(err) => set_error(&mut response, session_error_code(&err), err),
+            }
+        }
+        Command::Wait { target, timeout_ms } => {
+            let deadline = timeout_ms
+                .map(|ms| Instant::now() + Duration::from_millis(ms.min(i64::MAX as u64)));
+            let (exit_code, timed_out) = match &target {
+                WaitTarget::Pane { pane_id } => {
+                    let pane = state
+                        .registry
+                        .lock()
+                        .await
+                        .find_by_pane(*pane_id)
+                        .and_then(|session| session.pane(*pane_id));
+                    match pane {
+                        Some(pane) => wait_for_pane(pane, deadline).await,
+                        None => {
+                            set_error(&mut response, ErrorCode::NotFound, "pane not found");
+                            (None, false)
+                        }
+                    }
+                }
+                WaitTarget::Session { name } => {
+                    let session = state.registry.lock().await.get(name);
+                    match session {
+                        Some(session) => {
+                            let mut code = None;
+                            let mut timed_out = false;
+                            for pane in session.panes() {
+                                let (pane_code, pane_timed_out) =
+                                    wait_for_pane(pane, deadline).await;
+                                if code.is_none() {
+                                    code = pane_code;
+                                }
+                                if pane_timed_out {
+                                    timed_out = true;
+                                    break;
+                                }
+                            }
+                            (code, timed_out)
+                        }
+                        None => {
+                            set_error(&mut response, ErrorCode::NotFound, "session not found");
+                            (None, false)
+                        }
+                    }
+                }
+            };
+            response.wait = Some(WaitResult {
+                target: target.clone(),
+                exit_code,
+                timed_out,
+            });
         }
         Command::Capture {
             pane_id,

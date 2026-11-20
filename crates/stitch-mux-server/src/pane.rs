@@ -82,6 +82,9 @@ struct PaneState {
     /// Latest OSC 7501 record. Current state only, never a queue.
     program_status: Option<ProgramStatus>,
     status_scan: StatusScanner,
+    /// Authoritative terminal state, recorded before any task cancellation.
+    exit: Option<SessionExit>,
+    exit_code: Option<i32>,
     /// Viewport rows as they were last published. The parser's dirty-row set
     /// only names rows that were written, not rows that shifted when the
     /// screen scrolled, so deltas are computed by comparing viewports.
@@ -254,6 +257,8 @@ impl PaneRuntime {
                 queries: QueryScanner::default(),
                 program_status: None,
                 status_scan: StatusScanner::default(),
+                exit: None,
+                exit_code: None,
             }),
             updates,
             status_tx,
@@ -322,14 +327,21 @@ impl PaneRuntime {
             // forever if a platform leaves the reader blocked.
             let _drained =
                 tokio::time::timeout(Duration::from_secs(5), exit_runtime.reader_done.notified());
-            exit_runtime.publish(PaneUpdate::Exit(SessionExit {
+            let exit_code = status.map(|status| status.exit_code().min(i32::MAX as u32) as i32);
+            let exit = SessionExit {
                 session_id: exit_runtime.session_id,
                 pane_id: Some(exit_runtime.id),
-                reason: match status {
-                    Some(status) => format!("exited with {}", status.exit_code()),
+                reason: match exit_code {
+                    Some(code) => format!("exited with {code}"),
                     None => "exit status unavailable".to_owned(),
                 },
-            }));
+            };
+            {
+                let mut state = exit_runtime.lock_state();
+                state.exit = Some(exit.clone());
+                state.exit_code = exit_code;
+            }
+            exit_runtime.publish(PaneUpdate::Exit(exit));
         });
 
         let mut tasks = runtime.tasks.lock().expect("task vec");
@@ -346,6 +358,12 @@ impl PaneRuntime {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<PaneUpdate>> {
         self.updates.subscribe()
+    }
+
+    /// Terminal exit recorded by the daemon, if the child has already exited.
+    pub fn exit_snapshot(&self) -> Option<(SessionExit, Option<i32>)> {
+        let state = self.lock_state();
+        state.exit.clone().map(|exit| (exit, state.exit_code))
     }
 
     pub fn subscribe_status(&self) -> broadcast::Receiver<ProgramStatus> {
@@ -516,11 +534,17 @@ impl PaneRuntime {
         let _ = self.session.terminate(Duration::from_millis(250)).await;
         // Aborting the tasks below can race the exit watcher; publish the
         // authoritative exit once here so clients/events always see it.
-        self.publish(PaneUpdate::Exit(SessionExit {
+        let exit = SessionExit {
             session_id: self.session_id,
             pane_id: Some(self.id),
             reason: "killed".to_owned(),
-        }));
+        };
+        {
+            let mut state = self.lock_state();
+            state.exit = Some(exit.clone());
+            state.exit_code = None;
+        }
+        self.publish(PaneUpdate::Exit(exit));
         let mut tasks = self.tasks.lock().expect("task vec");
         for task in tasks.drain(..) {
             task.abort();
