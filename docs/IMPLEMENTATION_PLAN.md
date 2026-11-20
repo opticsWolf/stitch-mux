@@ -370,9 +370,9 @@ multi-user feature enters these milestones.
 
 **Estimate:** 4-6 engineer-days.
 
-**Status: In progress.** The OSC 7501 scanner, current-status propagation,
-activity aggregation, real-PTY test, and GUI attention UI are implemented; the
-bounded event stream remains.
+**Status: Done.** OSC 7501 ingestion, current-status propagation, activity
+aggregation, GUI attention UI, the shell helper, and the bounded event stream
+are implemented with unit, real-PTY, and event tests.
 
 Deliverables:
 

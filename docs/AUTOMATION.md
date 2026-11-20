@@ -9,7 +9,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the daemon model and
 [PROTOCOL.md](PROTOCOL.md) for the control messages.
 
 **v0.1 status:** the CLI/control-command subset and file log are implemented.
-The event stream, named actions/keymaps, and agent skill below are v0.2 design;
+The bounded event stream (`SubscribeEvents`/`Event`) and program status are now
+implemented too. Named actions/keymaps and the agent skill below are v0.2 work;
 they are not v0.1 release gates.
 
 ## 1. What the automation surface is for

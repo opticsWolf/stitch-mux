@@ -179,6 +179,9 @@ pub struct PaneRuntime {
     session: Arc<PtySession>,
     state: Mutex<PaneState>,
     updates: broadcast::Sender<Arc<PaneUpdate>>,
+    /// Status records travel separately from cell updates so event subscribers
+    /// cannot slow down the GUI's structured delta stream.
+    status_tx: broadcast::Sender<ProgramStatus>,
     input_tx: mpsc::Sender<Vec<u8>>,
     dropped_input: AtomicU64,
     reader_done: Arc<Notify>,
@@ -232,6 +235,7 @@ impl PaneRuntime {
         let session = Arc::new(session);
         let screen = HistoryScreen::new(cols as usize, rows as usize, 2000);
         let (updates, _) = broadcast::channel(UPDATE_QUEUE);
+        let (status_tx, _) = broadcast::channel(16);
         let (input_tx, mut input_rx) = mpsc::channel::<Vec<u8>>(INPUT_QUEUE);
         let reader_done = Arc::new(Notify::new());
 
@@ -252,6 +256,7 @@ impl PaneRuntime {
                 status_scan: StatusScanner::default(),
             }),
             updates,
+            status_tx,
             input_tx,
             dropped_input: AtomicU64::new(0),
             reader_done: Arc::clone(&reader_done),
@@ -286,6 +291,7 @@ impl PaneRuntime {
                             let status = state.status_scan.scan(&buf[..n]);
                             if let Some(status) = &status {
                                 state.program_status = Some(status.clone());
+                                let _ = reader_runtime.status_tx.send(status.clone());
                             }
                             (
                                 state.screen.take_dirty_rows(),
@@ -340,6 +346,10 @@ impl PaneRuntime {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<PaneUpdate>> {
         self.updates.subscribe()
+    }
+
+    pub fn subscribe_status(&self) -> broadcast::Receiver<ProgramStatus> {
+        self.status_tx.subscribe()
     }
 
     pub fn pid(&self) -> u32 {
@@ -504,6 +514,13 @@ impl PaneRuntime {
 
     pub async fn kill(&self) {
         let _ = self.session.terminate(Duration::from_millis(250)).await;
+        // Aborting the tasks below can race the exit watcher; publish the
+        // authoritative exit once here so clients/events always see it.
+        self.publish(PaneUpdate::Exit(SessionExit {
+            session_id: self.session_id,
+            pane_id: Some(self.id),
+            reason: "killed".to_owned(),
+        }));
         let mut tasks = self.tasks.lock().expect("task vec");
         for task in tasks.drain(..) {
             task.abort();

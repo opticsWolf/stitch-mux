@@ -47,7 +47,8 @@ pub const DEFAULT_CLIENT_CAPABILITIES: u64 = client::STRUCTURED_VIEW
     | client::RESYNC
     | client::PROGRAM_STATUS
     | client::SHELL_INTEGRATION
-    | client::HYPERLINKS;
+    | client::HYPERLINKS
+    | client::EVENTS;
 
 pub const DEFAULT_SERVER_CAPABILITIES: u64 = server::STRUCTURED_VIEW
     | server::ANSI
@@ -58,7 +59,8 @@ pub const DEFAULT_SERVER_CAPABILITIES: u64 = server::STRUCTURED_VIEW
     | server::LAYOUT_CONTROL
     | server::PROGRAM_STATUS
     | server::SHELL_INTEGRATION
-    | server::HYPERLINKS;
+    | server::HYPERLINKS
+    | server::EVENTS;
 
 #[cfg(test)]
 mod tests {

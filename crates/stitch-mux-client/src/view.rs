@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use stitch_mux_core::{ActivitySummary, Row, Size};
 use stitch_mux_protocol::{
-    Attached, CommandResponse, ErrorInfo, Focus, Layout, PaneDelta, PaneSnapshot, Render,
+    Attached, CommandResponse, ErrorInfo, Event, Focus, Layout, PaneDelta, PaneSnapshot, Render,
     ResizeEvent, SessionExit,
 };
 
@@ -108,6 +108,9 @@ pub struct SessionView {
     pub render_seq: u64,
     pub error: Option<ErrorInfo>,
     pub exit: Option<SessionExit>,
+    /// Latest bounded local event from `SubscribeEvents`. Frontends that want
+    /// history must keep their own bounded projection; the wire has no replay.
+    pub last_event: Option<Event>,
 }
 
 impl SessionView {
@@ -184,6 +187,10 @@ impl SessionView {
         self.size = Size::new(event.cols, event.rows);
     }
 
+    pub fn apply_event(&mut self, event: Event) {
+        self.last_event = Some(event);
+    }
+
     pub fn apply_command_response(&mut self, response: CommandResponse) {
         if let Some(layout) = response.layout.clone() {
             self.apply_layout(layout);
@@ -226,6 +233,7 @@ impl SessionView {
         self.layout = None;
         self.panes.clear();
         self.render = None;
+        self.last_event = None;
         self.needs_resync = true;
     }
 
@@ -344,6 +352,28 @@ mod tests {
         assert_eq!(view.pane_cells(2).unwrap()[0].cells[0].text, "b");
         assert_eq!(view.pane(1).unwrap().last_seq, 4);
         assert!(!view.needs_resync);
+    }
+
+    #[test]
+    fn event_updates_keep_only_the_latest_record() {
+        let mut view = SessionView::default();
+        view.apply_event(Event {
+            seq: 1,
+            session_id: Some(3),
+            kind: "activity_changed".into(),
+            payload: serde_json::json!({"working": 1}),
+        });
+        view.apply_event(Event {
+            seq: 2,
+            session_id: Some(3),
+            kind: "program_status_changed".into(),
+            payload: serde_json::json!({"state": "done"}),
+        });
+        assert_eq!(view.last_event.as_ref().map(|event| event.seq), Some(2));
+        assert_eq!(
+            view.last_event.as_ref().map(|event| event.kind.as_str()),
+            Some("program_status_changed")
+        );
     }
 
     #[test]

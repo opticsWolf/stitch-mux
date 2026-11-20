@@ -932,12 +932,14 @@ The local CLI and agent skill use these control commands:
 - `InvokeAction` runs a named layout/focus/session action with validated
   arguments.
 
-`SubscribeEvents` (kind 26) starts an NDJSON-style local event stream. The
-server sends `Event` (kind 27) frames with a monotonic `seq` and a typed payload:
-session/window/pane created or closed, pane exit, program-status change,
-activity summary change, layout change, and owner change. Events are bounded and
-coalesced; a subscriber that falls behind is disconnected or told to resync
-from a fresh `ListSessions`/`Capture`. There is no replay log.
+`SubscribeEvents` (kind 26) starts a bounded local event stream. The server
+sends `Event` (kind 27) frames with a monotonic daemon-wide `seq` and a typed
+payload. Implemented v0.2 kinds: `session_list` (initial state),
+`program_status_changed`, `activity_changed`, `pane_exited`, and `event_gap`.
+Layout, window and owner events arrive with those features. Events are carried
+by a 256-entry broadcast queue; a subscriber that falls behind receives
+`Error { code: Busy, message: "event subscriber fell behind" }` and is
+unsubscribed. There is no replay log.
 
 The event stream is local-only. It is intended for scripts and coding agents,
 not for a remote control plane or a multi-user audit system.

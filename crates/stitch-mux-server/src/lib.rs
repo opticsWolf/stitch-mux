@@ -20,9 +20,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use stitch_mux_core::{Size, layout_leaves};
 use stitch_mux_protocol::{
     Attach, CaptureRequest, ClientInfo, Command, CommandRequest, CommandResponse, Connection,
-    DEFAULT_SERVER_CAPABILITIES, Endpoint, EndpointError, ErrorCode, ErrorInfo, Frame, FrameError,
-    FrameWriter, Hello, HelloAck, InputEvent, Layout, MessageKind, PROTOCOL_VERSION, ResizeRequest,
-    Stream, ViewMode, capabilities, decode_message,
+    DEFAULT_SERVER_CAPABILITIES, Endpoint, EndpointError, ErrorCode, ErrorInfo, Event as WireEvent,
+    Frame, FrameError, FrameWriter, Hello, HelloAck, InputEvent, Layout, MessageKind,
+    PROTOCOL_VERSION, ResizeRequest, Stream, SubscribeEvents, ViewMode, capabilities,
+    decode_message,
 };
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
@@ -37,6 +38,9 @@ type Writer = FrameWriter<tokio::io::WriteHalf<Stream>>;
 /// Decoded frames waiting for the connection's event loop. Bounded so a
 /// pipelining client cannot make the daemon buffer arbitrary payloads.
 const INCOMING_FRAMES: usize = 16;
+/// Bounded broadcast backlog for local automation subscribers. A lagging
+/// subscriber gets a typed error and is unsubscribed, never an unbounded queue.
+const EVENT_QUEUE: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -79,6 +83,12 @@ impl ClientRecord {
     }
 }
 
+#[derive(Clone, Debug)]
+struct EventFilter {
+    session_id: Option<u64>,
+    all: bool,
+}
+
 pub struct ServerState {
     pub registry: Mutex<SessionRegistry>,
     clients: StdMutex<BTreeMap<u64, ClientRecord>>,
@@ -86,17 +96,24 @@ pub struct ServerState {
     focus_memory: StdMutex<BTreeMap<String, u64>>,
     next_client_id: AtomicU64,
     shutdown_tx: watch::Sender<bool>,
+    events_tx: broadcast::Sender<Arc<WireEvent>>,
+    event_seq: AtomicU64,
+    watched_panes: StdMutex<std::collections::BTreeSet<u64>>,
 }
 
 impl Default for ServerState {
     fn default() -> Self {
         let (shutdown_tx, _) = watch::channel(false);
+        let (events_tx, _) = broadcast::channel(EVENT_QUEUE);
         Self {
             registry: Mutex::new(SessionRegistry::new()),
             clients: StdMutex::new(BTreeMap::new()),
             focus_memory: StdMutex::new(BTreeMap::new()),
             next_client_id: AtomicU64::new(1),
             shutdown_tx,
+            events_tx,
+            event_seq: AtomicU64::new(0),
+            watched_panes: StdMutex::new(std::collections::BTreeSet::new()),
         }
     }
 }
@@ -121,6 +138,82 @@ impl ServerState {
             .expect("client registry")
             .insert(id, record);
         id
+    }
+
+    /// Publish one bounded, monotonic local event. Never blocks on a
+    /// subscriber: broadcast drops the oldest entry for a lagging receiver.
+    fn publish_event(&self, session_id: Option<u64>, kind: &str, payload: serde_json::Value) {
+        let seq = self.event_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let event = Arc::new(WireEvent {
+            seq,
+            session_id,
+            kind: kind.to_owned(),
+            payload,
+        });
+        let _ = self.events_tx.send(event);
+    }
+
+    /// Fan every pane's status records and exits into the event bus once.
+    fn watch_session(self: &Arc<Self>, session: Arc<Session>) {
+        for pane in session.panes() {
+            self.watch_pane(Arc::clone(&session), pane);
+        }
+    }
+
+    fn watch_pane(self: &Arc<Self>, session: Arc<Session>, pane: Arc<PaneRuntime>) {
+        let mut watched = self.watched_panes.lock().expect("watched panes");
+        if !watched.insert(pane.id) {
+            return;
+        }
+        drop(watched);
+        let state = Arc::clone(self);
+        let pane_id = pane.id;
+        let mut statuses = pane.subscribe_status();
+        let mut updates = pane.subscribe();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    status = statuses.recv() => match status {
+                        Ok(status) => {
+                            state.publish_event(
+                                Some(session.id),
+                                "program_status_changed",
+                                serde_json::json!({ "pane_id": pane_id, "status": status }),
+                            );
+                            state.publish_event(
+                                Some(session.id),
+                                "activity_changed",
+                                serde_json::json!({ "activity": session.info(0).activity }),
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            state.publish_event(
+                                Some(session.id),
+                                "event_gap",
+                                serde_json::json!({ "pane_id": pane_id }),
+                            );
+                        }
+                    },
+                    update = updates.recv() => match update {
+                        Ok(update) => {
+                            if let PaneUpdate::Exit(exit) = update.as_ref() {
+                                state.publish_event(
+                                    Some(session.id),
+                                    "pane_exited",
+                                    serde_json::json!({
+                                        "pane_id": pane_id,
+                                        "reason": exit.reason,
+                                    }),
+                                );
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    },
+                }
+            }
+        });
     }
 
     fn set_attached(&self, client_id: u64, session_id: u64, focus: Option<u64>) {
@@ -378,6 +471,7 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
     });
 
     let view_mode = hello.view_mode;
+    let client_caps = hello.capabilities;
     let mut attached: Option<Arc<Session>> = None;
     let mut focus: Option<u64> = None;
     let mut update_rx: Option<client_updates::ClientUpdateQueue> = None;
@@ -385,6 +479,8 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
     let mut compositor = AnsiCompositor::new();
     let mut update_tasks: Vec<JoinHandle<()>> = Vec::new();
     let mut layout_rx: Option<broadcast::Receiver<Arc<Layout>>> = None;
+    let mut events_rx = state.events_tx.subscribe();
+    let mut event_filter: Option<EventFilter> = None;
     let mut failure: Option<ServerError> = None;
     loop {
         if update_rx
@@ -408,6 +504,11 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                 Some(update) => Event::Update(update),
                 None => break,
             },
+            event = events_rx.recv() => match event {
+                Ok(event) => Event::Wire(event),
+                Err(broadcast::error::RecvError::Lagged(_)) => Event::WireLagged,
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
             layout = next_layout(layout_rx.as_mut()) => match layout {
                 Some(Ok(_)) => Event::Layout,
                 Some(Err(broadcast::error::RecvError::Lagged(_))) => {
@@ -424,10 +525,34 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
             },
         };
         match event {
+            Event::Wire(event) => {
+                let wanted = event_filter.as_ref().is_some_and(|filter| {
+                    filter
+                        .session_id
+                        .is_none_or(|id| event.session_id == Some(id))
+                        && (filter.all || event.session_id.is_some())
+                });
+                if wanted && let Err(err) = writer.send(MessageKind::Event, event.as_ref()).await {
+                    failure = Some(ServerError::Frame(err));
+                    break;
+                }
+            }
+            Event::WireLagged => {
+                if event_filter.take().is_some()
+                    && let Err(err) =
+                        send_error(&mut writer, ErrorCode::Busy, "event subscriber fell behind")
+                            .await
+                {
+                    failure = Some(err);
+                    break;
+                }
+            }
             Event::Frame(frame) => {
                 match handle_frame(
                     frame,
                     client_id,
+                    client_caps,
+                    &mut event_filter,
                     &state,
                     &mut attached,
                     &mut focus,
@@ -561,6 +686,8 @@ enum Event {
     Frame(Frame),
     Update(Arc<PaneUpdate>),
     Layout,
+    Wire(Arc<WireEvent>),
+    WireLagged,
     DetachedByControl,
 }
 
@@ -688,6 +815,8 @@ async fn send_terminal_update(
 async fn handle_frame(
     frame: Frame,
     client_id: u64,
+    client_caps: u64,
+    event_filter: &mut Option<EventFilter>,
     state: &Arc<ServerState>,
     attached: &mut Option<Arc<Session>>,
     focus: &mut Option<u64>,
@@ -891,7 +1020,42 @@ async fn handle_frame(
             let info: ErrorInfo = decode_message(&frame)?;
             tracing::debug!("client error: {:?}: {}", info.code, info.message);
         }
-        MessageKind::Clipboard | MessageKind::SubscribeEvents => {
+        MessageKind::SubscribeEvents => {
+            let request: SubscribeEvents = decode_message(&frame)?;
+            if client_caps & capabilities::client::EVENTS == 0 {
+                send_error(
+                    writer,
+                    ErrorCode::Unsupported,
+                    "EVENTS capability not requested",
+                )
+                .await?;
+                return Ok(false);
+            }
+            let session_id = match &request.session {
+                Some(name) => {
+                    let session = state.registry.lock().await.get(name).map(|s| s.id);
+                    match session {
+                        Some(id) => Some(id),
+                        None => {
+                            send_error(writer, ErrorCode::NotFound, "session not found").await?;
+                            return Ok(false);
+                        }
+                    }
+                }
+                None => None,
+            };
+            *event_filter = Some(EventFilter {
+                session_id,
+                all: request.all,
+            });
+            let sessions = state.infos().await;
+            state.publish_event(
+                session_id,
+                "session_list",
+                serde_json::json!({ "sessions": sessions }),
+            );
+        }
+        MessageKind::Clipboard => {
             send_error(writer, ErrorCode::Unsupported, "this message arrives later").await?;
         }
         other => {
@@ -980,6 +1144,7 @@ async fn handle_command(
             match result {
                 Ok(session) => {
                     tracing::info!(session = %name, "session created");
+                    state.watch_session(Arc::clone(&session));
                     response
                         .sessions
                         .push(session.info(state.count(session.id)));
@@ -1015,9 +1180,12 @@ async fn handle_command(
                 )
                 .await;
             match result {
-                Ok(session) => response
-                    .sessions
-                    .push(session.info(state.count(session.id))),
+                Ok(session) => {
+                    state.watch_session(Arc::clone(&session));
+                    response
+                        .sessions
+                        .push(session.info(state.count(session.id)));
+                }
                 Err(err) => set_error(&mut response, session_error_code(&err), err),
             }
         }
@@ -1050,7 +1218,10 @@ async fn handle_command(
             let session = state.registry.lock().await.find_by_pane(pane_id);
             match session {
                 Some(session) => match session.split(pane_id, axis, ratio_bps).await {
-                    Ok(_) => response.layout = Some(response_layout(state, &session, focus)),
+                    Ok(_) => {
+                        state.watch_session(Arc::clone(&session));
+                        response.layout = Some(response_layout(state, &session, focus));
+                    }
                     Err(err) => set_error(&mut response, session_error_code(&err), err),
                 },
                 None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),

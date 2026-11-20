@@ -458,7 +458,8 @@ This is state, not a notification stream:
 - `SessionInfo.activity` summarizes working/blocked/done/error counts for the
   GUI session picker;
 - the GUI derives unread/attention state locally;
-- a local event stream can emit `program_status_changed` for scripts and agents;
+- the bounded local event stream emits `program_status_changed`,
+  `activity_changed`, and `pane_exited` for scripts and agents;
 - terminal clients can ignore the metadata or draw a simple indicator.
 
 OSC 7501 is deliberately generic. We do not make it Superlogical-specific, and

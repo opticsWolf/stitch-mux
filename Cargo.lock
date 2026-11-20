@@ -3403,6 +3403,7 @@ dependencies = [
 name = "stitch-mux-client"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "stitch-mux-core",
  "stitch-mux-protocol",
  "thiserror 2.0.21",
@@ -3473,6 +3474,7 @@ name = "stitch-mux-server"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "serde_json",
  "stitch-mux-client",
  "stitch-mux-core",
  "stitch-mux-protocol",

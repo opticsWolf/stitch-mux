@@ -327,6 +327,10 @@ where
     W: tokio::io::AsyncWrite + Unpin,
 {
     match frame.kind {
+        MessageKind::Event => {
+            let event: stitch_mux_protocol::Event = stitch_mux_protocol::decode_message(frame)?;
+            view.apply_event(event);
+        }
         MessageKind::Attached => {
             let attached: stitch_mux_protocol::Attached =
                 stitch_mux_protocol::decode_message(frame)?;

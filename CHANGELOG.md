@@ -4,6 +4,20 @@ All notable changes to stitch-mux are documented here. The project is local-only
 and single-user; versions follow the workspace version in `Cargo.toml` and the
 Python package version in `pyproject.toml`.
 
+## Unreleased (v0.2 work)
+
+### Added
+
+- **M7 program status and activity:** bounded mux-side OSC 7501 scanner,
+  current-status propagation to panes/sessions/GUI, textual attention badges,
+  activity filtering and local unread state in the reference GUI, a sourceable
+  shell helper, and a bounded local event stream with typed backpressure.
+
+### Fixed
+
+- Explicit `KillSession` now publishes `pane_exited` instead of racing the exit
+  watcher with task cancellation.
+
 ## 0.1.0 (v0.1 candidate, 2026-11-20)
 
 Not published to crates.io or PyPI. Publication requires explicit approval.
