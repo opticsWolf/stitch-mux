@@ -25,14 +25,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use stitch_mux_core::action::{ActionError, ActionRegistry};
 use stitch_mux_core::keymap::{ActionInvocation, Keymap as CoreKeymap, KeymapError};
-use stitch_mux_core::{Direction, LayoutError, Size, SplitAxis, layout_leaves};
+use stitch_mux_core::{
+    Direction, FLOAT_BPS, FloatBounds, LayoutError, Size, SplitAxis, layout_leaves,
+};
 use stitch_mux_protocol::{
     ActionInfo, Attach, CaptureRequest, ClaimMode, ClientInfo, Command, CommandRequest,
     CommandResponse, Connection, DEFAULT_SERVER_CAPABILITIES, Endpoint, EndpointError, ErrorCode,
     ErrorInfo, Event as WireEvent, Frame, FrameError, FrameWriter, Hello, HelloAck, InputEvent,
     KeyBinding, KeyMode, Keymap as WireKeymap, Layout, MessageKind, PROTOCOL_VERSION,
     ResizeRequest, RunPlacement, RunResult, Stream, SubscribeEvents, ViewMode, WaitResult,
-    WaitTarget, capabilities, decode_message,
+    WaitTarget, WindowFocus, capabilities, decode_message,
 };
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
@@ -1280,6 +1282,113 @@ async fn execute_action(
                 _ => (cols, rows.saturating_add(1)),
             };
             session.resize(cols, rows);
+            Ok(())
+        }
+        "window.create" => {
+            let name = invocation
+                .args
+                .as_ref()
+                .and_then(|args| args["name"].as_str())
+                .map(str::to_owned);
+            session
+                .create_window(name)
+                .await
+                .map_err(|err| (ErrorCode::Busy, err.to_string()))?;
+            Ok(())
+        }
+        "window.close" => {
+            let window_id = session.active_window_id();
+            session
+                .close_window(window_id)
+                .await
+                .map_err(|err| (ErrorCode::Busy, err.to_string()))?;
+            *focus = focused_pane(session, None);
+            Ok(())
+        }
+        "window.next" | "window.previous" => {
+            let target = if invocation.action == "window.next" {
+                WindowFocus::Next
+            } else {
+                WindowFocus::Previous
+            };
+            session
+                .focus_window(target)
+                .map_err(|err| (ErrorCode::Busy, err.to_string()))?;
+            *focus = focused_pane(session, None);
+            Ok(())
+        }
+        "pane.float" => {
+            let pane_id = pane_id.ok_or((ErrorCode::NotFound, "no focused pane".into()))?;
+            let args = invocation.args.as_ref();
+            let bps = |name: &str, default: u16| {
+                args.and_then(|args| args[name].as_u64())
+                    .unwrap_or(u64::from(default))
+                    .min(u64::from(FLOAT_BPS)) as u16
+            };
+            let bounds = FloatBounds::new(
+                bps("x_bps", FLOAT_BPS as u16 / 5),
+                bps("y_bps", FLOAT_BPS as u16 / 5),
+                bps("w_bps", FLOAT_BPS as u16 / 2),
+                bps("h_bps", FLOAT_BPS as u16 / 2),
+            );
+            session
+                .float_pane(pane_id, bounds)
+                .await
+                .map_err(|err| (ErrorCode::Busy, err.to_string()))?;
+            Ok(())
+        }
+        "pane.tile" => {
+            let pane_id = pane_id.ok_or((ErrorCode::NotFound, "no focused pane".into()))?;
+            let window_id = invocation
+                .args
+                .as_ref()
+                .and_then(|args| args["window_id"].as_u64())
+                .unwrap_or_else(|| session.active_window_id());
+            session
+                .tile_pane(pane_id, Some(window_id), None, SplitAxis::Columns, 5000)
+                .await
+                .map_err(|err| (ErrorCode::Busy, err.to_string()))?;
+            Ok(())
+        }
+        "floating.raise" | "floating.lower" | "floating.minimize" => {
+            let layout = session.layout(None);
+            let layer = invocation
+                .args
+                .as_ref()
+                .and_then(|args| args["layer_id"].as_u64())
+                .and_then(|id| {
+                    layout
+                        .windows
+                        .iter()
+                        .flat_map(|window| window.floating.iter())
+                        .find(|layer| layer.layer_id == id)
+                        .cloned()
+                })
+                .or_else(|| {
+                    layout
+                        .windows
+                        .iter()
+                        .flat_map(|window| window.floating.iter())
+                        .next()
+                        .cloned()
+                })
+                .ok_or((ErrorCode::NotFound, "no floating layer".into()))?;
+            let max_z = layout
+                .windows
+                .iter()
+                .flat_map(|window| window.floating.iter())
+                .map(|layer| layer.z)
+                .max()
+                .unwrap_or(0);
+            let (z, minimized) = match invocation.action.as_str() {
+                "floating.raise" => (Some(max_z.saturating_add(1)), None),
+                "floating.lower" => (Some(0), None),
+                _ => (None, Some(!layer.minimized)),
+            };
+            session
+                .set_floating_pane(layer.layer_id, None, z, minimized)
+                .await
+                .map_err(|err| (ErrorCode::Busy, err.to_string()))?;
             Ok(())
         }
         "client.detach" | "help.which-key" | "prompt.previous" | "prompt.next" => Err((

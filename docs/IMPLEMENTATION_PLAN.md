@@ -563,11 +563,12 @@ ownership.
 **Goal:** add the workspace features that make a GUI multiplexer feel larger than
 one tiled window, after the placement model is stable.
 
-**Status: In progress.** The daemon now owns an ordered window list, independent
-tiled trees per window, bounded fixed-point floating layers with z-order, and a
-full-workspace `Layout` projection alongside the active-window view. Window and
-layer commands are capability-gated and validate atomically. GUI tabs and CLI
-controls remain.
+**Status: Done.** The daemon owns an ordered window list, independent tiled
+trees per window, bounded fixed-point floating layers with z-order, and a
+full-workspace `Layout` projection alongside the active-window view. The egui
+reference UI has a tab strip plus window/layer controls; the CLI, agent skill,
+and daemon action registry expose the same operations. Real-PTY and unit tests
+cover windows, floating layers, owner/focus restoration, and atomic validation.
 
 **Estimate:** 8-12 engineer-days.
 

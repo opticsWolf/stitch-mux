@@ -15,8 +15,8 @@ use stitch_mux_core::keymap::{
     Keymap as CoreKeymap, KeymapError,
 };
 use stitch_mux_core::{
-    ActivitySummary, Color, LayoutNode, PaneId, PanePlacement, ProgramState, ProgramStatus,
-    ProgramStatusKind, Rect, Row, Size, SplitAxis,
+    ActivitySummary, Color, FLOAT_BPS, FloatBounds, LayoutNode, PaneId, PanePlacement,
+    ProgramState, ProgramStatus, ProgramStatusKind, Rect, Row, Size, SplitAxis,
 };
 use stitch_mux_protocol::{
     ActionInfo, Command, CommandRequest, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, InputEvent,
@@ -288,6 +288,10 @@ struct MuxApp {
     show_diagnostics: bool,
     /// Status-bar button that lists tiled, floating and detached panes.
     show_panes: bool,
+    /// Status-bar button and window that own multi-window/layer controls.
+    show_windows: bool,
+    /// Local buffers for window rename fields.
+    window_rename: HashMap<u64, String>,
     endpoint_text: String,
     log_path_text: String,
     /// Session picker filter and local unread/attention bookkeeping.
@@ -340,6 +344,8 @@ impl MuxApp {
             pane_scroll: HashMap::new(),
             show_diagnostics: false,
             show_panes: false,
+            show_windows: false,
+            window_rename: HashMap::new(),
             endpoint_text,
             log_path_text,
             session_filter: String::new(),
@@ -674,7 +680,7 @@ impl eframe::App for MuxApp {
             return;
         }
 
-        let (detach, diagnostics, panes) = self.status_ui(ui, &view);
+        let (detach, diagnostics, panes, windows) = self.status_ui(ui, &view);
         if diagnostics {
             self.show_diagnostics = !self.show_diagnostics;
             if self.show_diagnostics {
@@ -686,6 +692,9 @@ impl eframe::App for MuxApp {
             if self.show_panes {
                 self.refresh_sessions();
             }
+        }
+        if windows {
+            self.show_windows = !self.show_windows;
         }
         // The status bar is a real child of this layout, so the available rect
         // is already the pane grid: subtracting STATUS_H here left a dead strip
@@ -702,6 +711,9 @@ impl eframe::App for MuxApp {
             }));
         }
         self.sync_scroll(&view);
+        if let Some(action) = self.window_tabs_ui(ui, &view) {
+            self.apply_workspace_action(action);
+        }
         let actions = draw_panes(
             ui,
             &view,
@@ -771,6 +783,7 @@ impl eframe::App for MuxApp {
             }
         }
         self.palette_ui(ui, &view);
+        self.workspace_ui(ui, &view);
         self.panes_ui(ui, &view);
         self.diagnostics_ui(ui.ctx(), &view);
         self.link_ui(ui.ctx());
@@ -961,10 +974,11 @@ impl MuxApp {
         }
     }
 
-    fn status_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) -> (bool, bool, bool) {
+    fn status_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) -> (bool, bool, bool, bool) {
         let mut detach = false;
         let mut diagnostics = false;
         let mut panes = false;
+        let mut windows = false;
         ui.horizontal(|ui| {
             let color = if view.needs_resync {
                 egui::Color32::YELLOW
@@ -1016,6 +1030,7 @@ impl MuxApp {
             }
             detach = ui.button("Detach").clicked();
             panes = ui.button("Panes").clicked();
+            windows = ui.button("Windows").clicked();
             if ui
                 .button(if self.copy_on_selection {
                     "Copy: drag"
@@ -1033,7 +1048,212 @@ impl MuxApp {
             diagnostics = ui.button("Diagnostics").clicked();
         });
         ui.separator();
-        (detach, diagnostics, panes)
+        (detach, diagnostics, panes, windows)
+    }
+
+    /// Tab strip above the pane grid. It is a real child of the UI, so the
+    /// grid receives the reduced rect and sizes PTYs from the right geometry.
+    fn window_tabs_ui(&self, ui: &mut egui::Ui, view: &SessionView) -> Option<WorkspaceAction> {
+        let layout = view.layout.as_ref()?;
+        let mut action = None;
+        ui.horizontal(|ui| {
+            ui.label("Windows");
+            for window in &layout.windows {
+                let selected = layout.active_window_id == Some(window.id);
+                if ui
+                    .selectable_label(selected, format!("{} #{}", window.name, window.id))
+                    .clicked()
+                {
+                    action = Some(WorkspaceAction::Focus(window.id));
+                }
+            }
+            if ui.button("+").clicked() {
+                action = Some(WorkspaceAction::Create);
+            }
+        });
+        ui.separator();
+        action
+    }
+
+    /// Window and floating-layer controls. All geometry comes from the daemon's
+    /// layout projection; this UI only sends canonical commands.
+    fn workspace_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) {
+        if !self.show_windows {
+            return;
+        }
+        let windows = view
+            .layout
+            .as_ref()
+            .map(|layout| layout.windows.clone())
+            .unwrap_or_default();
+        let mut open = self.show_windows;
+        let mut action: Option<WorkspaceAction> = None;
+        egui::Window::new("Windows")
+            .open(&mut open)
+            .show(ui.ctx(), |ui| {
+                for window in &windows {
+                    ui.collapsing(format!("{} #{}", window.name, window.id), |ui| {
+                        let rename = self
+                            .window_rename
+                            .entry(window.id)
+                            .or_insert_with(|| window.name.clone());
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(rename);
+                            if ui.button("Rename").clicked() {
+                                action = Some(WorkspaceAction::Rename(window.id, rename.clone()));
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.button("Focus").clicked() {
+                                action = Some(WorkspaceAction::Focus(window.id));
+                            }
+                            if ui.button("Move left").clicked() {
+                                action = Some(WorkspaceAction::Move(window.id, -1));
+                            }
+                            if ui.button("Move right").clicked() {
+                                action = Some(WorkspaceAction::Move(window.id, 1));
+                            }
+                            if ui.button("Close").clicked() {
+                                action = Some(WorkspaceAction::Close(window.id));
+                            }
+                        });
+                        for pane in &window.panes {
+                            if ui.button(format!("Float pane #{}", pane.pane_id)).clicked() {
+                                action = Some(WorkspaceAction::Float(pane.pane_id));
+                            }
+                        }
+                        for layer in &window.floating {
+                            ui.horizontal(|ui| {
+                                ui.label(format!(
+                                    "layer {} pane {} [{:.0},{:.0},{:.0},{:.0}] z{}",
+                                    layer.layer_id,
+                                    layer.pane_id,
+                                    layer.bounds.x_bps as f32 / 100.0,
+                                    layer.bounds.y_bps as f32 / 100.0,
+                                    layer.bounds.w_bps as f32 / 100.0,
+                                    layer.bounds.h_bps as f32 / 100.0,
+                                    layer.z
+                                ));
+                                if ui.button("Raise").clicked() {
+                                    action = Some(WorkspaceAction::SetFloating {
+                                        layer_id: layer.layer_id,
+                                        z: Some(
+                                            window
+                                                .floating
+                                                .iter()
+                                                .map(|item| item.z)
+                                                .max()
+                                                .unwrap_or(0)
+                                                + 1,
+                                        ),
+                                        minimized: None,
+                                    });
+                                }
+                                if ui.button("Lower").clicked() {
+                                    action = Some(WorkspaceAction::SetFloating {
+                                        layer_id: layer.layer_id,
+                                        z: Some(0),
+                                        minimized: None,
+                                    });
+                                }
+                                if ui
+                                    .button(if layer.minimized {
+                                        "Restore"
+                                    } else {
+                                        "Minimize"
+                                    })
+                                    .clicked()
+                                {
+                                    action = Some(WorkspaceAction::SetFloating {
+                                        layer_id: layer.layer_id,
+                                        z: None,
+                                        minimized: Some(!layer.minimized),
+                                    });
+                                }
+                                if ui.button("Tile").clicked() {
+                                    action = Some(WorkspaceAction::Tile {
+                                        pane_id: layer.pane_id,
+                                        window_id: window.id,
+                                    });
+                                }
+                            });
+                        }
+                    });
+                }
+                if windows.is_empty() {
+                    ui.label("(no windows yet)");
+                }
+            });
+        self.show_windows = open;
+        if let Some(action) = action {
+            self.apply_workspace_action(action);
+        }
+    }
+
+    fn apply_workspace_action(&mut self, action: WorkspaceAction) {
+        let bps = (FLOAT_BPS / 5) as u16;
+        let half = (FLOAT_BPS / 2) as u16;
+        let default_bounds = FloatBounds::new(bps, bps, half, half);
+        match action {
+            WorkspaceAction::Create => {
+                self.send_command(Command::CreateWindow {
+                    session: self.selected.clone(),
+                    name: None,
+                });
+            }
+            WorkspaceAction::Focus(window_id) => {
+                self.send_command(Command::FocusWindow {
+                    target: stitch_mux_protocol::WindowFocus::Id(window_id),
+                });
+            }
+            WorkspaceAction::Close(window_id) => {
+                self.send_command(Command::CloseWindow { window_id });
+            }
+            WorkspaceAction::Rename(window_id, name) => {
+                self.send_command(Command::RenameWindow { window_id, name });
+            }
+            WorkspaceAction::Move(window_id, delta) => {
+                let layout = self
+                    .view_rx
+                    .as_ref()
+                    .and_then(|rx| rx.borrow().layout.clone());
+                let Some(layout) = layout else { return };
+                let order: Vec<u64> = layout.windows.iter().map(|window| window.id).collect();
+                let Some(current) = order.iter().position(|id| *id == window_id) else {
+                    return;
+                };
+                let index = (current as i32 + delta).clamp(0, order.len().saturating_sub(1) as i32)
+                    as usize;
+                self.send_command(Command::MoveWindow { window_id, index });
+            }
+            WorkspaceAction::Float(pane_id) => {
+                self.send_command(Command::FloatPane {
+                    pane_id,
+                    bounds: default_bounds,
+                });
+            }
+            WorkspaceAction::Tile { pane_id, window_id } => {
+                self.send_command(Command::TilePane {
+                    pane_id,
+                    window_id,
+                    anchor_pane_id: None,
+                    axis: SplitAxis::Columns,
+                    ratio_bps: 5000,
+                });
+            }
+            WorkspaceAction::SetFloating {
+                layer_id,
+                z,
+                minimized,
+            } => {
+                self.send_command(Command::SetFloatingPane {
+                    layer_id,
+                    bounds: None,
+                    z,
+                    minimized,
+                });
+            }
+        }
     }
 
     /// Background-pane list. Detached panes stay visible here even though they
@@ -1109,6 +1329,24 @@ impl MuxApp {
             };
         }
     }
+}
+
+enum WorkspaceAction {
+    Create,
+    Focus(u64),
+    Close(u64),
+    Rename(u64, String),
+    Move(u64, i32),
+    Float(u64),
+    Tile {
+        pane_id: u64,
+        window_id: u64,
+    },
+    SetFloating {
+        layer_id: u64,
+        z: Option<u32>,
+        minimized: Option<bool>,
+    },
 }
 
 enum PaneListAction {

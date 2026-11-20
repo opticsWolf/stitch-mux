@@ -6,7 +6,7 @@ This is the **operating protocol** for turning the design in
 document: update it in the **same commit** as the work it describes. It is not
 the wire protocol; that contract lives in [PROTOCOL.md](PROTOCOL.md).
 
-Last updated: **2026-11-20** — M0–M11 complete, M12 in progress; version `0.1.0`. Two post-M5
+Last updated: **2026-11-20** — M0–M12 complete; version `0.1.0`. Two post-M5
 review passes fixed split axes, viewport-delta drift, per-client delta seeding,
 named ANSI colors, egui/Qt input and scrolling, layout and pane-ID races,
 Windows endpoint concurrency, unbounded frame/input queues, and unbounded layout
@@ -239,7 +239,8 @@ Before marking a task Ready for review:
 | 2026-11-20 | Capture exports are style-preserving and bounded | `Vt` captures emit SGR from the authoritative cell styles; `Html` escapes user text and carries inline color/attribute styles. `start` is absolute, `lines` is capped at 1000, and `HistoryScreen` keeps at most `STITCH_MUX_SCROLLBACK` history rows (100..20000, default 2000) |
 | M11 — Detached panes and ownership | Done | Session-owned placement map, explicit `LayoutNode::Empty`, `DetachPane`/`PlacePane`, `ClaimPane`/`ReleasePane` size owners, placement/owner events, capability gating, CLI controls, GUI background-pane list, explicit detached-pane close, and real-PTY detach/place/exit tests landed; 30-minute soak stays an operator gate |
 | 2026-11-20 | Layouts have an explicit empty root | Removing the last tiled pane yields `LayoutNode::Empty`; closing that pane remains a separate destructive command. Cell-indexed link metadata and zoom state are cleared when geometry/root changes |
-| M12 — Multi-window and floating layers | In progress | Ordered session-owned windows, independent tiled trees, fixed-point floating bounds with z-order/minimize, `CreateWindow`/`CloseWindow`/`RenameWindow`/`MoveWindow`/`FocusWindow`/`FloatPane`/`TilePane`/`SetFloatingPane`, window-aware `Run`/`SetLayout`, atomic validation, active-window projection, and real-PTY workspace tests landed. GUI tabs and CLI controls remain |
+| M12 — Multi-window and floating layers | Done | Ordered session-owned windows, independent tiled trees, fixed-point floating bounds with z-order/minimize, window/layer commands and events, window-aware `Run`/`SetLayout`, atomic validation, active-window projection, GUI tabs/window controls, CLI and agent-skill surface, daemon-owned workspace actions, and real-PTY/unit tests landed |
+| 2026-11-20 | Terminal clients see one deterministic window | `Layout.root`/`panes` remain the active window projection; `windows` is additive for GUI peers. `window.next`/`window.previous` are daemon actions, not frontend-local shortcuts, so terminal and GUI clients agree on focus |
 | 2026-11-20 | Workspace geometry is daemon-owned | Windows have stable IDs and an explicit tab order; floating bounds are basis-point fractions so resizing the canonical viewport is deterministic. Every workspace mutation validates the whole workspace and restores the previous state on rejection |
 | 2026-11-20 | Closing a detached pane is explicit | `Session::close` handles detached panes without touching the tiled tree and removes the last pane/session only when `ClosePane` is issued. Placement metadata is registered for every pane creation path (`create`, `split`, `run`) so close and picker listings stay authoritative |
 | 2026-11-20 | The GUI never reconstructs background panes | The reference UI lists `PaneInfo` placements, offers detach/place/close from a status-bar window, and refreshes its cached session list only after the daemon answers the command; the same runtime is reused |

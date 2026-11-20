@@ -75,9 +75,15 @@ The local CLI also exposes `detach-pane -t PANE`, `place-pane -t PANE
 [--mode take|request]` and `release-pane -t PANE`. Detached panes keep their
 process and scrollback; `close -t PANE` is the explicit destructive operation.
 
-`run` creates a pane in the active window (split; new-window placement arrives
-with multi-window support), starts a program, and optionally waits for the child
-to exit:
+Window and layer operations are local and daemon-authoritative: `window-new`,
+`window-close`, `window-rename`, `window-move`, `window-focus
+[--next|--previous|--window ID]`, `float-pane --bounds x,y,w,h`, `tile-pane`,
+and `floating --layer ID [--bounds ...] [--z N] [--minimize|--restore]`.
+`run --window ID [--floating] [--bounds x,y,w,h]` places a child in a specific
+window; floating bounds are percentages of the canonical viewport.
+
+`run` creates a pane in the active window (split by default), starts a program,
+and optionally waits for the child to exit:
 
 ```sh
 stitch-mux run -s build --wait -- go test ./...

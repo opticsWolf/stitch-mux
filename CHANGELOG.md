@@ -8,6 +8,10 @@ Python package version in `pyproject.toml`.
 
 ### Added
 
+- **M12 workspace controls:** GUI tab strip with window create/focus controls,
+  a Windows panel for rename/reorder/close and floating raise/lower/minimize/
+  tile, CLI and agent-skill commands for all window/layer operations, and
+  daemon-owned `window.*`, `pane.float`/`pane.tile`, and `floating.*` actions.
 - **M12 workspace core:** daemon-owned ordered windows with independent tiled
   trees, bounded fixed-point floating layers with z-order/minimize, window-aware
   `Run`/`SetLayout`, typed window/layer commands and events, and an active-window

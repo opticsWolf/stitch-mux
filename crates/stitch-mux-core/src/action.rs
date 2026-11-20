@@ -254,6 +254,32 @@ impl ActionRegistry {
             ActionDefinition::new("prompt.next", "Jump to the next prompt")
                 .with_description("Uses shell-integration marks, never screen-text parsing.")
                 .with_category("navigation"),
+            ActionDefinition::new("window.create", "Create window").with_category("window"),
+            ActionDefinition::new("window.close", "Close window").with_category("window"),
+            ActionDefinition::new("window.next", "Focus next window").with_category("window"),
+            ActionDefinition::new("window.previous", "Focus previous window")
+                .with_category("window"),
+            ActionDefinition::new("pane.float", "Float pane")
+                .with_description("Convert the focused pane into a bounded floating layer.")
+                .with_category("layout")
+                .with_args(vec![
+                    ArgSpec::u64("x_bps", false),
+                    ArgSpec::u64("y_bps", false),
+                    ArgSpec::u64("w_bps", false),
+                    ArgSpec::u64("h_bps", false),
+                ]),
+            ActionDefinition::new("pane.tile", "Tile floating pane")
+                .with_category("layout")
+                .with_args(vec![ArgSpec::u64("window_id", false)]),
+            ActionDefinition::new("floating.raise", "Raise floating pane")
+                .with_category("layout")
+                .with_args(vec![ArgSpec::u64("layer_id", false)]),
+            ActionDefinition::new("floating.lower", "Lower floating pane")
+                .with_category("layout")
+                .with_args(vec![ArgSpec::u64("layer_id", false)]),
+            ActionDefinition::new("floating.minimize", "Toggle floating pane minimize")
+                .with_category("layout")
+                .with_args(vec![ArgSpec::u64("layer_id", false)]),
         ])
     }
 

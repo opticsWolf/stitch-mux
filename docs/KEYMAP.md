@@ -11,6 +11,8 @@ shortcut means, and there is no Lua or plugin hook.
 |---|---|---|
 | `C-b` | internal prefix | — |
 | `C-b %` | `pane.split` | `axis=columns`, `ratio_bps=5000` |
+| `C-b n` | `window.next` | Focus the next daemon-owned window |
+| `C-b p` | `window.previous` | Focus the previous daemon-owned window |
 | `C-b "` | `pane.split` | `axis=rows`, `ratio_bps=5000` |
 | `C-b Left/Right/Up/Down` | `pane.focus-*` | — |
 | `C-b x` | `pane.close` | — |

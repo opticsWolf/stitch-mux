@@ -26,6 +26,9 @@ Every control command writes one stable JSON envelope to stdout unless noted.
 | `send-keys -t PANE [--hex HEX] [KEY...]` | Encode named keys through `stitch-pty` (`enter`, `ctrl+c`, `f1`), or send raw bytes. |
 | `capture -t PANE [--start N] [--lines N] [--format text\|json\|cells] [--text]` | Bounded scrollback; `--text` prints rows only. Cap: 1000 rows. |
 | `split`, `close`, `zoom`, `rename`, `kill`, `clients`, `detach-client`, `shutdown` | Layout/client/session control. |
+| `window-new [-s NAME] [--name NAME]`, `window-close -w ID`, `window-rename -w ID --name NAME`, `window-move -w ID --index N`, `window-focus [--window ID|--next|--previous]` | Window/tab control. |
+| `float-pane -t PANE [--bounds X,Y,W,H]`, `tile-pane -t PANE -w WINDOW [--anchor PANE]`, `floating -l LAYER [--bounds X,Y,W,H] [--z N] [--minimize|--restore]` | Bounded floating-layer control. |
+| `run -s NAME --window ID [--floating] [--bounds X,Y,W,H] -- PROGRAM` | Spawn into a window or floating layer. |
 | `detach-pane -t PANE` | Remove a pane from the window without stopping its child; it stays in `ls` as `detached`. |
 | `place-pane -t PANE [--anchor PANE] [--axis columns\|rows] [--ratio N]` | Put a detached pane back into the window. |
 | `claim-pane -t PANE [--mode take\|request]`, `release-pane -t PANE` | Local size-owner preference; the smallest attached client remains the default. |
@@ -39,6 +42,9 @@ Every control command writes one stable JSON envelope to stdout unless noted.
 - `activity_changed` — aggregate working/blocked/done/error counts.
 - `pane_created`, `pane_exited`, `pane_placement_changed`,
   `pane_owner_changed` — pane lifecycle and local ownership.
+- `window_created`, `window_closed`, `window_renamed`, `window_moved`,
+  `window_focused`, `pane_floated`, `pane_tiled`, `floating_changed` —
+  workspace/layer changes.
 - `event_gap` — the pane's status stream dropped records locally.
 
 There is no replay log. Reconnect and rebuild state from `ls` and `capture`.

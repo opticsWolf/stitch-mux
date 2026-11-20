@@ -10,10 +10,10 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use stitch_mux_client::{ClientError, command as send_control, connect};
-use stitch_mux_core::{CaptureFormat, SplitAxis};
+use stitch_mux_core::{CaptureFormat, FLOAT_BPS, FloatBounds, SplitAxis};
 use stitch_mux_protocol::{
     ClaimMode, Command, CommandResponse, DEFAULT_CLIENT_CAPABILITIES, Detach, Endpoint, ErrorInfo,
-    Event, Hello, MessageKind, RunPlacement, SubscribeEvents, ViewMode, WaitTarget,
+    Event, Hello, MessageKind, RunPlacement, SubscribeEvents, ViewMode, WaitTarget, WindowFocus,
 };
 
 const SKILL_MD: &str = include_str!("../../../agent-skill/stitch-mux/SKILL.md");
@@ -156,8 +156,24 @@ enum Commands {
         #[arg(short = 's', long = "session", default_value = "default")]
         session: String,
         /// Pane to split; defaults to the session's first pane.
-        #[arg(short = 't', long = "target", value_name = "PANE_ID")]
+        #[arg(
+            short = 't',
+            long = "target",
+            value_name = "PANE_ID",
+            conflicts_with = "window"
+        )]
         target: Option<u64>,
+        #[arg(
+            short = 'w',
+            long = "window",
+            value_name = "WINDOW_ID",
+            conflicts_with = "target"
+        )]
+        window: Option<u64>,
+        #[arg(long, requires = "window")]
+        floating: bool,
+        #[arg(long, requires = "floating")]
+        bounds: Option<String>,
         #[arg(long, value_enum, default_value = "columns")]
         axis: CliSplitAxis,
         #[arg(long, default_value_t = 5000)]
@@ -174,6 +190,81 @@ enum Commands {
         keep_open: bool,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         program: Vec<String>,
+    },
+    /// Create an empty window/tab in a session.
+    WindowNew {
+        #[arg(short = 's', long = "session", default_value = "default")]
+        session: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Close a window and its panes.
+    WindowClose {
+        #[arg(short = 'w', long = "window", value_name = "WINDOW_ID")]
+        window: u64,
+    },
+    /// Rename a window.
+    WindowRename {
+        #[arg(short = 'w', long = "window", value_name = "WINDOW_ID")]
+        window: u64,
+        #[arg(long)]
+        name: String,
+    },
+    /// Move a window in the tab order.
+    WindowMove {
+        #[arg(short = 'w', long = "window", value_name = "WINDOW_ID")]
+        window: u64,
+        #[arg(long)]
+        index: usize,
+    },
+    /// Focus a window by ID, or step through tabs.
+    WindowFocus {
+        #[arg(
+            short = 'w',
+            long = "window",
+            value_name = "WINDOW_ID",
+            conflicts_with = "next",
+            conflicts_with = "previous"
+        )]
+        window: Option<u64>,
+        #[arg(long, conflicts_with = "window", conflicts_with = "previous")]
+        next: bool,
+        #[arg(long, conflicts_with = "window", conflicts_with = "next")]
+        previous: bool,
+    },
+    /// Convert a tiled pane into a floating layer.
+    FloatPane {
+        #[arg(short = 't', long = "target", value_name = "PANE_ID")]
+        target: u64,
+        /// Bounds as x,y,w,h percentages of the viewport.
+        #[arg(long, default_value = "20,20,50,50")]
+        bounds: String,
+    },
+    /// Return a floating pane to a window's tiled tree.
+    TilePane {
+        #[arg(short = 't', long = "target", value_name = "PANE_ID")]
+        target: u64,
+        #[arg(short = 'w', long = "window", value_name = "WINDOW_ID")]
+        window: u64,
+        #[arg(long, value_name = "PANE_ID")]
+        anchor: Option<u64>,
+        #[arg(long, value_enum, default_value = "columns")]
+        axis: CliSplitAxis,
+        #[arg(long, default_value_t = 5000)]
+        ratio: u16,
+    },
+    /// Change a floating layer's bounds, z-order, or minimized state.
+    Floating {
+        #[arg(short = 'l', long = "layer", value_name = "LAYER_ID")]
+        layer: u64,
+        #[arg(long)]
+        bounds: Option<String>,
+        #[arg(long)]
+        z: Option<u32>,
+        #[arg(long, conflicts_with = "restore")]
+        minimize: bool,
+        #[arg(long, conflicts_with = "minimize")]
+        restore: bool,
     },
     /// Wait for a pane or every pane in a session to exit.
     Wait {
@@ -253,6 +344,26 @@ enum Commands {
         #[arg(long)]
         timeout_ms: Option<u64>,
     },
+}
+
+fn parse_bounds(value: &str) -> Result<FloatBounds, String> {
+    let parts: Vec<u16> = value
+        .split(',')
+        .map(|part| part.trim().parse::<u16>().map_err(|err| err.to_string()))
+        .collect::<Result<_, _>>()?;
+    if parts.len() != 4 || parts.iter().any(|part| *part > 100) {
+        return Err("bounds must be x,y,w,h percentages".into());
+    }
+    if parts[0] + parts[2] > 100 || parts[1] + parts[3] > 100 {
+        return Err("bounds must stay inside the viewport".into());
+    }
+    let bps = |percent: u16| (u32::from(percent) * FLOAT_BPS / 100) as u16;
+    Ok(FloatBounds::new(
+        bps(parts[0]),
+        bps(parts[1]),
+        bps(parts[2]),
+        bps(parts[3]),
+    ))
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -825,6 +936,9 @@ async fn run(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
         Commands::Run {
             session,
             target,
+            window,
+            floating,
+            bounds,
             axis,
             ratio,
             cwd,
@@ -835,9 +949,28 @@ async fn run(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
             program,
         } => {
             let env = parse_env(env).map_err(CliError)?;
-            let pane_id = match target {
-                Some(id) => *id,
-                None => first_pane(&endpoint, session).await?,
+            let placement = if let Some(window_id) = window {
+                if *floating {
+                    RunPlacement::Floating {
+                        window_id: *window_id,
+                        bounds: parse_bounds(bounds.as_deref().unwrap_or("20,20,50,50"))
+                            .map_err(CliError)?,
+                    }
+                } else {
+                    RunPlacement::Window {
+                        window_id: *window_id,
+                    }
+                }
+            } else {
+                let pane_id = match target {
+                    Some(id) => *id,
+                    None => first_pane(&endpoint, session).await?,
+                };
+                RunPlacement::Split {
+                    pane_id,
+                    axis: (*axis).into(),
+                    ratio_bps: *ratio,
+                }
             };
             let response = match send_command_response(
                 &endpoint,
@@ -847,11 +980,7 @@ async fn run(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
                     args: program[1..].to_vec(),
                     cwd: cwd.clone(),
                     env,
-                    placement: RunPlacement::Split {
-                        pane_id,
-                        axis: (*axis).into(),
-                        ratio_bps: *ratio,
-                    },
+                    placement,
                     label: label.clone(),
                     wait: *wait,
                     keep_open: *keep_open,
@@ -868,6 +997,103 @@ async fn run(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
             } else {
                 Ok(status)
             }
+        }
+        Commands::WindowNew { session, name } => {
+            send_command(
+                &endpoint,
+                Command::CreateWindow {
+                    session: session.clone(),
+                    name: name.clone(),
+                },
+            )
+            .await
+        }
+        Commands::WindowClose { window } => {
+            send_command(&endpoint, Command::CloseWindow { window_id: *window }).await
+        }
+        Commands::WindowRename { window, name } => {
+            send_command(
+                &endpoint,
+                Command::RenameWindow {
+                    window_id: *window,
+                    name: name.clone(),
+                },
+            )
+            .await
+        }
+        Commands::WindowMove { window, index } => {
+            send_command(
+                &endpoint,
+                Command::MoveWindow {
+                    window_id: *window,
+                    index: *index,
+                },
+            )
+            .await
+        }
+        Commands::WindowFocus {
+            window,
+            next,
+            previous,
+        } => {
+            let target = match (window, next, previous) {
+                (Some(id), _, _) => WindowFocus::Id(*id),
+                (None, true, _) => WindowFocus::Next,
+                (None, _, true) => WindowFocus::Previous,
+                _ => WindowFocus::Next,
+            };
+            send_command(&endpoint, Command::FocusWindow { target }).await
+        }
+        Commands::FloatPane { target, bounds } => {
+            send_command(
+                &endpoint,
+                Command::FloatPane {
+                    pane_id: *target,
+                    bounds: parse_bounds(bounds).map_err(CliError)?,
+                },
+            )
+            .await
+        }
+        Commands::TilePane {
+            target,
+            window,
+            anchor,
+            axis,
+            ratio,
+        } => {
+            send_command(
+                &endpoint,
+                Command::TilePane {
+                    pane_id: *target,
+                    window_id: *window,
+                    anchor_pane_id: *anchor,
+                    axis: (*axis).into(),
+                    ratio_bps: *ratio,
+                },
+            )
+            .await
+        }
+        Commands::Floating {
+            layer,
+            bounds,
+            z,
+            minimize,
+            restore,
+        } => {
+            send_command(
+                &endpoint,
+                Command::SetFloatingPane {
+                    layer_id: *layer,
+                    bounds: bounds
+                        .as_deref()
+                        .map(parse_bounds)
+                        .transpose()
+                        .map_err(CliError)?,
+                    z: *z,
+                    minimized: (*minimize).then_some(true).or((*restore).then_some(false)),
+                },
+            )
+            .await
         }
         Commands::Wait {
             target,
