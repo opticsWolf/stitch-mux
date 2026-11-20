@@ -62,6 +62,10 @@ Rules:
 - Key names are canonical: `ctrl-b`, `Control-b`, and `C-b` mean the same key;
   `Up`, `Escape`/`Esc`, `F1`–`F12`, and literal single characters are accepted.
 - Hints are bounded (16 entries) and report the binding's source.
+- The egui frontend also handles local text selection keys before the keymap:
+  `Ctrl+C` copies a non-empty selection, `Ctrl+Shift+A` selects all retained
+  rows, and `Esc` clears the selection when no mode is active. These are not
+  daemon actions; with no selection, `Ctrl+C` still reaches the child.
 - `prompt.previous`/`prompt.next` and `client.detach`/`help.which-key` are
   frontend-local: the daemon advertises them in the action catalog but returns
   typed `Unsupported` if a client tries to invoke them there.

@@ -70,6 +70,29 @@ pub fn run(endpoint: Endpoint, session: Option<String>) -> Result<(), Box<dyn Er
     .map_err(|err| -> Box<dyn Error> { Box::new(err) })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CellPos {
+    /// Absolute screen row, so a selection survives scrollback growth.
+    row: u64,
+    col: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Selection {
+    anchor: CellPos,
+    head: CellPos,
+}
+
+impl Selection {
+    fn ordered(&self) -> (CellPos, CellPos) {
+        if (self.anchor.row, self.anchor.col) <= (self.head.row, self.head.col) {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct PaneScroll {
     seq: u64,
@@ -77,6 +100,7 @@ struct PaneScroll {
     visible: Vec<Row>,
     history: VecDeque<Row>,
     offset: usize,
+    selection: Option<Selection>,
 }
 
 fn core_keymap(wire: &WireKeymap) -> Result<CoreKeymap, KeymapError> {
@@ -276,6 +300,8 @@ struct MuxApp {
     palette_filter: String,
     /// A custom-scheme OSC 8 URI awaiting explicit user confirmation.
     pending_link: Option<String>,
+    /// Copy the selected terminal text as soon as a drag settles.
+    copy_on_selection: bool,
 }
 
 impl MuxApp {
@@ -319,6 +345,7 @@ impl MuxApp {
             show_palette: false,
             palette_filter: String::new(),
             pending_link: None,
+            copy_on_selection: true,
         };
         if !selected.is_empty() {
             app.attach(&selected);
@@ -464,6 +491,16 @@ impl MuxApp {
             state.scrollback_len = snapshot.scrollback_len;
             state.visible = snapshot.cells.clone();
             state.offset = state.offset.min(state.history.len());
+            let visible_len = snapshot.cells.len() as u64;
+            let oldest = snapshot
+                .total_lines
+                .saturating_sub(state.history.len() as u64 + visible_len);
+            if state.selection.is_some_and(|selection| {
+                let (start, end) = selection.ordered();
+                start.row < oldest || end.row >= snapshot.total_lines
+            }) {
+                state.selection = None;
+            }
         }
     }
 
@@ -637,7 +674,16 @@ impl eframe::App for MuxApp {
             }));
         }
         self.sync_scroll(&view);
-        let actions = draw_panes(ui, &view, grid, &mut self.pane_scroll);
+        let actions = draw_panes(
+            ui,
+            &view,
+            grid,
+            &mut self.pane_scroll,
+            self.copy_on_selection,
+        );
+        if let Some(text) = actions.copy {
+            copy_to_clipboard(ui.ctx(), &text);
+        }
         if let Some(uri) = actions.link {
             if safe_link_scheme(&uri) {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(uri));
@@ -917,6 +963,16 @@ impl MuxApp {
                 jump_prompt(&mut self.pane_scroll, view, false);
             }
             detach = ui.button("Detach").clicked();
+            if ui
+                .button(if self.copy_on_selection {
+                    "Copy: drag"
+                } else {
+                    "Copy: off"
+                })
+                .clicked()
+            {
+                self.copy_on_selection = !self.copy_on_selection;
+            }
             if ui.button("Actions").clicked() {
                 self.show_palette = true;
                 self.palette_filter.clear();
@@ -947,6 +1003,7 @@ struct DrawActions {
     panes: Vec<PaneAction>,
     drag: Option<SplitDrag>,
     link: Option<String>,
+    copy: Option<String>,
 }
 
 fn draw_panes(
@@ -954,11 +1011,13 @@ fn draw_panes(
     view: &SessionView,
     grid: egui::Rect,
     scroll: &mut HashMap<u64, PaneScroll>,
+    copy_on_selection: bool,
 ) -> DrawActions {
     let mut actions = DrawActions {
         panes: Vec::new(),
         drag: None,
         link: None,
+        copy: None,
     };
     ui.painter()
         .rect_filled(grid, 0.0, egui::Color32::from_gray(12));
@@ -1047,13 +1106,19 @@ fn draw_panes(
                 axis: SplitAxis::Columns,
             },
         ));
-        let click_pos = ui.input(|input| {
-            input
-                .pointer
-                .button_clicked(egui::PointerButton::Primary)
-                .then(|| input.pointer.latest_pos())
-                .flatten()
+        let pointer = ui.input(|input| {
+            (
+                input
+                    .pointer
+                    .button_clicked(egui::PointerButton::Primary)
+                    .then(|| input.pointer.latest_pos())
+                    .flatten(),
+                input.pointer.button_down(egui::PointerButton::Primary),
+                input.pointer.button_released(egui::PointerButton::Primary),
+                input.pointer.latest_pos(),
+            )
         });
+        let click_pos = pointer.0;
         // Title-bar buttons sit on the foreground layer so pane content (which
         // is painted afterwards and clipped to its own rect) can never hide
         // them.
@@ -1165,6 +1230,28 @@ fn draw_panes(
                 .unwrap_or(egui::Color32::LIGHT_GRAY);
             let origin = content.min + egui::vec2(0.0, y as f32 * cell_h);
             let max_chars = usize::from(geometry.content.cols);
+            let absolute_row = local_absolute_row(state, snapshot, index);
+            if let Some(absolute_row) = absolute_row
+                && let Some((first, last)) = selection_columns(state.selection, absolute_row)
+            {
+                let rect = egui::Rect::from_min_size(
+                    content.min
+                        + egui::vec2(first.min(max_chars) as f32 * cell_w, y as f32 * cell_h),
+                    egui::vec2(
+                        (last
+                            .min(max_chars.saturating_sub(1))
+                            .saturating_sub(first.min(max_chars))
+                            + 1) as f32
+                            * cell_w,
+                        cell_h,
+                    ),
+                );
+                ui.painter().rect_filled(
+                    rect,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(96, 165, 250, 90),
+                );
+            }
             let shown: String = line.chars().take(max_chars).collect();
             ui.painter().text(
                 origin,
@@ -1173,6 +1260,49 @@ fn draw_panes(
                 egui::FontId::monospace(FONT_SIZE.min(cell_h)),
                 color,
             );
+        }
+        if let Some(pos) = click_pos
+            && !button_clicked
+            && content.contains(pos)
+            && let Some(absolute_row) = pointer_row(state, snapshot, content, cell_h, pos)
+        {
+            let col = ((pos.x - content.min.x) / cell_w.max(1.0)) as usize;
+            state.selection = Some(Selection {
+                anchor: CellPos {
+                    row: absolute_row,
+                    col,
+                },
+                head: CellPos {
+                    row: absolute_row,
+                    col,
+                },
+            });
+        }
+        if pointer.1
+            && state.selection.is_some()
+            && let Some(pos) = pointer.3
+            && content.contains(pos)
+            && let Some(absolute_row) = pointer_row(state, snapshot, content, cell_h, pos)
+        {
+            let col = ((pos.x - content.min.x) / cell_w.max(1.0)) as usize;
+            if let Some(selection) = state.selection.as_mut() {
+                selection.head = CellPos {
+                    row: absolute_row,
+                    col,
+                };
+            }
+        }
+        if pointer.2
+            && copy_on_selection
+            && actions.copy.is_none()
+            && pointer.3.is_some_and(|pos| content.contains(pos))
+            && state
+                .selection
+                .is_some_and(|selection| selection.anchor != selection.head)
+            && let Some(text) = selection_text(state, snapshot)
+            && !text.is_empty()
+        {
+            actions.copy = Some(text);
         }
         if let Some(pos) = click_pos
             && actions.link.is_none()
@@ -1537,6 +1667,38 @@ fn handle_input(ui: &mut egui::Ui, app: &mut MuxApp, grid: egui::Rect, view: &Se
     let mut detach = false;
 
     for event in events {
+        if let egui::Event::Key { key, modifiers, .. } = &event {
+            let focused_pane = view.focus;
+            if *key == egui::Key::A && modifiers.ctrl && modifiers.shift {
+                if let Some(pane_id) = focused_pane
+                    && let Some(state) = app.pane_scroll.get_mut(&pane_id)
+                    && let Some(snapshot) =
+                        view.pane(pane_id).and_then(|pane| pane.snapshot.as_ref())
+                {
+                    select_all(state, snapshot);
+                }
+                continue;
+            }
+            if *key == egui::Key::C && modifiers.ctrl && !modifiers.alt && !modifiers.command {
+                let text: Option<String> = focused_pane.and_then(|pane_id| {
+                    app.pane_scroll
+                        .get(&pane_id)
+                        .zip(view.pane(pane_id).and_then(|pane| pane.snapshot.as_ref()))
+                        .and_then(|(state, snapshot)| selection_text(state, snapshot))
+                });
+                if let Some(text) = text {
+                    copy_to_clipboard(ui.ctx(), &text);
+                    continue;
+                }
+            }
+            if *key == egui::Key::Escape
+                && app.dispatcher.active_mode().is_none()
+                && let Some(pane_id) = focused_pane
+                && let Some(state) = app.pane_scroll.get_mut(&pane_id)
+            {
+                state.selection = None;
+            }
+        }
         match event {
             egui::Event::Text(text) if app.dispatcher.pending().is_empty() => {
                 if !text.contains('\n') && !text.contains('\r') {
@@ -1703,6 +1865,133 @@ fn send_keys(client: &ClientSession, keys: &[KeySpec]) {
 }
 
 /// Returns `true` when the action detached this client locally.
+fn copy_to_clipboard(ctx: &egui::Context, text: &str) {
+    ctx.copy_text(text.to_owned());
+    ctx.send_cmd(egui::OutputCommand::TextSelectionSettled(text.to_owned()));
+}
+
+fn local_absolute_row(
+    state: &PaneScroll,
+    snapshot: &stitch_mux_protocol::PaneSnapshot,
+    index: usize,
+) -> Option<u64> {
+    let visible_len = snapshot.cells.len() as u64;
+    let oldest = snapshot
+        .total_lines
+        .saturating_sub(state.history.len() as u64 + visible_len);
+    (index as u64)
+        .checked_add(oldest)
+        .filter(|row| *row < snapshot.total_lines)
+}
+
+fn pointer_row(
+    state: &PaneScroll,
+    snapshot: &stitch_mux_protocol::PaneSnapshot,
+    content: egui::Rect,
+    cell_h: f32,
+    pos: egui::Pos2,
+) -> Option<u64> {
+    let y = ((pos.y - content.min.y) / cell_h.max(1.0)) as usize;
+    let visible_rows = usize::from(snapshot.rows).min(snapshot.cells.len());
+    let (start, _) = scroll_window_range(
+        state.history.len(),
+        snapshot.cells.len(),
+        state.offset,
+        visible_rows,
+    );
+    (start..end_of_window(state, snapshot, visible_rows))
+        .nth(y)
+        .and_then(|index| local_absolute_row(state, snapshot, index))
+}
+
+fn end_of_window(
+    state: &PaneScroll,
+    snapshot: &stitch_mux_protocol::PaneSnapshot,
+    rows: usize,
+) -> usize {
+    scroll_window_range(
+        state.history.len(),
+        snapshot.cells.len(),
+        state.offset,
+        rows,
+    )
+    .1
+}
+
+fn selection_columns(selection: Option<Selection>, absolute_row: u64) -> Option<(usize, usize)> {
+    let selection = selection?;
+    let (start, end) = selection.ordered();
+    if absolute_row < start.row || absolute_row > end.row {
+        return None;
+    }
+    let first = if absolute_row == start.row {
+        start.col
+    } else {
+        0
+    };
+    let last = if absolute_row == end.row {
+        end.col
+    } else {
+        usize::MAX
+    };
+    Some((first, last))
+}
+
+fn selection_text(
+    state: &PaneScroll,
+    snapshot: &stitch_mux_protocol::PaneSnapshot,
+) -> Option<String> {
+    let selection = state.selection?;
+    let (start, end) = selection.ordered();
+    let visible_len = snapshot.cells.len() as u64;
+    let oldest = snapshot
+        .total_lines
+        .saturating_sub(state.history.len() as u64 + visible_len);
+    if start.row < oldest || end.row >= snapshot.total_lines {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for row in start.row..=end.row.min(start.row.saturating_add(999)) {
+        let index = (row.saturating_sub(oldest)) as usize;
+        let Some(cells) = scroll_row(&state.history, &snapshot.cells, index) else {
+            continue;
+        };
+        let (first, last) = selection_columns(Some(selection), row)?;
+        let last = last.min(cells.cells.len().saturating_sub(1));
+        if first > last {
+            continue;
+        }
+        let text: String = cells.cells[first..=last]
+            .iter()
+            .filter(|cell| cell.width > 0)
+            .map(|cell| cell.text.as_str())
+            .collect();
+        lines.push(text);
+    }
+    let joined = lines.join("\n");
+    (joined.len() <= 1024 * 1024).then_some(joined)
+}
+
+fn select_all(state: &mut PaneScroll, snapshot: &stitch_mux_protocol::PaneSnapshot) {
+    let oldest = snapshot
+        .total_lines
+        .saturating_sub(state.history.len() as u64 + snapshot.cells.len() as u64);
+    let last_col = snapshot
+        .cells
+        .first()
+        .map_or(0, |row| row.cells.len().saturating_sub(1));
+    state.selection = Some(Selection {
+        anchor: CellPos {
+            row: oldest,
+            col: 0,
+        },
+        head: CellPos {
+            row: snapshot.total_lines.saturating_sub(1),
+            col: last_col,
+        },
+    });
+}
+
 /// Only ubiquitous web/mail schemes open without a confirmation dialog. A
 /// child-controlled custom scheme must never be launched implicitly.
 fn safe_link_scheme(uri: &str) -> bool {
@@ -1982,6 +2271,51 @@ mod tests {
             total_lines,
             scrollback_bytes: 0,
         }
+    }
+
+    #[test]
+    fn selection_extracts_text_across_scrollback_and_skips_continuations() {
+        let row = |text: &str| Row {
+            cells: vec![Cell {
+                text: text.into(),
+                width: 1,
+                ..Cell::blank()
+            }],
+            wrapped: false,
+        };
+        let snapshot = stitch_mux_protocol::PaneSnapshot {
+            pane_id: 1,
+            seq: 1,
+            cols: 2,
+            rows: 2,
+            cells: vec![row("c"), row("d")],
+            cursor: Cursor::default(),
+            modes: Modes::default(),
+            title: "sh".into(),
+            cwd: None,
+            foreground: None,
+            shell_marks: None,
+            program_status: None,
+            alt_screen: false,
+            scrollback_len: 2,
+            total_lines: 4,
+            scrollback_bytes: 0,
+        };
+        let mut state = PaneScroll::default();
+        state.history.push_back(row("a"));
+        state.history.push_back(row("b"));
+        state.visible = snapshot.cells.clone();
+        state.selection = Some(Selection {
+            anchor: CellPos { row: 1, col: 0 },
+            head: CellPos { row: 2, col: 0 },
+        });
+        assert_eq!(selection_text(&state, &snapshot).as_deref(), Some("b\nc"));
+
+        select_all(&mut state, &snapshot);
+        assert_eq!(
+            selection_text(&state, &snapshot).as_deref(),
+            Some("a\nb\nc\nd")
+        );
     }
 
     #[test]

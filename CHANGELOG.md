@@ -24,6 +24,10 @@ Python package version in `pyproject.toml`.
   marks and cwd in pane snapshots, and `total_lines` lets clients map absolute
   marks to scrollback offsets. The GUI adds `prompt.previous`/`prompt.next`
   (`C-b [`/`C-b ]`) and ‹P/P› status-bar buttons; no screen text is parsed.
+- **M10 selection/copy:** the egui frontend selects cells across its bounded
+  scrollback overlay, copies with `Ctrl+C` or copy-on-drag, supports
+  `Ctrl+Shift+A` select-all and `Esc` clear, and publishes PRIMARY selection
+  where supported. With no selection, `Ctrl+C` still reaches the child.
 - **M10 hyperlinks:** bounded OSC 8 scans attach URIs to authoritative cells.
   Web/mail links open directly; custom schemes require an explicit
   confirmation dialog. A new [terminal fidelity](docs/TERMINAL-FIDELITY.md)

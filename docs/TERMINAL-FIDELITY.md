@@ -14,6 +14,11 @@ are.
   capped at 1000. `total_lines` gives clients an absolute row anchor.
 - **Scrollback:** `STITCH_MUX_SCROLLBACK` bounds daemon history rows
   (100..20000, default 2000). Frontends keep their own bounded local overlay.
+- **Selection/copy:** drag in the egui pane to select cells across the local
+  scrollback overlay. `Ctrl+C` copies a non-empty selection (otherwise it is
+  sent to the child), `Ctrl+Shift+A` selects all retained rows, `Esc` clears the
+  selection, and the status-bar `Copy: drag` toggle controls copy-on-selection.
+  Copying also publishes the PRIMARY selection on platforms that support it.
 - **OSC 8 links:** a bounded mux-side scanner records the active URI for
   printable cells. Link changes publish a full snapshot so clients see the
   metadata immediately. The egui reference client makes linked cells clickable.
@@ -41,7 +46,9 @@ text.
 - No sixel, Kitty image protocol, or other graphics support is implied.
 - Underline styles are mapped to a simple attribute bit, not full conformance
   with every underline variant.
-- There is no copy mode or buffer search in v0.2.
+- There is no copy mode or buffer search in v0.2. Selection is a direct drag
+  over the visible cells plus the frontend's bounded local scrollback, not a
+  daemon-side mode.
 - tmux control-mode compatibility is out of scope.
 - Desktop notifications and OSC 9;4 progress are not yet surfaced as typed
   metadata; their escape sequences still pass through to the screen unchanged.
