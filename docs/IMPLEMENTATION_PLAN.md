@@ -404,6 +404,10 @@ priority inbox, and multi-user aggregation.
 
 **Goal:** make the mux scriptable and agent-friendly without a remote API.
 
+**Status: In progress.** Daemon-side `Run`, `Wait`, authoritative exit state,
+and pane lifecycle events are implemented; the CLI surface and agent skill
+remain.
+
 **Estimate:** 5-7 engineer-days.
 
 Deliverables:

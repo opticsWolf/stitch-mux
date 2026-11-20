@@ -18,6 +18,10 @@ Python package version in `pyproject.toml`.
 - Explicit `KillSession` now publishes `pane_exited` instead of racing the exit
   watcher with task cancellation.
 
+- **M8 server primitives:** `Run` (split placement) and `Wait` (pane/session,
+  optional timeout) return authoritative exit codes and terminal state;
+  `pane_created` joins the local event stream.
+
 ## 0.1.0 (v0.1 candidate, 2026-11-20)
 
 Not published to crates.io or PyPI. Publication requires explicit approval.

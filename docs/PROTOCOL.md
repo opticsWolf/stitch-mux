@@ -935,7 +935,7 @@ The local CLI and agent skill use these control commands:
 `SubscribeEvents` (kind 26) starts a bounded local event stream. The server
 sends `Event` (kind 27) frames with a monotonic daemon-wide `seq` and a typed
 payload. Implemented v0.2 kinds: `session_list` (initial state),
-`program_status_changed`, `activity_changed`, `pane_exited`, and `event_gap`.
+`program_status_changed`, `activity_changed`, `pane_created`, `pane_exited`, and `event_gap`.
 Layout, window and owner events arrive with those features. Events are carried
 by a 256-entry broadcast queue; a subscriber that falls behind receives
 `Error { code: Busy, message: "event subscriber fell behind" }` and is
