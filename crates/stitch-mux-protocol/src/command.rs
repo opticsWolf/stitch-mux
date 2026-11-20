@@ -136,6 +136,9 @@ pub enum Command {
     InvokeAction {
         action: String,
         args: Option<ActionArgs>,
+        /// Lets a short-lived control connection choose the focused pane.
+        #[serde(default)]
+        focus_pane_id: Option<u64>,
     },
     ReloadKeymap {
         path: Option<String>,

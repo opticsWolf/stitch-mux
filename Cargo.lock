@@ -3427,6 +3427,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "serde_json",
  "stitch-mux-client",
  "stitch-mux-core",
  "stitch-mux-protocol",

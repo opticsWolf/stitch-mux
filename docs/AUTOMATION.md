@@ -8,12 +8,12 @@ or a hosted agent service.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the daemon model,
 [PROTOCOL.md](PROTOCOL.md) for the control messages, and
 [STITCH_PTY_GAPS.md](STITCH_PTY_GAPS.md) for upstream API gaps found while
-implementing status and automation.
+implementing status and automation, and [KEYMAP.md](KEYMAP.md) for bindings.
 
 **v0.1 status:** the CLI/control-command subset and file log are implemented.
 **v0.2 work landed:** program status, the bounded event stream, `run`/`wait`/
-`send`/`send-keys`/`capture`/`events --json`, and the local agent skill. Named
-actions/keymaps remain M9; no privileged hook is required for automation.
+`send`/`send-keys`/`capture`/`events --json`, the local agent skill, and the
+daemon-owned action/keymap system. No privileged hook is required.
 
 ## 1. What the automation surface is for
 
@@ -62,7 +62,10 @@ stitch-mux send --target "$PANE" 'make test'
 stitch-mux send-keys --target "$PANE" ctrl+c enter
 stitch-mux ls --json
 stitch-mux events --session work --timeout-ms 30000
-# M9: stitch-mux actions -s work / stitch-mux invoke -s work split-right
+stitch-mux actions
+stitch-mux get-keymap
+stitch-mux invoke pane.split --target "$PANE" --arg axis=columns --arg ratio_bps=5000
+stitch-mux reload-keymap --path ./keymap.json
 ```
 
 ### 3.1 `run` and `wait`

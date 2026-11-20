@@ -443,10 +443,9 @@ authorization. A local MCP wrapper may be added later over the same CLI.
 **Goal:** replace ad-hoc shortcuts with a named action system shared by GUI,
 terminal, and CLI.
 
-**Status: In progress.** The core action registry, typed argument validation,
-canonical key names, keymap config merging, mode/sequence dispatcher, and
-deterministic dispatch tests are implemented; protocol/server/frontend wiring
-remains.
+**Status: Done.** The core registry/dispatcher, daemon commands and events,
+CLI, terminal and egui frontends, JSON keymap reload, command palette, and
+which-key/mode indicators are implemented with unit and integration tests.
 
 **Estimate:** 4-6 engineer-days.
 

@@ -152,6 +152,9 @@ cargo run -p stitch-mux -- run -s task --wait -- sh -c 'exit 7'  # exits 7
 cargo run -p stitch-mux -- capture -t 101 --lines 200 --text
 cargo run -p stitch-mux -- events --session task --timeout-ms 5000
 cargo run -p stitch-mux -- skill-install --targets pi,claude
+cargo run -p stitch-mux -- actions
+cargo run -p stitch-mux -- get-keymap
+cargo run -p stitch-mux -- invoke pane.split -t 101 --arg axis=columns --arg ratio_bps=5000
 ```
 
 On Windows use `cmd.exe` instead of `sh`. `stitch-mux gui -s demo` skips the

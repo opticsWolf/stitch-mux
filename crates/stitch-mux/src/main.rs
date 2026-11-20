@@ -191,6 +191,23 @@ enum Commands {
         #[arg(long)]
         text: bool,
     },
+    /// List daemon-owned actions as JSON.
+    Actions,
+    /// Print the effective keymap, including sources and modes.
+    GetKeymap,
+    /// Invoke a named action with optional KEY=VALUE arguments.
+    Invoke {
+        action: String,
+        #[arg(long = "arg", value_name = "KEY=VALUE")]
+        args: Vec<String>,
+        #[arg(short = 't', long = "target", value_name = "PANE_ID")]
+        target: Option<u64>,
+    },
+    /// Reload JSON key bindings without restarting the daemon.
+    ReloadKeymap {
+        #[arg(long)]
+        path: Option<String>,
+    },
     /// Install the local-only agent skill into user-level skill directories.
     SkillInstall {
         #[arg(long)]
@@ -324,6 +341,29 @@ async fn send_command_response(
             Err(ExitCode::from(1))
         }
     }
+}
+
+fn parse_action_args(entries: &[String]) -> Result<Option<serde_json::Value>, Box<dyn Error>> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let mut map = serde_json::Map::new();
+    for entry in entries {
+        let (key, raw) = entry
+            .split_once('=')
+            .ok_or_else(|| CliError(format!("invalid --arg {entry:?}; expected KEY=VALUE")))?;
+        let value = match raw {
+            "true" => serde_json::Value::Bool(true),
+            "false" => serde_json::Value::Bool(false),
+            "null" => serde_json::Value::Null,
+            _ if raw.starts_with('{') || raw.starts_with('[') => serde_json::from_str(raw)?,
+            _ if raw.parse::<i64>().is_ok() => serde_json::json!(raw.parse::<i64>()?),
+            _ if raw.parse::<u64>().is_ok() => serde_json::json!(raw.parse::<u64>()?),
+            _ => serde_json::Value::String(raw.to_owned()),
+        };
+        map.insert(key.to_owned(), value);
+    }
+    Ok(Some(serde_json::Value::Object(map)))
 }
 
 fn child_exit_code(response: &CommandResponse) -> ExitCode {
@@ -845,6 +885,27 @@ async fn run(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
             } else {
                 Ok(print_response(response))
             }
+        }
+        Commands::Actions => send_command(&endpoint, Command::ListActions).await,
+        Commands::GetKeymap => send_command(&endpoint, Command::GetKeymap).await,
+        Commands::Invoke {
+            action,
+            args,
+            target,
+        } => {
+            let args = parse_action_args(args)?;
+            send_command(
+                &endpoint,
+                Command::InvokeAction {
+                    action: action.clone(),
+                    args,
+                    focus_pane_id: *target,
+                },
+            )
+            .await
+        }
+        Commands::ReloadKeymap { path } => {
+            send_command(&endpoint, Command::ReloadKeymap { path: path.clone() }).await
         }
         Commands::SkillInstall { root, targets } => install_skill(root.clone(), targets),
         Commands::Events {

@@ -10,13 +10,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 use stitch_mux_client::{ClientSession, Outbound, SessionView, command, size_from_pixels};
+use stitch_mux_core::keymap::{
+    DispatchOutcome, KeyBinding as CoreKeyBinding, KeyDispatcher, KeyMode as CoreKeyMode, KeySpec,
+    Keymap as CoreKeymap, KeymapError,
+};
 use stitch_mux_core::{
-    ActivitySummary, Color, Direction, LayoutNode, PaneId, ProgramState, ProgramStatus,
-    ProgramStatusKind, Rect, Row, Size, SplitAxis,
+    ActivitySummary, Color, LayoutNode, PaneId, ProgramState, ProgramStatus, ProgramStatusKind,
+    Rect, Row, Size, SplitAxis,
 };
 use stitch_mux_protocol::{
-    Command, CommandRequest, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, InputEvent, KeyCode,
-    KeyEvent, KeyEventKind, Layout, PaneGeometry, SessionInfo, ViewMode,
+    ActionInfo, Command, CommandRequest, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, InputEvent,
+    KeyCode, KeyEvent, KeyEventKind, Keymap as WireKeymap, Layout, PaneGeometry, SessionInfo,
+    ViewMode,
 };
 use tokio::sync::watch;
 
@@ -74,6 +79,163 @@ struct PaneScroll {
     offset: usize,
 }
 
+fn core_keymap(wire: &WireKeymap) -> Result<CoreKeymap, KeymapError> {
+    let mut core = CoreKeymap::default();
+    for binding in &wire.bindings {
+        core.bindings.push(CoreKeyBinding {
+            keys: binding
+                .keys
+                .iter()
+                .map(|key| KeySpec::parse(key))
+                .collect::<Result<_, _>>()?,
+            action: binding.action.clone(),
+            args: binding.args.clone(),
+            mode: binding.mode.clone(),
+            source: binding.source.clone(),
+        });
+    }
+    core.modes = wire
+        .modes
+        .iter()
+        .map(|mode| CoreKeyMode {
+            name: mode.name.clone(),
+            exclusive: mode.exclusive,
+        })
+        .collect();
+    Ok(core)
+}
+
+fn egui_key_name(key: egui::Key) -> Option<String> {
+    use egui::Key;
+    let name = match key {
+        Key::ArrowLeft => "Left",
+        Key::ArrowRight => "Right",
+        Key::ArrowUp => "Up",
+        Key::ArrowDown => "Down",
+        Key::Escape => "Esc",
+        Key::Enter => "Enter",
+        Key::Tab => "Tab",
+        Key::Backspace => "Backspace",
+        Key::Space => "Space",
+        Key::Insert => "Insert",
+        Key::Delete => "Delete",
+        Key::Home => "Home",
+        Key::End => "End",
+        Key::PageUp => "PageUp",
+        Key::PageDown => "PageDown",
+        Key::Questionmark => "?",
+        Key::Colon => ":",
+        Key::Comma => ",",
+        Key::Backslash => "\\",
+        Key::Slash => "/",
+        Key::Pipe => "|",
+        Key::Exclamationmark => "!",
+        Key::OpenBracket => "[",
+        Key::CloseBracket => "]",
+        Key::OpenCurlyBracket => "{",
+        Key::CloseCurlyBracket => "}",
+        Key::Backtick => "`",
+        Key::Minus => "-",
+        Key::Period => ".",
+        Key::Plus => "+",
+        Key::Equals => "=",
+        Key::Semicolon => ";",
+        Key::Quote => "'",
+        Key::A => "a",
+        Key::B => "b",
+        Key::C => "c",
+        Key::D => "d",
+        Key::E => "e",
+        Key::F => "f",
+        Key::G => "g",
+        Key::H => "h",
+        Key::I => "i",
+        Key::J => "j",
+        Key::K => "k",
+        Key::L => "l",
+        Key::M => "m",
+        Key::N => "n",
+        Key::O => "o",
+        Key::P => "p",
+        Key::Q => "q",
+        Key::R => "r",
+        Key::S => "s",
+        Key::T => "t",
+        Key::U => "u",
+        Key::V => "v",
+        Key::W => "w",
+        Key::X => "x",
+        Key::Y => "y",
+        Key::Z => "z",
+        Key::Num0 => "0",
+        Key::Num1 => "1",
+        Key::Num2 => "2",
+        Key::Num3 => "3",
+        Key::Num4 => "4",
+        Key::Num5 => "5",
+        Key::Num6 => "6",
+        Key::Num7 => "7",
+        Key::Num8 => "8",
+        Key::Num9 => "9",
+        Key::F1 => "F1",
+        Key::F2 => "F2",
+        Key::F3 => "F3",
+        Key::F4 => "F4",
+        Key::F5 => "F5",
+        Key::F6 => "F6",
+        Key::F7 => "F7",
+        Key::F8 => "F8",
+        Key::F9 => "F9",
+        Key::F10 => "F10",
+        Key::F11 => "F11",
+        Key::F12 => "F12",
+        _ => return None,
+    };
+    Some(name.to_owned())
+}
+
+fn key_spec_code(spec: &KeySpec) -> Option<KeyCode> {
+    match spec.key() {
+        "Enter" => Some(KeyCode::Enter),
+        "Tab" => Some(KeyCode::Tab),
+        "Backspace" => Some(KeyCode::Backspace),
+        "Esc" => Some(KeyCode::Esc),
+        "Left" => Some(KeyCode::Left),
+        "Right" => Some(KeyCode::Right),
+        "Up" => Some(KeyCode::Up),
+        "Down" => Some(KeyCode::Down),
+        "Home" => Some(KeyCode::Home),
+        "End" => Some(KeyCode::End),
+        "PageUp" => Some(KeyCode::PageUp),
+        "PageDown" => Some(KeyCode::PageDown),
+        "Delete" => Some(KeyCode::Delete),
+        "Insert" => Some(KeyCode::Insert),
+        "Space" => Some(KeyCode::Char(' ')),
+        value if value.starts_with('F') && value[1..].parse::<u8>().is_ok() => {
+            Some(KeyCode::F(value[1..].parse::<u8>().ok()?))
+        }
+        value => value.chars().next().map(KeyCode::Char),
+    }
+}
+
+fn key_spec_event(spec: &KeySpec, kind: KeyEventKind) -> Option<KeyEvent> {
+    let mut modifiers = 0_u16;
+    for modifier in spec.modifiers() {
+        modifiers |= match modifier {
+            "C" => 4,
+            "M" => 2,
+            "S" => 1,
+            _ => 0,
+        };
+    }
+    Some(KeyEvent {
+        code: key_spec_code(spec)?,
+        modifiers,
+        kind,
+        text: None,
+    })
+}
+
 struct MuxApp {
     endpoint: Endpoint,
     sessions: Vec<SessionInfo>,
@@ -103,6 +265,15 @@ struct MuxApp {
     session_filter: String,
     attention_only: bool,
     seen_activity: HashMap<String, u64>,
+    /// Daemon-owned action catalog and effective keymap, cached for local
+    /// dispatch. The daemon remains authoritative.
+    actions: Vec<ActionInfo>,
+    dispatcher: KeyDispatcher,
+    keymap_request_id: u64,
+    applied_keymap_request: u64,
+    key_hints: Vec<String>,
+    show_palette: bool,
+    palette_filter: String,
 }
 
 impl MuxApp {
@@ -138,6 +309,13 @@ impl MuxApp {
             session_filter: String::new(),
             attention_only: false,
             seen_activity: HashMap::new(),
+            actions: Vec::new(),
+            dispatcher: KeyDispatcher::new(CoreKeymap::builtin()),
+            keymap_request_id: 0,
+            applied_keymap_request: 0,
+            key_hints: Vec::new(),
+            show_palette: false,
+            palette_filter: String::new(),
         };
         if !selected.is_empty() {
             app.attach(&selected);
@@ -164,6 +342,8 @@ impl MuxApp {
             Ok(client) => {
                 self.view_rx = Some(client.subscribe());
                 self.client = Some(client);
+                self.keymap_request_id = self.send_command(Command::GetKeymap);
+                self.send_command(Command::ListActions);
                 self.selected = name.to_owned();
                 self.error = None;
                 self.lost_session = None;
@@ -236,13 +416,14 @@ impl MuxApp {
         }
     }
 
-    fn send_command(&mut self, command: Command) {
+    fn send_command(&mut self, command: Command) -> u64 {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
         self.send(Outbound::Command(CommandRequest {
             request_id,
             command,
         }));
+        request_id
     }
 
     /// Keep a bounded local copy of rows that scroll off the visible screen.
@@ -381,6 +562,37 @@ impl eframe::App for MuxApp {
         // the user moves the mouse.
         ui.ctx().request_repaint_after(Duration::from_millis(16));
         let view = receiver.borrow_and_update().clone();
+        if let Some(last) = &view.last_command {
+            if !last.actions.is_empty() {
+                self.actions = last.actions.clone();
+            }
+            if last.request_id == self.keymap_request_id
+                && self.applied_keymap_request != last.request_id
+                && let Some(keymap) = &last.keymap
+            {
+                match core_keymap(keymap) {
+                    Ok(keymap) => self.dispatcher.set_keymap(keymap),
+                    Err(err) => self.error = Some(format!("invalid daemon keymap: {err}")),
+                }
+                self.applied_keymap_request = last.request_id;
+            }
+        }
+        let open_palette = ui.input(|input| {
+            input.modifiers.ctrl
+                && input.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::P,
+                            ..
+                        }
+                    )
+                })
+        });
+        if open_palette {
+            self.show_palette = !self.show_palette;
+            self.palette_filter.clear();
+        }
         // Reading a session's status marks it seen. Unread state is local to
         // this GUI; the daemon only publishes the current status record.
         for pane in view.panes.values() {
@@ -465,7 +677,14 @@ impl eframe::App for MuxApp {
             self.view_rx = None;
             self.handle.spawn(async move { client.detach().await });
         }
-        handle_input(ui, self.client.as_ref(), grid);
+        if !self.show_palette {
+            let detach_from_key = handle_input(ui, self, grid);
+            if detach_from_key && let Some(client) = self.client.take() {
+                self.view_rx = None;
+                self.handle.spawn(async move { client.detach().await });
+            }
+        }
+        self.palette_ui(ui, &view);
         self.diagnostics_ui(ui.ctx(), &view);
     }
 
@@ -574,6 +793,57 @@ impl MuxApp {
     }
 
     /// Paint session information in a status bar above the pane grid.
+    fn view_focus(&self) -> Option<u64> {
+        self.view_rx
+            .as_ref()
+            .map(|rx| rx.borrow().focus)
+            .unwrap_or(None)
+    }
+
+    fn palette_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) {
+        if !self.show_palette {
+            return;
+        }
+        let actions = self.actions.clone();
+        let mut open = self.show_palette;
+        let mut filter = self.palette_filter.clone();
+        let mut selected: Option<String> = None;
+        egui::Window::new("Command palette")
+            .open(&mut open)
+            .show(ui.ctx(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Action:");
+                    ui.text_edit_singleline(&mut filter);
+                });
+                let needle = filter.to_ascii_lowercase();
+                for action in &actions {
+                    if !action.name.contains(&needle)
+                        && !action.title.to_ascii_lowercase().contains(&needle)
+                    {
+                        continue;
+                    }
+                    if ui
+                        .button(format!("{} — {}", action.name, action.title))
+                        .clicked()
+                    {
+                        selected = Some(action.name.clone());
+                    }
+                }
+                if actions.is_empty() {
+                    ui.label("(waiting for the daemon action catalog)");
+                }
+            });
+        self.show_palette = open;
+        self.palette_filter = filter;
+        if let Some(action) = selected {
+            self.send_command(Command::InvokeAction {
+                action,
+                args: None,
+                focus_pane_id: view.focus,
+            });
+        }
+    }
+
     fn status_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) -> (bool, bool) {
         let mut detach = false;
         let mut diagnostics = false;
@@ -586,6 +856,12 @@ impl MuxApp {
                 egui::Color32::LIGHT_GRAY
             };
             ui.colored_label(color, status_text(view));
+            if let Some(mode) = self.dispatcher.active_mode() {
+                ui.label(format!("[{mode}]"));
+            }
+            if !self.key_hints.is_empty() {
+                ui.small(self.key_hints.join(" | "));
+            }
             if let Some(error) = &view.error {
                 ui.colored_label(egui::Color32::RED, &error.message);
             }
@@ -596,6 +872,10 @@ impl MuxApp {
                 self.send(Outbound::Resync);
             }
             detach = ui.button("Detach").clicked();
+            if ui.button("Actions").clicked() {
+                self.show_palette = true;
+                self.palette_filter.clear();
+            }
             diagnostics = ui.button("Diagnostics").clicked();
         });
         ui.separator();
@@ -1181,25 +1461,64 @@ fn color32(color: Color) -> egui::Color32 {
     }
 }
 
-fn handle_input(ui: &mut egui::Ui, client: Option<&ClientSession>, grid: egui::Rect) {
-    let Some(client) = client else {
-        return;
+fn handle_input(ui: &mut egui::Ui, app: &mut MuxApp, grid: egui::Rect) -> bool {
+    let Some(client) = app.client.as_ref() else {
+        return false;
     };
-    // One focus id owns keyboard input for every pane. Pane clicks request it
-    // explicitly; never pull focus away from title-bar buttons.
     ui.interact(grid, input_focus(), egui::Sense::focusable_noninteractive());
     let focused = ui.memory(|memory| memory.focused());
     if focused.is_none() {
         ui.memory_mut(|memory| memory.request_focus(input_focus()));
     } else if focused != Some(input_focus()) {
-        return;
+        return false;
     }
     let events = ui.input(|input| input.events.clone());
+    let mut detach = false;
 
     for event in events {
         match event {
-            egui::Event::Text(text) if !text.contains('\n') && !text.contains('\r') => {
-                client.send(Outbound::Input(InputEvent::Text(text)));
+            egui::Event::Text(text) if app.dispatcher.pending().is_empty() => {
+                if !text.contains('\n') && !text.contains('\r') {
+                    client.send(Outbound::Input(InputEvent::Text(text)));
+                }
+            }
+            egui::Event::Text(text) => {
+                for character in text.chars() {
+                    if let Ok(spec) = KeySpec::parse(&character.to_string()) {
+                        match app.dispatcher.dispatch(spec) {
+                            DispatchOutcome::NeedMore { hints } => app.key_hints = hints,
+                            DispatchOutcome::Passthrough(keys) => send_keys(client, &keys),
+                            DispatchOutcome::ModeEntered(mode) => {
+                                app.key_hints = vec![format!("-- {mode} --")];
+                            }
+                            DispatchOutcome::ModeExited => app.key_hints.clear(),
+                            DispatchOutcome::Action(invocation) => {
+                                if invocation.action == "help.which-key" {
+                                    app.key_hints = app.dispatcher.hints();
+                                }
+                                if invoke_frontend_action(
+                                    client,
+                                    &app.actions,
+                                    &invocation,
+                                    &app.dispatcher,
+                                ) {
+                                    detach = true;
+                                } else {
+                                    client.send(Outbound::Command(CommandRequest {
+                                        request_id: app.next_request_id.wrapping_add(1).max(1),
+                                        command: Command::InvokeAction {
+                                            action: invocation.action,
+                                            args: invocation.args,
+                                            focus_pane_id: app.view_focus(),
+                                        },
+                                    }));
+                                    app.next_request_id =
+                                        app.next_request_id.wrapping_add(1).max(1);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             egui::Event::Paste(text) => {
                 client.send(Outbound::Input(InputEvent::Paste(text)));
@@ -1210,25 +1529,55 @@ fn handle_input(ui: &mut egui::Ui, client: Option<&ClientSession>, grid: egui::R
                 modifiers,
                 ..
             } => {
-                if modifiers.ctrl {
-                    let direction = match key {
-                        egui::Key::ArrowLeft => Some(Direction::Left),
-                        egui::Key::ArrowRight => Some(Direction::Right),
-                        egui::Key::ArrowUp => Some(Direction::Up),
-                        egui::Key::ArrowDown => Some(Direction::Down),
-                        _ => None,
-                    };
-                    if let Some(direction) = direction {
-                        client.send(Outbound::FocusDirection(direction));
+                if !repeat && let Some(name) = egui_key_name(key) {
+                    let mut names = Vec::new();
+                    if modifiers.ctrl {
+                        names.push("ctrl");
+                    }
+                    if modifiers.alt {
+                        names.push("alt");
+                    }
+                    if modifiers.shift {
+                        names.push("shift");
+                    }
+                    if let Ok(spec) = KeySpec::from_parts(&name, &names) {
+                        match app.dispatcher.dispatch(spec) {
+                            DispatchOutcome::NeedMore { hints } => app.key_hints = hints,
+                            DispatchOutcome::Passthrough(keys) => send_keys(client, &keys),
+                            DispatchOutcome::ModeEntered(mode) => {
+                                app.key_hints = vec![format!("-- {mode} --")];
+                            }
+                            DispatchOutcome::ModeExited => app.key_hints.clear(),
+                            DispatchOutcome::Action(invocation) => {
+                                if invocation.action == "help.which-key" {
+                                    app.key_hints = app.dispatcher.hints();
+                                }
+                                if invoke_frontend_action(
+                                    client,
+                                    &app.actions,
+                                    &invocation,
+                                    &app.dispatcher,
+                                ) {
+                                    detach = true;
+                                } else {
+                                    client.send(Outbound::Command(CommandRequest {
+                                        request_id: app.next_request_id.wrapping_add(1).max(1),
+                                        command: Command::InvokeAction {
+                                            action: invocation.action,
+                                            args: invocation.args,
+                                            focus_pane_id: app.view_focus(),
+                                        },
+                                    }));
+                                    app.next_request_id =
+                                        app.next_request_id.wrapping_add(1).max(1);
+                                }
+                            }
+                        }
                         continue;
                     }
                 }
-                // egui suppresses `Event::Text` while Ctrl/Alt/Cmd is held, so
-                // letters, digits, and punctuation must be sent as keys then.
-                // Shift-only typing stays on the text path to avoid duplicates.
-                let modified = modifiers.ctrl || modifiers.alt || modifiers.command;
                 let Some(code) = map_key(key).or_else(|| {
-                    if modified {
+                    if modifiers.ctrl || modifiers.alt || modifiers.command {
                         map_modified_key(key)
                     } else {
                         None
@@ -1262,6 +1611,33 @@ fn handle_input(ui: &mut egui::Ui, client: Option<&ClientSession>, grid: egui::R
             }
             _ => {}
         }
+    }
+    detach
+}
+
+fn send_keys(client: &ClientSession, keys: &[KeySpec]) {
+    for spec in keys {
+        if let Some(event) = key_spec_event(spec, KeyEventKind::Press) {
+            client.send(Outbound::Input(InputEvent::Key(event)));
+        }
+    }
+}
+
+/// Returns `true` when the action detached this client locally.
+fn invoke_frontend_action(
+    client: &ClientSession,
+    _actions: &[ActionInfo],
+    invocation: &stitch_mux_core::keymap::ActionInvocation,
+    dispatcher: &KeyDispatcher,
+) -> bool {
+    match invocation.action.as_str() {
+        "client.detach" => true,
+        "help.which-key" => {
+            let _ = client;
+            let _ = dispatcher;
+            false
+        }
+        _ => false,
     }
 }
 
@@ -1660,5 +2036,49 @@ mod tests {
         assert!(bottom.max.y > track.max.y - 8.0);
         let (_, top) = scrollbar_rect(content, 5, 5, 5).unwrap();
         assert_eq!(top.min.y, track.min.y);
+    }
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+    use stitch_mux_protocol::{KeyBinding, KeyMode};
+
+    #[test]
+    fn wire_keymap_is_converted_for_local_dispatch() {
+        let wire = WireKeymap {
+            bindings: vec![KeyBinding {
+                keys: vec!["C-b".into(), "%".into()],
+                action: "pane.split".into(),
+                args: Some(serde_json::json!({"axis": "columns", "ratio_bps": 5000})),
+                mode: None,
+                source: "user".into(),
+            }],
+            modes: vec![KeyMode {
+                name: "resize".into(),
+                exclusive: true,
+            }],
+        };
+        let core = core_keymap(&wire).expect("conversion");
+        let mut dispatcher = KeyDispatcher::new(core);
+        assert!(matches!(
+            dispatcher.dispatch(KeySpec::parse("C-b").expect("prefix")),
+            DispatchOutcome::NeedMore { .. }
+        ));
+        assert_eq!(
+            dispatcher.dispatch(KeySpec::parse("%").expect("split")),
+            DispatchOutcome::Action(stitch_mux_core::keymap::ActionInvocation {
+                action: "pane.split".into(),
+                args: Some(serde_json::json!({"axis": "columns", "ratio_bps": 5000})),
+            })
+        );
+    }
+
+    #[test]
+    fn gui_key_names_are_canonical() {
+        assert_eq!(egui_key_name(egui::Key::ArrowLeft).as_deref(), Some("Left"));
+        assert_eq!(egui_key_name(egui::Key::Escape).as_deref(), Some("Esc"));
+        assert_eq!(egui_key_name(egui::Key::X).as_deref(), Some("x"));
+        assert_eq!(egui_key_name(egui::Key::F12).as_deref(), Some("F12"));
     }
 }

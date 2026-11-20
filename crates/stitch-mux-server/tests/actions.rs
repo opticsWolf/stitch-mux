@@ -147,6 +147,7 @@ async fn registry_keymap_and_actions_work_over_an_attached_client() {
         Command::InvokeAction {
             action: "pane.split".into(),
             args: Some(serde_json::json!({"axis": "diagonal", "ratio_bps": 5000})),
+            focus_pane_id: None,
         },
     )
     .await;
@@ -163,6 +164,7 @@ async fn registry_keymap_and_actions_work_over_an_attached_client() {
         Command::InvokeAction {
             action: "pane.split".into(),
             args: Some(serde_json::json!({"axis": "columns", "ratio_bps": 5000})),
+            focus_pane_id: None,
         },
     )
     .await;
@@ -176,6 +178,7 @@ async fn registry_keymap_and_actions_work_over_an_attached_client() {
         Command::InvokeAction {
             action: "pane.nope".into(),
             args: None,
+            focus_pane_id: None,
         },
     )
     .await;

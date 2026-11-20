@@ -21,3 +21,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 stitch-mux-client.workspace = true
 stitch-mux-protocol.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

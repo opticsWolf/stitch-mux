@@ -380,6 +380,7 @@ where
         }
         MessageKind::CommandResponse => {
             let response: CommandResponse = stitch_mux_protocol::decode_message(frame)?;
+            view.apply_catalog(&response);
             view.apply_command_response(response);
         }
         MessageKind::Error => {

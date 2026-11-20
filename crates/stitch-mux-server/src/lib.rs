@@ -1678,7 +1678,11 @@ async fn handle_command(
                 response.keymap = Some(state.wire_keymap());
             }
         }
-        Command::InvokeAction { action, args } => {
+        Command::InvokeAction {
+            action,
+            args,
+            focus_pane_id,
+        } => {
             if client_caps & capabilities::client::ACTIONS == 0 {
                 set_error(
                     &mut response,
@@ -1688,11 +1692,12 @@ async fn handle_command(
                 return response;
             }
             let invocation = ActionInvocation { action, args };
-            let session = match *focus {
+            let requested_focus = focus_pane_id.or(*focus);
+            let session = match requested_focus {
                 Some(pane_id) => state.registry.lock().await.find_by_pane(pane_id),
                 None => None,
             };
-            let mut effective = *focus;
+            let mut effective = requested_focus;
             match execute_action(state, session.as_ref(), &mut effective, &invocation).await {
                 Ok(()) => {
                     *focus = effective;

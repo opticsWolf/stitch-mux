@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crossterm::cursor::{MoveTo, RestorePosition, SavePosition};
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode as HostKeyCode,
     KeyEvent as HostKeyEvent, KeyEventKind as HostKeyEventKind, KeyModifiers as HostModifiers,
@@ -16,12 +17,15 @@ use crossterm::event::{
     read,
 };
 use crossterm::execute;
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use stitch_mux_client::{ClientError, ClientSession, Outbound};
 use stitch_mux_core::Direction;
+use stitch_mux_core::keymap::{
+    DispatchOutcome, KeyDispatcher, KeySpec, Keymap as CoreKeymap, KeymapError,
+};
 use stitch_mux_protocol::{
-    DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, InputEvent, KeyCode, KeyEvent, KeyEventKind,
-    PROTOCOL_VERSION, ResizeRequest, ViewMode,
+    Command, CommandRequest, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, InputEvent, KeyCode,
+    KeyEvent, KeyEventKind, Keymap as WireKeymap, PROTOCOL_VERSION, ResizeRequest, ViewMode,
 };
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -153,6 +157,122 @@ pub fn resize_request(cols: u16, rows: u16) -> ResizeRequest {
     }
 }
 
+fn host_key_name(key: &HostKeyEvent) -> Option<String> {
+    match key.code {
+        HostKeyCode::Char(value) => Some(value.to_string()),
+        HostKeyCode::Enter => Some("Enter".into()),
+        HostKeyCode::Tab => Some("Tab".into()),
+        HostKeyCode::BackTab => Some("Tab".into()),
+        HostKeyCode::Backspace => Some("Backspace".into()),
+        HostKeyCode::Esc => Some("Esc".into()),
+        HostKeyCode::Left => Some("Left".into()),
+        HostKeyCode::Right => Some("Right".into()),
+        HostKeyCode::Up => Some("Up".into()),
+        HostKeyCode::Down => Some("Down".into()),
+        HostKeyCode::Home => Some("Home".into()),
+        HostKeyCode::End => Some("End".into()),
+        HostKeyCode::PageUp => Some("PageUp".into()),
+        HostKeyCode::PageDown => Some("PageDown".into()),
+        HostKeyCode::Delete => Some("Delete".into()),
+        HostKeyCode::Insert => Some("Insert".into()),
+        HostKeyCode::F(number) => Some(format!("F{number}")),
+        _ => None,
+    }
+}
+
+fn host_modifiers(key: &HostKeyEvent) -> Vec<&'static str> {
+    let mut modifiers = Vec::new();
+    if key.modifiers.contains(HostModifiers::CONTROL) {
+        modifiers.push("ctrl");
+    }
+    if key.modifiers.contains(HostModifiers::ALT) {
+        modifiers.push("alt");
+    }
+    if key.modifiers.contains(HostModifiers::SHIFT) {
+        modifiers.push("shift");
+    }
+    modifiers
+}
+
+fn protocol_key(code: &str) -> Option<KeyCode> {
+    match code {
+        "Enter" => Some(KeyCode::Enter),
+        "Tab" => Some(KeyCode::Tab),
+        "Backspace" => Some(KeyCode::Backspace),
+        "Esc" => Some(KeyCode::Esc),
+        "Left" => Some(KeyCode::Left),
+        "Right" => Some(KeyCode::Right),
+        "Up" => Some(KeyCode::Up),
+        "Down" => Some(KeyCode::Down),
+        "Home" => Some(KeyCode::Home),
+        "End" => Some(KeyCode::End),
+        "PageUp" => Some(KeyCode::PageUp),
+        "PageDown" => Some(KeyCode::PageDown),
+        "Delete" => Some(KeyCode::Delete),
+        "Insert" => Some(KeyCode::Insert),
+        value if value.starts_with('F') && value[1..].parse::<u8>().is_ok() => {
+            Some(KeyCode::F(value[1..].parse::<u8>().ok()?))
+        }
+        value => value.chars().next().map(KeyCode::Char),
+    }
+}
+
+fn key_event(spec: &KeySpec, kind: KeyEventKind) -> Option<KeyEvent> {
+    let mut modifiers = 0_u16;
+    for modifier in spec.modifiers() {
+        modifiers |= match modifier {
+            "C" => 4,
+            "M" => 2,
+            "S" => 1,
+            _ => 0,
+        };
+    }
+    Some(KeyEvent {
+        code: protocol_key(spec.key())?,
+        modifiers,
+        kind,
+        text: None,
+    })
+}
+
+fn core_keymap(wire: &WireKeymap) -> Result<CoreKeymap, KeymapError> {
+    let mut core = CoreKeymap::default();
+    for binding in &wire.bindings {
+        core.bindings.push(stitch_mux_core::keymap::KeyBinding {
+            keys: binding
+                .keys
+                .iter()
+                .map(|key| KeySpec::parse(key))
+                .collect::<Result<_, _>>()?,
+            action: binding.action.clone(),
+            args: binding.args.clone(),
+            mode: binding.mode.clone(),
+            source: binding.source.clone(),
+        });
+    }
+    core.modes = wire
+        .modes
+        .iter()
+        .map(|mode| stitch_mux_core::keymap::KeyMode {
+            name: mode.name.clone(),
+            exclusive: mode.exclusive,
+        })
+        .collect();
+    Ok(core)
+}
+
+fn paint_status(stdout: &mut io::Stdout, text: &str) -> io::Result<()> {
+    let (_, rows) = crossterm::terminal::size()?;
+    execute!(
+        stdout,
+        SavePosition,
+        MoveTo(0, rows.saturating_sub(1)),
+        Clear(ClearType::CurrentLine),
+        crossterm::style::Print(text)
+    )?;
+    execute!(stdout, RestorePosition)
+}
+
 fn hello(cols: u16, rows: u16) -> Hello {
     Hello {
         protocol_version: PROTOCOL_VERSION,
@@ -258,6 +378,17 @@ async fn run_attached(
     );
     let client_ref = client.as_ref().expect("client attached");
     let mut view_rx = client_ref.subscribe();
+    client_ref.send(Outbound::Command(CommandRequest {
+        request_id: 1,
+        command: Command::ListActions,
+    }));
+    client_ref.send(Outbound::Command(CommandRequest {
+        request_id: 2,
+        command: Command::GetKeymap,
+    }));
+    let mut dispatcher = KeyDispatcher::new(CoreKeymap::builtin());
+    let mut keymap_loaded = false;
+    let mut request_id = 10_u64;
     let mut written_seq = 0_u64;
     let mut prefix = false;
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Event>();
@@ -289,6 +420,13 @@ async fn run_attached(
                 }
                 {
                     let view = view_rx.borrow_and_update();
+                    if !keymap_loaded && let Some(keymap) = &view.keymap {
+                        match core_keymap(keymap) {
+                            Ok(keymap) => dispatcher.set_keymap(keymap),
+                            Err(err) => eprintln!("stitch-mux: invalid keymap from daemon: {err}"),
+                        }
+                        keymap_loaded = true;
+                    }
                     if view.connection == stitch_mux_client::ConnectionState::Lost {
                         if let Some(error) = &view.error {
                             eprintln!("stitch-mux: session lost: {:?}: {}", error.code, error.message);
@@ -336,6 +474,55 @@ async fn run_attached(
                         }
                     }
                     continue;
+                }
+                if key.kind == HostKeyEventKind::Press
+                    && let Some(name) = host_key_name(&key)
+                    && let Ok(spec) = KeySpec::from_parts(&name, &host_modifiers(&key))
+                {
+                    match dispatcher.dispatch(spec) {
+                        DispatchOutcome::NeedMore { hints } => {
+                            let _ = paint_status(stdout, &format!("keys: {}", hints.join(" | ")));
+                            continue;
+                        }
+                        DispatchOutcome::Passthrough(keys) => {
+                            for spec in keys {
+                                if let Some(event) = key_event(&spec, KeyEventKind::Press) {
+                                    client_ref.send(Outbound::Input(InputEvent::Key(event)));
+                                }
+                            }
+                            continue;
+                        }
+                        DispatchOutcome::ModeEntered(mode) => {
+                            let _ = paint_status(stdout, &format!("-- {mode} --"));
+                            continue;
+                        }
+                        DispatchOutcome::ModeExited => {
+                            let _ = paint_status(stdout, "");
+                            continue;
+                        }
+                        DispatchOutcome::Action(invocation) => {
+                            if invocation.action == "client.detach" {
+                                detached = true;
+                                break;
+                            }
+                            if invocation.action == "help.which-key" {
+                                let hints = dispatcher.hints();
+                                let _ =
+                                    paint_status(stdout, &format!("keys: {}", hints.join(" | ")));
+                                continue;
+                            }
+                            client_ref.send(Outbound::Command(CommandRequest {
+                                request_id,
+                                command: Command::InvokeAction {
+                                    action: invocation.action,
+                                    args: invocation.args,
+                                    focus_pane_id: client_ref.view().focus,
+                                },
+                            }));
+                            request_id = request_id.wrapping_add(1).max(10);
+                            continue;
+                        }
+                    }
                 }
                 if let Some(key) = map_key(key) {
                     client_ref.send(Outbound::Input(InputEvent::Key(key)));

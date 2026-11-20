@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use stitch_mux_core::{ActivitySummary, Row, Size};
 use stitch_mux_protocol::{
-    Attached, CommandResponse, ErrorInfo, Event, Focus, Layout, PaneDelta, PaneSnapshot, Render,
-    ResizeEvent, SessionExit,
+    ActionInfo, Attached, CommandResponse, ErrorInfo, Event, Focus, Keymap, Layout, PaneDelta,
+    PaneSnapshot, Render, ResizeEvent, SessionExit,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -111,6 +111,9 @@ pub struct SessionView {
     /// Latest bounded local event from `SubscribeEvents`. Frontends that want
     /// history must keep their own bounded projection; the wire has no replay.
     pub last_event: Option<Event>,
+    /// Cached action/keymap responses from `ListActions`/`GetKeymap`.
+    pub actions: Vec<ActionInfo>,
+    pub keymap: Option<Keymap>,
 }
 
 impl SessionView {
@@ -189,6 +192,15 @@ impl SessionView {
 
     pub fn apply_event(&mut self, event: Event) {
         self.last_event = Some(event);
+    }
+
+    pub fn apply_catalog(&mut self, response: &CommandResponse) {
+        if !response.actions.is_empty() {
+            self.actions = response.actions.clone();
+        }
+        if let Some(keymap) = &response.keymap {
+            self.keymap = Some(keymap.clone());
+        }
     }
 
     pub fn apply_command_response(&mut self, response: CommandResponse) {
