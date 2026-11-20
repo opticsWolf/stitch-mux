@@ -174,9 +174,12 @@ async fn run_wait_returns_the_child_status_and_can_remove_the_pane() {
     let result = run.run.expect("run result");
     assert_eq!(result.exit_code, Some(0));
     assert!(!result.timed_out);
-    assert!(
-        run.layout.expect("layout").panes.len() == 1,
-        "completed pane should have been removed"
+    let layout = run.layout.expect("layout");
+    assert_eq!(
+        layout.panes.len(),
+        1,
+        "completed pane should have been removed: {:?}",
+        layout.panes.iter().map(|p| p.pane_id).collect::<Vec<_>>()
     );
 
     server.abort();

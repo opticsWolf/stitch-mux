@@ -1326,9 +1326,7 @@ fn session_error_code(error: &SessionError) -> ErrorCode {
     match error {
         SessionError::PaneNotFound(_) | SessionError::NotFound(_) => ErrorCode::NotFound,
         SessionError::StaleLayout { .. } => ErrorCode::Busy,
-        SessionError::AlreadyExists(_) | SessionError::LastPane | SessionError::NotOwner { .. } => {
-            ErrorCode::Busy
-        }
+        SessionError::AlreadyExists(_) | SessionError::NotOwner { .. } => ErrorCode::Busy,
         SessionError::PaneNotTiled(_) => ErrorCode::InvalidArgs,
         _ => ErrorCode::Internal,
     }

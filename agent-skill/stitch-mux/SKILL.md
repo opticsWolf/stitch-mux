@@ -51,6 +51,8 @@ stitch-mux events --session build --timeout-ms 30000
   `ls`/`capture` rather than asking for history.
 - `capture --text` prints plain rows; without it the command prints a stable
   JSON envelope. `--lines` is capped by the daemon (1000 rows).
+- Detached panes keep running and can be placed back with `place-pane`;
+  `close` is the explicit destructive operation.
 - New-window placement is not available until M12. Use the default split
   placement for v0.1/v0.2.
 - Keep logs local. `STITCH_MUX_LOG` overrides the local log path; never ship

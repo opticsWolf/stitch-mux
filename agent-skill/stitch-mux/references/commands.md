@@ -26,6 +26,9 @@ Every control command writes one stable JSON envelope to stdout unless noted.
 | `send-keys -t PANE [--hex HEX] [KEY...]` | Encode named keys through `stitch-pty` (`enter`, `ctrl+c`, `f1`), or send raw bytes. |
 | `capture -t PANE [--start N] [--lines N] [--format text\|json\|cells] [--text]` | Bounded scrollback; `--text` prints rows only. Cap: 1000 rows. |
 | `split`, `close`, `zoom`, `rename`, `kill`, `clients`, `detach-client`, `shutdown` | Layout/client/session control. |
+| `detach-pane -t PANE` | Remove a pane from the window without stopping its child; it stays in `ls` as `detached`. |
+| `place-pane -t PANE [--anchor PANE] [--axis columns\|rows] [--ratio N]` | Put a detached pane back into the window. |
+| `claim-pane -t PANE [--mode take\|request]`, `release-pane -t PANE` | Local size-owner preference; the smallest attached client remains the default. |
 | `events [--session NAME] [--all] [--timeout-ms N]` | NDJSON stream of typed local events with monotonic `seq`. |
 
 ## Event kinds shipped in v0.2
@@ -34,7 +37,8 @@ Every control command writes one stable JSON envelope to stdout unless noted.
   subscribers.
 - `program_status_changed` — latest OSC 7501 record for a pane.
 - `activity_changed` — aggregate working/blocked/done/error counts.
-- `pane_created`, `pane_exited` — pane lifecycle.
+- `pane_created`, `pane_exited`, `pane_placement_changed`,
+  `pane_owner_changed` — pane lifecycle and local ownership.
 - `event_gap` — the pane's status stream dropped records locally.
 
 There is no replay log. Reconnect and rebuild state from `ls` and `capture`.

@@ -15,8 +15,8 @@ use stitch_mux_core::keymap::{
     Keymap as CoreKeymap, KeymapError,
 };
 use stitch_mux_core::{
-    ActivitySummary, Color, LayoutNode, PaneId, ProgramState, ProgramStatus, ProgramStatusKind,
-    Rect, Row, Size, SplitAxis,
+    ActivitySummary, Color, LayoutNode, PaneId, PanePlacement, ProgramState, ProgramStatus,
+    ProgramStatusKind, Rect, Row, Size, SplitAxis,
 };
 use stitch_mux_protocol::{
     ActionInfo, Command, CommandRequest, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, InputEvent,
@@ -286,10 +286,14 @@ struct MuxApp {
     pane_scroll: HashMap<u64, PaneScroll>,
     /// F1 / the status-bar button opens local connection diagnostics.
     show_diagnostics: bool,
+    /// Status-bar button that lists tiled, floating and detached panes.
+    show_panes: bool,
     endpoint_text: String,
     log_path_text: String,
     /// Session picker filter and local unread/attention bookkeeping.
     session_filter: String,
+    /// Command whose completion should refresh the cached session list.
+    session_refresh_request_id: u64,
     attention_only: bool,
     seen_activity: HashMap<String, u64>,
     /// Daemon-owned action catalog and effective keymap, cached for local
@@ -335,9 +339,11 @@ impl MuxApp {
             split_drag: None,
             pane_scroll: HashMap::new(),
             show_diagnostics: false,
+            show_panes: false,
             endpoint_text,
             log_path_text,
             session_filter: String::new(),
+            session_refresh_request_id: 0,
             attention_only: false,
             seen_activity: HashMap::new(),
             actions: Vec::new(),
@@ -564,8 +570,12 @@ impl MuxApp {
                     ));
                     for pane in &info.panes {
                         ui.small(format!(
-                            "  #{} {} ({}x{})",
-                            pane.id, pane.title, pane.cols, pane.rows
+                            "  #{} {} [{}] ({}x{})",
+                            pane.id,
+                            pane.title,
+                            placement_label(pane.placement),
+                            pane.cols,
+                            pane.rows
                         ));
                     }
                 }
@@ -605,6 +615,15 @@ impl eframe::App for MuxApp {
         // the user moves the mouse.
         ui.ctx().request_repaint_after(Duration::from_millis(16));
         let view = receiver.borrow_and_update().clone();
+        if self.session_refresh_request_id != 0
+            && view
+                .last_command
+                .as_ref()
+                .is_some_and(|last| last.request_id == self.session_refresh_request_id)
+        {
+            self.session_refresh_request_id = 0;
+            self.refresh_sessions();
+        }
         if let Some(last) = &view.last_command {
             if !last.actions.is_empty() {
                 self.actions = last.actions.clone();
@@ -655,10 +674,16 @@ impl eframe::App for MuxApp {
             return;
         }
 
-        let (detach, diagnostics) = self.status_ui(ui, &view);
+        let (detach, diagnostics, panes) = self.status_ui(ui, &view);
         if diagnostics {
             self.show_diagnostics = !self.show_diagnostics;
             if self.show_diagnostics {
+                self.refresh_sessions();
+            }
+        }
+        if panes {
+            self.show_panes = !self.show_panes;
+            if self.show_panes {
                 self.refresh_sessions();
             }
         }
@@ -744,6 +769,7 @@ impl eframe::App for MuxApp {
             }
         }
         self.palette_ui(ui, &view);
+        self.panes_ui(ui, &view);
         self.diagnostics_ui(ui.ctx(), &view);
         self.link_ui(ui.ctx());
     }
@@ -818,10 +844,11 @@ impl MuxApp {
                     .iter()
                     .map(|pane| {
                         format!(
-                            "{}{} ({}) {}x{}",
+                            "{}{} ({}) [{}] {}x{}",
                             status_badge(pane.program_status.as_ref()),
                             pane.title,
                             pane.id,
+                            placement_label(pane.placement),
                             pane.cols,
                             pane.rows
                         )
@@ -932,9 +959,10 @@ impl MuxApp {
         }
     }
 
-    fn status_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) -> (bool, bool) {
+    fn status_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) -> (bool, bool, bool) {
         let mut detach = false;
         let mut diagnostics = false;
+        let mut panes = false;
         ui.horizontal(|ui| {
             let color = if view.needs_resync {
                 egui::Color32::YELLOW
@@ -985,6 +1013,7 @@ impl MuxApp {
                 jump_prompt(&mut self.pane_scroll, view, false);
             }
             detach = ui.button("Detach").clicked();
+            panes = ui.button("Panes").clicked();
             if ui
                 .button(if self.copy_on_selection {
                     "Copy: drag"
@@ -1002,7 +1031,95 @@ impl MuxApp {
             diagnostics = ui.button("Diagnostics").clicked();
         });
         ui.separator();
-        (detach, diagnostics)
+        (detach, diagnostics, panes)
+    }
+
+    /// Background-pane list. Detached panes stay visible here even though they
+    /// have no geometry in the tiled grid: place them back, close them, or
+    /// inspect their last-known status without attaching another client.
+    fn panes_ui(&mut self, ui: &mut egui::Ui, view: &SessionView) {
+        if !self.show_panes {
+            return;
+        }
+        let mut open = self.show_panes;
+        let mut refresh = false;
+        let mut action: Option<PaneListAction> = None;
+        let sessions = self.sessions.clone();
+        let selected = self.selected.clone();
+        egui::Window::new("Panes")
+            .open(&mut open)
+            .show(ui.ctx(), |ui| {
+                ui.label(format!("Session: {selected}"));
+                let Some(info) = sessions.iter().find(|info| info.name == selected) else {
+                    ui.label("(session not listed; refresh to retry)");
+                    refresh = ui.button("Refresh").clicked();
+                    return;
+                };
+                for pane in &info.panes {
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                            "#{} {} [{}] {}x{}",
+                            pane.id,
+                            pane.title,
+                            placement_label(pane.placement),
+                            pane.cols,
+                            pane.rows
+                        ));
+                        match pane.placement {
+                            PanePlacement::Tiled => {
+                                if ui.button("Detach").clicked() {
+                                    action = Some(PaneListAction::Detach(pane.id));
+                                }
+                            }
+                            PanePlacement::Detached => {
+                                if ui.button("Place").clicked() {
+                                    action = Some(PaneListAction::Place(pane.id));
+                                }
+                                if ui.button("Close").clicked() {
+                                    action = Some(PaneListAction::Close(pane.id));
+                                }
+                            }
+                            PanePlacement::Floating { .. } => {
+                                ui.small("window (M12)");
+                            }
+                        }
+                    });
+                }
+                refresh = ui.button("Refresh").clicked();
+            });
+        self.show_panes = open;
+        if refresh {
+            self.refresh_sessions();
+        }
+        if let Some(action) = action {
+            self.session_refresh_request_id = match action {
+                PaneListAction::Detach(pane_id) => {
+                    self.send_command(Command::DetachPane { pane_id })
+                }
+                PaneListAction::Place(pane_id) => self.send_command(Command::PlacePane {
+                    pane_id,
+                    window_id: None,
+                    anchor_pane_id: view.focus,
+                    axis: SplitAxis::Columns,
+                    ratio_bps: 5000,
+                }),
+                PaneListAction::Close(pane_id) => self.send_command(Command::ClosePane { pane_id }),
+            };
+        }
+    }
+}
+
+enum PaneListAction {
+    Detach(u64),
+    Place(u64),
+    Close(u64),
+}
+
+fn placement_label(placement: PanePlacement) -> &'static str {
+    match placement {
+        PanePlacement::Tiled => "tiled",
+        PanePlacement::Floating { .. } => "window",
+        PanePlacement::Detached => "detached",
     }
 }
 
@@ -2463,6 +2580,16 @@ mod tests {
 
         let other = session_label(&info("other"), Some("demo"), 181_000, false, "");
         assert!(!other.contains("last session lost"), "{other}");
+    }
+
+    #[test]
+    fn placement_labels_distinguish_background_panes() {
+        assert_eq!(placement_label(PanePlacement::Tiled), "tiled");
+        assert_eq!(placement_label(PanePlacement::Detached), "detached");
+        assert_eq!(
+            placement_label(PanePlacement::Floating { layer_id: 1 }),
+            "window"
+        );
     }
 
     #[test]

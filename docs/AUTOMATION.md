@@ -70,6 +70,11 @@ stitch-mux reload-keymap --path ./keymap.json
 
 ### 3.1 `run` and `wait`
 
+The local CLI also exposes `detach-pane -t PANE`, `place-pane -t PANE
+[--anchor PANE] [--axis columns|rows] [--ratio N]`, `claim-pane -t PANE
+[--mode take|request]` and `release-pane -t PANE`. Detached panes keep their
+process and scrollback; `close -t PANE` is the explicit destructive operation.
+
 `run` creates a pane in the active window (split; new-window placement arrives
 with multi-window support), starts a program, and optionally waits for the child
 to exit:
@@ -144,7 +149,7 @@ Event categories:
 
 - session created/destroyed/renamed;
 - window created/closed/label changed;
-- pane created/closed/detached/placed/exited;
+- pane created/closed/detached/placed/exited/owner-changed;
 - program status changed/removed;
 - activity summary changed;
 - layout revision changed;

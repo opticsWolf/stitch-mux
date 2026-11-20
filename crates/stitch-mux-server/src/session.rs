@@ -462,6 +462,10 @@ impl Session {
         .unwrap_or((2, 1));
         let pane = PaneRuntime::spawn(self.id, new_id, &spec, cols, rows).await?;
         self.panes.lock().expect("panes").insert(new_id, pane);
+        self.placements
+            .lock()
+            .expect("placements")
+            .insert(new_id, PanePlacement::Tiled);
         {
             let mut state = self.layout.lock().expect("layout");
             state.root = root;
@@ -516,6 +520,10 @@ impl Session {
         .unwrap_or((2, 1));
         let pane = PaneRuntime::spawn(self.id, new_id, &spec, cols, rows).await?;
         self.panes.lock().expect("panes").insert(new_id, pane);
+        self.placements
+            .lock()
+            .expect("placements")
+            .insert(new_id, PanePlacement::Tiled);
         {
             let mut state = self.layout.lock().expect("layout");
             state.root = root;
@@ -529,33 +537,50 @@ impl Session {
 
     pub async fn close(&self, pane_id: u64) -> Result<Option<Layout>, SessionError> {
         let _op = self.ops.lock().await;
-        let next_root = {
+        let placement = self
+            .placements
+            .lock()
+            .expect("placements")
+            .get(&pane_id)
+            .copied();
+        // Detached panes are not in the tiled tree; closing one must leave the
+        // window layout untouched. Closing the last pane is explicit and
+        // returns `None`, which tells the daemon to remove the empty session.
+        let next_root = if placement == Some(PanePlacement::Tiled) {
             let state = self.layout.lock().expect("layout");
             close_leaf(&state.root, PaneId::new(pane_id))?
+        } else {
+            None
         };
         let pane = {
             let mut panes = self.panes.lock().expect("panes");
-            if panes.len() == 1 && panes.contains_key(&pane_id) {
-                return Err(SessionError::LastPane);
-            }
             panes
                 .remove(&pane_id)
                 .ok_or(SessionError::PaneNotFound(pane_id))?
         };
         self.placements.lock().expect("placements").remove(&pane_id);
         self.owners.lock().expect("owners").remove(&pane_id);
-        let Some(next_root) = next_root else {
-            return Ok(None);
-        };
+        let empty = self.panes.lock().expect("panes").is_empty();
         {
             let mut state = self.layout.lock().expect("layout");
-            state.root = next_root;
-            if state.zoom == Some(pane_id) {
+            if empty {
+                state.root = LayoutNode::empty();
                 state.zoom = None;
+            } else if let Some(next_root) = &next_root {
+                state.root = next_root.clone();
+                if state.zoom == Some(pane_id) {
+                    state.zoom = None;
+                }
             }
-            state.bump();
+            if empty || next_root.is_some() {
+                state.bump();
+            }
         }
         pane.kill().await;
+        if empty {
+            self.publish_layout();
+            return Ok(None);
+        }
         self.resize_panes();
         self.publish_layout();
         Ok(Some(self.layout(None)))
@@ -743,6 +768,7 @@ impl SessionRegistry {
         let spec = PaneSpec::new(program, args, cwd, env);
         let pane = PaneRuntime::spawn(session_id, pane_id, &spec, cols, rows).await?;
         let panes = BTreeMap::from([(pane_id, Arc::clone(&pane))]);
+        let placements = BTreeMap::from([(pane_id, PanePlacement::Tiled)]);
         let (layout_tx, _) = broadcast::channel(LAYOUT_QUEUE);
         let session = Arc::new(Session {
             id: session_id,
@@ -756,7 +782,7 @@ impl SessionRegistry {
                 revision: 1,
             }),
             panes: StdMutex::new(panes),
-            placements: StdMutex::new(BTreeMap::new()),
+            placements: StdMutex::new(placements),
             owners: StdMutex::new(BTreeMap::new()),
             ops: AsyncMutex::new(()),
             layout_tx,
@@ -806,19 +832,56 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn rejects_last_pane_close() {
+    async fn repeated_detach_place_close_does_not_retain_a_pane_runtime() {
+        let mut registry = SessionRegistry::new();
+        let session = registry
+            .create("recycle", "sh", &[], None, None, 80, 24, false)
+            .await
+            .unwrap();
+        let pane_id = session.pane_ids()[0];
+        let pane = session.pane(pane_id).expect("pane runtime");
+        let weak = Arc::downgrade(&pane);
+        drop(pane);
+
+        for _ in 0..8 {
+            session.detach_pane(pane_id).await.expect("detach");
+            session
+                .place_pane(pane_id, None, SplitAxis::Columns, 5000)
+                .await
+                .expect("place");
+        }
+        assert!(
+            weak.upgrade().is_some(),
+            "same runtime should survive recycling"
+        );
+
+        session.close(pane_id).await.expect("close");
+        // The reader task owns an Arc too; aborted tasks release it once the
+        // runtime gets a chance to poll their cancellation.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+            if weak.upgrade().is_none() {
+                break;
+            }
+        }
+        assert!(
+            weak.upgrade().is_none(),
+            "closed pane runtime must be released"
+        );
+        assert!(session.panes().is_empty());
+        assert!(session.owners().is_empty());
+    }
+
+    #[tokio::test]
+    async fn closing_the_last_pane_is_explicit() {
         let mut registry = SessionRegistry::new();
         let session = registry
             .create("demo", "sh", &[], None, None, 80, 24, false)
             .await
             .unwrap();
         let pane_id = session.pane_ids()[0];
-        assert!(matches!(
-            session.close(pane_id).await,
-            Err(SessionError::LastPane)
-        ));
-        let stale = session.set_layout(session.root(), 99).await;
-        assert!(matches!(stale, Err(SessionError::StaleLayout { .. })));
-        assert_eq!(session.layout(None).revision, 1);
+        assert!(session.close(pane_id).await.unwrap().is_none());
+        assert!(session.pane_ids().is_empty());
+        assert!(matches!(session.root(), LayoutNode::Empty));
     }
 }

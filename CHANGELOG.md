@@ -8,6 +8,10 @@ Python package version in `pyproject.toml`.
 
 ### Added
 
+- **M11 workspace controls:** CLI `detach-pane`/`place-pane`/`claim-pane`/
+  `release-pane`, a GUI background-pane window with detach/place/close actions,
+  explicit close for detached panes, and a recycled-pane runtime test that
+  verifies no `Arc<PaneRuntime>` survives close.
 - **M11 detached panes (server slice):** session-owned placement maps, an
   explicit empty layout root, `DetachPane`/`PlacePane`, `ClaimPane`/
   `ReleasePane` size-owner policy, placement/owner events, and capability

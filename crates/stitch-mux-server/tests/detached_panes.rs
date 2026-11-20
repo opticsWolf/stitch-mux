@@ -194,3 +194,47 @@ async fn a_detached_pane_can_exit_and_wait_returns_its_code() {
         let _ = tokio::fs::remove_dir_all(path.parent().expect("socket parent")).await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_a_detached_pane_is_explicit() {
+    let (endpoint, socket) = test_endpoint("close");
+    let listener = endpoint.bind().await.expect("bind");
+    let server = tokio::spawn(stitch_mux_server::serve(listener));
+
+    let created = command(
+        &endpoint,
+        Command::NewSession {
+            name: "close-detached".into(),
+            program: env!("CARGO_BIN_EXE_exit_fixture").into(),
+            args: vec!["--hold".into()],
+            cwd: None,
+            env: None,
+            cols: 80,
+            rows: 24,
+        },
+    )
+    .await
+    .expect("new session");
+    assert!(created.ok, "{:?}", created.error);
+    let pane_id = created.sessions[0].panes[0].id;
+
+    let detached = command(&endpoint, Command::DetachPane { pane_id })
+        .await
+        .expect("detach");
+    assert!(detached.ok, "{:?}", detached.error);
+    assert!(detached.layout.expect("layout").panes.is_empty());
+
+    let closed = command(&endpoint, Command::ClosePane { pane_id })
+        .await
+        .expect("close");
+    assert!(closed.ok, "{:?}", closed.error);
+    assert!(
+        closed.sessions.is_empty(),
+        "closing the only detached pane should remove its session"
+    );
+
+    server.abort();
+    if let Some(path) = socket {
+        let _ = tokio::fs::remove_dir_all(path.parent().expect("socket parent")).await;
+    }
+}

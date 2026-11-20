@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use stitch_mux_client::{ClientError, command as send_control, connect};
 use stitch_mux_core::{CaptureFormat, SplitAxis};
 use stitch_mux_protocol::{
-    Command, CommandResponse, DEFAULT_CLIENT_CAPABILITIES, Detach, Endpoint, ErrorInfo, Event,
-    Hello, MessageKind, RunPlacement, SubscribeEvents, ViewMode, WaitTarget,
+    ClaimMode, Command, CommandResponse, DEFAULT_CLIENT_CAPABILITIES, Detach, Endpoint, ErrorInfo,
+    Event, Hello, MessageKind, RunPlacement, SubscribeEvents, ViewMode, WaitTarget,
 };
 
 const SKILL_MD: &str = include_str!("../../../agent-skill/stitch-mux/SKILL.md");
@@ -102,6 +102,35 @@ enum Commands {
     },
     /// Close one pane and collapse its split.
     Close {
+        #[arg(short = 't', long = "target", value_name = "PANE_ID")]
+        target: u64,
+    },
+    /// Detach a pane from its window without stopping its child.
+    DetachPane {
+        #[arg(short = 't', long = "target", value_name = "PANE_ID")]
+        target: u64,
+    },
+    /// Place a detached pane back into the window.
+    PlacePane {
+        #[arg(short = 't', long = "target", value_name = "PANE_ID")]
+        target: u64,
+        /// Pane to split against; defaults to the current focus.
+        #[arg(long, value_name = "PANE_ID")]
+        anchor: Option<u64>,
+        #[arg(long, value_enum, default_value = "columns")]
+        axis: CliSplitAxis,
+        #[arg(long, default_value_t = 5000)]
+        ratio: u16,
+    },
+    /// Claim local PTY size ownership for a pane.
+    ClaimPane {
+        #[arg(short = 't', long = "target", value_name = "PANE_ID")]
+        target: u64,
+        #[arg(long, value_enum, default_value = "take")]
+        mode: CliClaimMode,
+    },
+    /// Release local PTY size ownership for a pane.
+    ReleasePane {
         #[arg(short = 't', long = "target", value_name = "PANE_ID")]
         target: u64,
     },
@@ -224,6 +253,21 @@ enum Commands {
         #[arg(long)]
         timeout_ms: Option<u64>,
     },
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum CliClaimMode {
+    Take,
+    Request,
+}
+
+impl From<CliClaimMode> for ClaimMode {
+    fn from(value: CliClaimMode) -> Self {
+        match value {
+            CliClaimMode::Take => Self::Take,
+            CliClaimMode::Request => Self::Request,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -729,6 +773,40 @@ async fn run(cli: &Cli) -> Result<ExitCode, Box<dyn Error>> {
         }
         Commands::Close { target } => {
             send_command(&endpoint, Command::ClosePane { pane_id: *target }).await
+        }
+        Commands::DetachPane { target } => {
+            send_command(&endpoint, Command::DetachPane { pane_id: *target }).await
+        }
+        Commands::PlacePane {
+            target,
+            anchor,
+            axis,
+            ratio,
+        } => {
+            send_command(
+                &endpoint,
+                Command::PlacePane {
+                    pane_id: *target,
+                    window_id: None,
+                    anchor_pane_id: *anchor,
+                    axis: (*axis).into(),
+                    ratio_bps: *ratio,
+                },
+            )
+            .await
+        }
+        Commands::ClaimPane { target, mode } => {
+            send_command(
+                &endpoint,
+                Command::ClaimPane {
+                    pane_id: *target,
+                    mode: (*mode).into(),
+                },
+            )
+            .await
+        }
+        Commands::ReleasePane { target } => {
+            send_command(&endpoint, Command::ReleasePane { pane_id: *target }).await
         }
         Commands::Zoom { session, target } => {
             send_command(
