@@ -46,6 +46,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --release -p stitch-mux-server --test stress -- --ignored
+      - run: cargo test --release -p stitch-mux-server --test soak -- --ignored
 
   python:
     runs-on: ubuntu-latest

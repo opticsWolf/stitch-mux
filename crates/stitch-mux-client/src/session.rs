@@ -52,6 +52,10 @@ pub struct ClientSession {
     outbound_tx: mpsc::Sender<Outbound>,
     dropped_outbound: Arc<AtomicU64>,
     task: JoinHandle<()>,
+    /// Owned separately so an abrupt `abort()` closes both halves of the
+    /// socket. `tokio::io::split` halves share one I/O object, so dropping
+    /// only the actor leaves the reader holding the connection open.
+    reader_task: JoinHandle<()>,
 }
 
 impl ClientSession {
@@ -69,15 +73,18 @@ impl ClientSession {
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<Outbound>(OUTBOUND_QUEUE);
         let dropped_outbound = Arc::new(AtomicU64::new(0));
         let session_name = session_name.to_owned();
-
-        let task = tokio::spawn(async move {
-            let (reader, mut writer) = connection.split();
-            let (frame_tx, mut frame_rx) =
-                mpsc::channel::<Result<Frame, FrameError>>(INCOMING_FRAMES);
-            let reader_task = tokio::spawn(async move {
-                let mut reader: FrameReader<tokio::io::ReadHalf<Stream>> = reader;
-                loop {
-                    match reader.recv_frame().await {
+        let (reader, writer) = connection.split();
+        let (frame_tx, mut frame_rx) = mpsc::channel::<Result<Frame, FrameError>>(INCOMING_FRAMES);
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let reader_task = tokio::spawn(async move {
+            let mut reader: FrameReader<tokio::io::ReadHalf<Stream>> = reader;
+            loop {
+                // The two halves share one I/O object. When the actor exits it
+                // must stop this reader too, otherwise the socket stays open
+                // and the daemon never observes the detach.
+                tokio::select! {
+                    _ = &mut cancel_rx => break,
+                    incoming = reader.recv_frame() => match incoming {
                         Ok(frame) => {
                             if frame_tx.send(Ok(frame)).await.is_err() {
                                 break;
@@ -87,10 +94,14 @@ impl ClientSession {
                             let _ = frame_tx.send(Err(err)).await;
                             break;
                         }
-                    }
+                    },
                 }
-            });
+            }
+        });
 
+        let task = tokio::spawn(async move {
+            let _reader_cancel = ReaderCancel(Some(cancel_tx));
+            let mut writer = writer;
             let mut view = SessionView::default();
             view.mark_connecting();
             let _ = view_tx.send_replace(view.clone());
@@ -105,7 +116,6 @@ impl ClientSession {
                 .await
             {
                 publish_error(&view_tx, &mut view, err);
-                reader_task.abort();
                 return;
             }
 
@@ -226,7 +236,6 @@ impl ClientSession {
                 view.mark_lost_preserving_error("connection closed");
                 let _ = view_tx.send_replace(view.clone());
             }
-            reader_task.abort();
         });
 
         Ok(Self {
@@ -234,6 +243,7 @@ impl ClientSession {
             outbound_tx,
             dropped_outbound,
             task,
+            reader_task,
         })
     }
 
@@ -270,19 +280,34 @@ impl ClientSession {
     /// connection without sending `Detach`.
     pub async fn abort(self) {
         self.task.abort();
+        self.reader_task.abort();
         let _ = self.task.await;
+        let _ = self.reader_task.await;
     }
 
     /// Ask the daemon to detach, then wait for the actor to finish.
     ///
     /// If the outbound queue is full the detach frame cannot be queued; aborting
-    /// the actor closes the socket instead, which the daemon treats the same
+    /// both tasks closes the socket instead, which the daemon treats the same
     /// way. Either path terminates, so `detach` never waits forever.
     pub async fn detach(self) {
         if !self.offer(Outbound::Detach) {
-            self.task.abort();
+            self.abort().await;
+            return;
         }
         let _ = self.task.await;
+        let _ = self.reader_task.await;
+    }
+}
+
+/// Stops the reader task on every actor exit path, including early returns.
+struct ReaderCancel(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for ReaderCancel {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
     }
 }
 
