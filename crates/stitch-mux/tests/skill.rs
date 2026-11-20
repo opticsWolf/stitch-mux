@@ -42,7 +42,9 @@ fn skill_installer_is_idempotent() {
     }
     let skill = std::fs::read_to_string(root.join(".agents/skills/stitch-mux/SKILL.md"))
         .expect("skill text");
-    assert!(skill.starts_with("---\nname: stitch-mux\n"));
+    let mut lines = skill.lines();
+    assert_eq!(lines.next(), Some("---"));
+    assert_eq!(lines.next(), Some("name: stitch-mux"));
     assert!(skill.contains("stitch-mux ping"));
     assert!(skill.contains("no MCP server"));
 
