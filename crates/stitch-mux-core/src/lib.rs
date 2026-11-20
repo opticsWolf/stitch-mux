@@ -9,6 +9,7 @@ pub mod cell;
 pub mod frame;
 pub mod geometry;
 pub mod ids;
+pub mod keymap;
 pub mod layout;
 pub mod status;
 
