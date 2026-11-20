@@ -22,6 +22,6 @@ pub use ids::{ClientId, PaneId, SessionId, WindowId};
 pub use layout::{
     Direction, LayoutError, LayoutNode, PanePlacement, ResolvedPane, SplitAxis, close_leaf,
     contains as layout_contains, first_leaf, focus_direction, hit_test, leaves as layout_leaves,
-    resolve as resolve_layout, split_leaf, validate as validate_layout,
+    place_leaf, remove_leaf, resolve as resolve_layout, split_leaf, validate as validate_layout,
 };
 pub use status::{ActivitySummary, ProgramState, ProgramStatus, ProgramStatusKind};

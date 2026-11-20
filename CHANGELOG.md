@@ -8,6 +8,12 @@ Python package version in `pyproject.toml`.
 
 ### Added
 
+- **M11 detached panes (server slice):** session-owned placement maps, an
+  explicit empty layout root, `DetachPane`/`PlacePane`, `ClaimPane`/
+  `ReleasePane` size-owner policy, placement/owner events, and capability
+  gating. Detached panes keep running and remain capturable/waitable; real-PTY
+  tests cover detach/place, detached exit, and owner-based sizing.
+
 - **M9 core foundation:** typed action registry with argument validation,
   canonical key names, JSON keymap merging, and a bounded mode/sequence
   dispatcher with which-key hints and double-prefix passthrough. The daemon

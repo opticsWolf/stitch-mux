@@ -13,7 +13,7 @@ pub mod session;
 pub mod shell_scan;
 pub mod status_scan;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,12 +27,12 @@ use stitch_mux_core::action::{ActionError, ActionRegistry};
 use stitch_mux_core::keymap::{ActionInvocation, Keymap as CoreKeymap, KeymapError};
 use stitch_mux_core::{Direction, Size, SplitAxis, layout_leaves};
 use stitch_mux_protocol::{
-    ActionInfo, Attach, CaptureRequest, ClientInfo, Command, CommandRequest, CommandResponse,
-    Connection, DEFAULT_SERVER_CAPABILITIES, Endpoint, EndpointError, ErrorCode, ErrorInfo,
-    Event as WireEvent, Frame, FrameError, FrameWriter, Hello, HelloAck, InputEvent, KeyBinding,
-    KeyMode, Keymap as WireKeymap, Layout, MessageKind, PROTOCOL_VERSION, ResizeRequest,
-    RunPlacement, RunResult, Stream, SubscribeEvents, ViewMode, WaitResult, WaitTarget,
-    capabilities, decode_message,
+    ActionInfo, Attach, CaptureRequest, ClaimMode, ClientInfo, Command, CommandRequest,
+    CommandResponse, Connection, DEFAULT_SERVER_CAPABILITIES, Endpoint, EndpointError, ErrorCode,
+    ErrorInfo, Event as WireEvent, Frame, FrameError, FrameWriter, Hello, HelloAck, InputEvent,
+    KeyBinding, KeyMode, Keymap as WireKeymap, Layout, MessageKind, PROTOCOL_VERSION,
+    ResizeRequest, RunPlacement, RunResult, Stream, SubscribeEvents, ViewMode, WaitResult,
+    WaitTarget, capabilities, decode_message,
 };
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
@@ -403,11 +403,14 @@ impl ServerState {
     }
 
     /// Smallest attached viewport wins. Control-only clients are ignored.
-    fn canonical_size(&self, session_id: u64) -> Option<Size> {
+    fn canonical_size(&self, session_id: u64, owners: BTreeSet<u64>) -> Option<Size> {
         let clients = self.clients.lock().expect("client registry");
         let mut smallest: Option<Size> = None;
         for client in clients.values().filter(|client| {
-            client.session_id == Some(session_id) && client.cols > 0 && client.rows > 0
+            client.session_id == Some(session_id)
+                && client.cols > 0
+                && client.rows > 0
+                && (owners.is_empty() || owners.contains(&client.id))
         }) {
             let size = Size::new(client.cols, client.rows);
             smallest = Some(match smallest {
@@ -422,7 +425,7 @@ impl ServerState {
 
     /// Apply the smallest-client policy and return the resulting canonical size.
     fn sync_size(&self, session: &Session) -> Option<Size> {
-        let size = self.canonical_size(session.id)?;
+        let size = self.canonical_size(session.id, session.owners().into_values().collect())?;
         if size != session.size() {
             session.resize(size.cols, size.rows);
         }
@@ -1323,7 +1326,10 @@ fn session_error_code(error: &SessionError) -> ErrorCode {
     match error {
         SessionError::PaneNotFound(_) | SessionError::NotFound(_) => ErrorCode::NotFound,
         SessionError::StaleLayout { .. } => ErrorCode::Busy,
-        SessionError::AlreadyExists(_) | SessionError::LastPane => ErrorCode::Busy,
+        SessionError::AlreadyExists(_) | SessionError::LastPane | SessionError::NotOwner { .. } => {
+            ErrorCode::Busy
+        }
+        SessionError::PaneNotTiled(_) => ErrorCode::InvalidArgs,
         _ => ErrorCode::Internal,
     }
 }
@@ -1475,6 +1481,140 @@ async fn handle_command(
             }
             response.sessions = state.infos().await;
         }
+        Command::DetachPane { pane_id } => {
+            if client_caps & capabilities::client::DETACHED_PANES == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "client lacks DETACHED_PANES",
+                );
+                response.sessions = state.infos().await;
+                return response;
+            }
+            let session = state.registry.lock().await.find_by_pane(pane_id);
+            match session {
+                Some(session) => match session.detach_pane(pane_id).await {
+                    Ok(_) => {
+                        state.publish_event(
+                            Some(session.id),
+                            "pane_placement_changed",
+                            serde_json::json!({
+                                "pane_id": pane_id,
+                                "placement": "detached",
+                            }),
+                        );
+                        response.layout = Some(response_layout(state, &session, *focus));
+                    }
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
+            }
+            response.sessions = state.infos().await;
+        }
+        Command::PlacePane {
+            pane_id,
+            window_id,
+            anchor_pane_id,
+            axis,
+            ratio_bps,
+        } => {
+            if client_caps & capabilities::client::DETACHED_PANES == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "client lacks DETACHED_PANES",
+                );
+                response.sessions = state.infos().await;
+                return response;
+            }
+            if window_id.is_some() {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "floating windows arrive in M12",
+                );
+            } else {
+                let session = state.registry.lock().await.find_by_pane(pane_id);
+                match session {
+                    Some(session) => match session
+                        .place_pane(pane_id, anchor_pane_id, axis, ratio_bps)
+                        .await
+                    {
+                        Ok(_) => {
+                            state.publish_event(
+                                Some(session.id),
+                                "pane_placement_changed",
+                                serde_json::json!({
+                                    "pane_id": pane_id,
+                                    "placement": "tiled",
+                                }),
+                            );
+                            response.layout = Some(response_layout(state, &session, *focus));
+                        }
+                        Err(err) => set_error(&mut response, session_error_code(&err), err),
+                    },
+                    None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
+                }
+            }
+            response.sessions = state.infos().await;
+        }
+        Command::ClaimPane { pane_id, mode } => {
+            if client_caps & capabilities::client::DETACHED_PANES == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "client lacks DETACHED_PANES",
+                );
+                response.sessions = state.infos().await;
+                return response;
+            }
+            let session = state.registry.lock().await.find_by_pane(pane_id);
+            match session {
+                Some(session) => match session.claim(pane_id, client_id, mode == ClaimMode::Take) {
+                    Ok(()) => {
+                        state.sync_size(&session);
+                        state.publish_event(
+                            Some(session.id),
+                            "pane_owner_changed",
+                            serde_json::json!({ "pane_id": pane_id, "owner_client_id": client_id }),
+                        );
+                    }
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
+            }
+            response.sessions = state.infos().await;
+        }
+        Command::ReleasePane { pane_id } => {
+            if client_caps & capabilities::client::DETACHED_PANES == 0 {
+                set_error(
+                    &mut response,
+                    ErrorCode::Unsupported,
+                    "client lacks DETACHED_PANES",
+                );
+                response.sessions = state.infos().await;
+                return response;
+            }
+            let session = state.registry.lock().await.find_by_pane(pane_id);
+            match session {
+                Some(session) => match session.release(pane_id, client_id) {
+                    Ok(()) => {
+                        state.sync_size(&session);
+                        state.publish_event(
+                            Some(session.id),
+                            "pane_owner_changed",
+                            serde_json::json!({
+                                "pane_id": pane_id,
+                                "owner_client_id": session.owner(pane_id),
+                            }),
+                        );
+                    }
+                    Err(err) => set_error(&mut response, session_error_code(&err), err),
+                },
+                None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
+            }
+            response.sessions = state.infos().await;
+        }
         Command::ZoomPane { session, pane_id } => {
             let target = state.registry.lock().await.get(&session);
             match target {
@@ -1496,11 +1636,17 @@ async fn handle_command(
                 // wins). A control resize would leave the PTY and the clients
                 // disagreeing until the next attach, so only a session with no
                 // viewport client may be resized from here.
-                Some(target) if state.canonical_size(target.id).is_some() => set_error(
-                    &mut response,
-                    ErrorCode::Unsupported,
-                    "attached clients own the canonical size; resize the client viewport instead",
-                ),
+                Some(target)
+                    if state
+                        .canonical_size(target.id, target.owners().into_values().collect())
+                        .is_some() =>
+                {
+                    set_error(
+                        &mut response,
+                        ErrorCode::Unsupported,
+                        "attached clients own the canonical size; resize the client viewport instead",
+                    )
+                }
                 Some(target) => {
                     target.resize(cols, rows);
                     response.sessions = state.infos().await;
@@ -1807,11 +1953,6 @@ async fn handle_command(
             // response; every other client gets a typed close.
             state.shutdown(Some(client_id));
         }
-        other => set_error(
-            &mut response,
-            ErrorCode::Unsupported,
-            format!("{other:?} is not implemented yet"),
-        ),
     }
     response
 }
@@ -1893,6 +2034,48 @@ mod tests {
     }
 
     #[test]
+    fn an_explicit_pane_owner_overrides_the_smallest_client_policy() {
+        let state = ServerState::default();
+        let large = state.register(&Hello {
+            protocol_version: PROTOCOL_VERSION,
+            client_name: "large".into(),
+            client_instance: "large".into(),
+            view_mode: ViewMode::Structured,
+            cols: 120,
+            rows: 40,
+            pixel_width: 0,
+            pixel_height: 0,
+            capabilities: 1,
+        });
+        let small = state.register(&Hello {
+            protocol_version: PROTOCOL_VERSION,
+            client_name: "small".into(),
+            client_instance: "small".into(),
+            view_mode: ViewMode::Structured,
+            cols: 70,
+            rows: 20,
+            pixel_width: 0,
+            pixel_height: 0,
+            capabilities: 1,
+        });
+        state.set_attached(large, 1, Some(1));
+        state.set_attached(small, 1, Some(1));
+
+        assert_eq!(
+            state.canonical_size(1, BTreeSet::new()),
+            Some(Size::new(70, 20))
+        );
+        assert_eq!(
+            state.canonical_size(1, BTreeSet::from([large])),
+            Some(Size::new(120, 40))
+        );
+        assert_eq!(
+            state.canonical_size(1, BTreeSet::from([small])),
+            Some(Size::new(70, 20))
+        );
+    }
+
+    #[test]
     fn server_state_starts_empty() {
         let state = ServerState::default();
         assert!(state.clients.lock().expect("clients").is_empty());
@@ -1928,10 +2111,16 @@ mod tests {
         });
         state.set_attached(first, 1, Some(1));
         state.set_attached(second, 1, Some(2));
-        assert_eq!(state.canonical_size(1), Some(Size::new(70, 20)));
+        assert_eq!(
+            state.canonical_size(1, BTreeSet::new()),
+            Some(Size::new(70, 20))
+        );
         state.unregister(second);
-        assert_eq!(state.canonical_size(1), Some(Size::new(120, 40)));
+        assert_eq!(
+            state.canonical_size(1, BTreeSet::new()),
+            Some(Size::new(120, 40))
+        );
         state.unregister(first);
-        assert_eq!(state.canonical_size(1), None);
+        assert_eq!(state.canonical_size(1, BTreeSet::new()), None);
     }
 }

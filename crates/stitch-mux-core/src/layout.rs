@@ -30,6 +30,8 @@ pub const MAX_LAYOUT_DEPTH: u32 = 256;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutNode {
+    /// An empty window. Panes may be detached while their child keeps running.
+    Empty,
     Leaf {
         pane_id: u64,
     },
@@ -78,6 +80,7 @@ impl<'de> Deserialize<'de> for LayoutNode {
         #[derive(Deserialize)]
         #[serde(rename_all = "snake_case")]
         enum Repr {
+            Empty,
             Leaf {
                 pane_id: u64,
             },
@@ -90,6 +93,7 @@ impl<'de> Deserialize<'de> for LayoutNode {
         }
 
         Ok(match Repr::deserialize(deserializer)? {
+            Repr::Empty => Self::Empty,
             Repr::Leaf { pane_id } => Self::Leaf { pane_id },
             Repr::Split {
                 axis,
@@ -107,6 +111,10 @@ impl<'de> Deserialize<'de> for LayoutNode {
 }
 
 impl LayoutNode {
+    pub fn empty() -> Self {
+        Self::Empty
+    }
+
     pub fn leaf(pane_id: PaneId) -> Self {
         Self::Leaf {
             pane_id: pane_id.get(),
@@ -170,6 +178,7 @@ pub fn validate(root: &LayoutNode) -> Result<(), LayoutError> {
 
 fn validate_inner(root: &LayoutNode, seen: &mut BTreeSet<u64>) -> Result<(), LayoutError> {
     match root {
+        LayoutNode::Empty => Ok(()),
         LayoutNode::Leaf { pane_id } => {
             if !seen.insert(*pane_id) {
                 return Err(LayoutError::DuplicatePane(*pane_id));
@@ -216,6 +225,7 @@ fn resolve_inner(
     out: &mut Vec<ResolvedPane>,
 ) -> Result<(), LayoutError> {
     match root {
+        LayoutNode::Empty => Ok(()),
         LayoutNode::Leaf { pane_id } => {
             out.push(ResolvedPane {
                 pane_id: *pane_id,
@@ -267,6 +277,7 @@ fn resolve_inner(
 pub fn leaves(root: &LayoutNode) -> Vec<PaneId> {
     fn collect(root: &LayoutNode, out: &mut Vec<PaneId>) {
         match root {
+            LayoutNode::Empty => {}
             LayoutNode::Leaf { pane_id } => out.push(PaneId::new(*pane_id)),
             LayoutNode::Split { first, second, .. } => {
                 collect(first, out);
@@ -312,6 +323,7 @@ pub fn split_leaf(
         changed: &mut bool,
     ) -> Result<LayoutNode, LayoutError> {
         match root {
+            LayoutNode::Empty => Ok(LayoutNode::empty()),
             LayoutNode::Leaf { pane_id: id } if *id == pane_id.get() => {
                 *changed = true;
                 Ok(LayoutNode::split(
@@ -353,6 +365,7 @@ pub fn close_leaf(root: &LayoutNode, pane_id: PaneId) -> Result<Option<LayoutNod
         changed: &mut bool,
     ) -> Result<Option<LayoutNode>, LayoutError> {
         match root {
+            LayoutNode::Empty => Ok(Some(LayoutNode::empty())),
             LayoutNode::Leaf { pane_id: id } if *id == pane_id.get() => {
                 *changed = true;
                 Ok(None)
@@ -384,6 +397,71 @@ pub fn close_leaf(root: &LayoutNode, pane_id: PaneId) -> Result<Option<LayoutNod
     if let Some(next) = &next {
         validate(next)?;
     }
+    Ok(next)
+}
+
+/// Remove a pane from the tiled tree without killing it. Unlike `close_leaf`,
+/// removing the last pane yields an explicit empty window.
+pub fn remove_leaf(root: &LayoutNode, pane_id: PaneId) -> Result<LayoutNode, LayoutError> {
+    fn rebuild(
+        root: &LayoutNode,
+        pane_id: PaneId,
+        changed: &mut bool,
+    ) -> Result<LayoutNode, LayoutError> {
+        Ok(match root {
+            LayoutNode::Empty => LayoutNode::empty(),
+            LayoutNode::Leaf { pane_id: id } if *id == pane_id.get() => {
+                *changed = true;
+                LayoutNode::empty()
+            }
+            LayoutNode::Leaf { pane_id } => LayoutNode::leaf(PaneId::new(*pane_id)),
+            LayoutNode::Split {
+                axis,
+                ratio_bps,
+                first,
+                second,
+            } => {
+                let first = rebuild(first, pane_id, changed)?;
+                let second = rebuild(second, pane_id, changed)?;
+                match (first, second) {
+                    (node, LayoutNode::Empty) | (LayoutNode::Empty, node) => node,
+                    (first, second) => LayoutNode::split(*axis, *ratio_bps, first, second),
+                }
+            }
+        })
+    }
+    let mut changed = false;
+    let next = rebuild(root, pane_id, &mut changed)?;
+    if !changed {
+        return Err(LayoutError::PaneNotFound(pane_id.get()));
+    }
+    validate(&next)?;
+    Ok(next)
+}
+
+/// Place a previously detached pane into the tiled tree. If `anchor` is
+/// `None`, the new pane is split against the whole existing window.
+pub fn place_leaf(
+    root: &LayoutNode,
+    anchor: Option<PaneId>,
+    pane_id: PaneId,
+    axis: SplitAxis,
+    ratio_bps: u16,
+) -> Result<LayoutNode, LayoutError> {
+    if contains(root, pane_id) {
+        return Err(LayoutError::DuplicatePane(pane_id.get()));
+    }
+    let next = match root {
+        LayoutNode::Empty => LayoutNode::leaf(pane_id),
+        _ => match anchor {
+            Some(anchor) if contains(root, anchor) => {
+                split_leaf(root, anchor, pane_id, axis, ratio_bps)?
+            }
+            Some(anchor) => return Err(LayoutError::PaneNotFound(anchor.get())),
+            None => LayoutNode::split(axis, ratio_bps, root.clone(), LayoutNode::leaf(pane_id)),
+        },
+    };
+    validate(&next)?;
     Ok(next)
 }
 

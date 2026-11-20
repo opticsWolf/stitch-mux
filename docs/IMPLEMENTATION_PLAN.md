@@ -525,6 +525,11 @@ v0.3 is M11-M12. It extends the session model; it does not add remote access.
 **Goal:** decouple pane lifetime from window placement and resolve local
 multi-client size preferences.
 
+**Status: In progress.** The daemon now has session-owned placements, an
+explicit empty layout, `DetachPane`/`PlacePane`, `ClaimPane`/`ReleasePane` size
+ownership, placement/owner events, and capability gating. GUI background-pane
+controls and soak coverage for repeated detach/place/close remain.
+
 **Estimate:** 6-9 engineer-days.
 
 Deliverables:

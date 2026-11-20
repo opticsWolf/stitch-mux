@@ -1461,6 +1461,7 @@ fn node_bounds(
     cell_h: f32,
 ) -> Option<egui::Rect> {
     match node {
+        LayoutNode::Empty => None,
         LayoutNode::Leaf { pane_id } => geometries
             .iter()
             .find(|geometry| geometry.pane_id == *pane_id)
@@ -1485,6 +1486,7 @@ fn set_ratio(root: &LayoutNode, target: &LayoutNode, ratio_bps: u16) -> LayoutNo
         return LayoutNode::split(*axis, ratio_bps, (**first).clone(), (**second).clone());
     }
     match root {
+        LayoutNode::Empty => LayoutNode::empty(),
         LayoutNode::Leaf { pane_id } => LayoutNode::leaf(PaneId::new(*pane_id)),
         LayoutNode::Split {
             axis,

@@ -10,7 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use stitch_mux_core::{
     ActivitySummary, Direction, LayoutError, LayoutNode, PaneId, Rect, Size, SplitAxis, close_leaf,
-    first_leaf, layout_contains, layout_leaves, resolve_layout, split_leaf, validate_layout,
+    first_leaf, layout_contains, layout_leaves, place_leaf, remove_leaf, resolve_layout,
+    split_leaf, validate_layout,
 };
 use stitch_mux_protocol::{Attached, Layout, PaneGeometry, PaneInfo, PanePlacement, SessionInfo};
 use thiserror::Error;
@@ -46,6 +47,10 @@ pub enum SessionError {
     LastPane,
     #[error("layout does not match the session panes")]
     LayoutMismatch,
+    #[error("pane {0} is not tiled")]
+    PaneNotTiled(u64),
+    #[error("client {client} does not own pane {pane}")]
+    NotOwner { client: u64, pane: u64 },
     #[error("layout revision {expected} is stale; current is {current}")]
     StaleLayout { expected: u64, current: u64 },
 }
@@ -58,6 +63,12 @@ pub struct Session {
     pub created_at_unix_ms: u64,
     layout: StdMutex<LayoutState>,
     panes: StdMutex<BTreeMap<u64, Arc<PaneRuntime>>>,
+    /// Pane placement is independent of the tiled tree: detached panes keep
+    /// running but are not leaves in any window.
+    placements: StdMutex<BTreeMap<u64, PanePlacement>>,
+    /// Optional size owner. When set, that client's viewport drives canonical
+    /// PTY size; otherwise the smallest attached client wins.
+    owners: StdMutex<BTreeMap<u64, u64>>,
     /// Serialises layout mutations. Reading the tree, editing it, and bumping
     /// the revision has to be one atomic step: two concurrent splits used to
     /// rebuild from the same stale root, so one subtree silently disappeared.
@@ -280,6 +291,132 @@ impl Session {
             .map(PaneId::get)
     }
 
+    pub fn placement(&self, pane_id: u64) -> PanePlacement {
+        self.placements
+            .lock()
+            .expect("placements")
+            .get(&pane_id)
+            .copied()
+            .unwrap_or(PanePlacement::Tiled)
+    }
+
+    pub fn owner(&self, pane_id: u64) -> Option<u64> {
+        self.owners.lock().expect("owners").get(&pane_id).copied()
+    }
+
+    pub fn owners(&self) -> BTreeMap<u64, u64> {
+        self.owners.lock().expect("owners").clone()
+    }
+
+    pub fn claim(&self, pane_id: u64, client_id: u64, take: bool) -> Result<(), SessionError> {
+        if !self.panes.lock().expect("panes").contains_key(&pane_id) {
+            return Err(SessionError::PaneNotFound(pane_id));
+        }
+        let mut owners = self.owners.lock().expect("owners");
+        match owners.get(&pane_id) {
+            Some(current) if *current != client_id => {
+                if take {
+                    owners.insert(pane_id, client_id);
+                } else {
+                    return Err(SessionError::NotOwner {
+                        client: client_id,
+                        pane: pane_id,
+                    });
+                }
+            }
+            _ => {
+                owners.insert(pane_id, client_id);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn release(&self, pane_id: u64, client_id: u64) -> Result<(), SessionError> {
+        let mut owners = self.owners.lock().expect("owners");
+        match owners.get(&pane_id) {
+            Some(current) if *current == client_id => {
+                owners.remove(&pane_id);
+                Ok(())
+            }
+            Some(current) => Err(SessionError::NotOwner {
+                client: client_id,
+                pane: *current,
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// Remove a pane from the window tree without killing its child. The last
+    /// pane can be detached: the window becomes explicitly empty.
+    pub async fn detach_pane(&self, pane_id: u64) -> Result<Layout, SessionError> {
+        let _op = self.ops.lock().await;
+        if !self.panes.lock().expect("panes").contains_key(&pane_id) {
+            return Err(SessionError::PaneNotFound(pane_id));
+        }
+        if self.placement(pane_id) != PanePlacement::Tiled {
+            return Err(SessionError::PaneNotTiled(pane_id));
+        }
+        let root = {
+            let state = self.layout.lock().expect("layout");
+            remove_leaf(&state.root, PaneId::new(pane_id))?
+        };
+        self.placements
+            .lock()
+            .expect("placements")
+            .insert(pane_id, PanePlacement::Detached);
+        self.owners.lock().expect("owners").remove(&pane_id);
+        {
+            let mut state = self.layout.lock().expect("layout");
+            state.root = root;
+            if state.zoom == Some(pane_id) {
+                state.zoom = None;
+            }
+            state.bump();
+        }
+        self.resize_panes();
+        self.publish_layout();
+        Ok(self.layout(None))
+    }
+
+    /// Place a detached tiled pane back into this session's window tree.
+    pub async fn place_pane(
+        &self,
+        pane_id: u64,
+        anchor_pane_id: Option<u64>,
+        axis: SplitAxis,
+        ratio_bps: u16,
+    ) -> Result<Layout, SessionError> {
+        let _op = self.ops.lock().await;
+        if !self.panes.lock().expect("panes").contains_key(&pane_id) {
+            return Err(SessionError::PaneNotFound(pane_id));
+        }
+        if matches!(self.placement(pane_id), PanePlacement::Floating { .. }) {
+            return Err(SessionError::PaneNotTiled(pane_id));
+        }
+        let root = {
+            let state = self.layout.lock().expect("layout");
+            place_leaf(
+                &state.root,
+                anchor_pane_id.map(PaneId::new),
+                PaneId::new(pane_id),
+                axis,
+                ratio_bps,
+            )?
+        };
+        self.placements
+            .lock()
+            .expect("placements")
+            .insert(pane_id, PanePlacement::Tiled);
+        {
+            let mut state = self.layout.lock().expect("layout");
+            state.root = root;
+            state.bump();
+        }
+        self.resize_panes();
+        self.publish_layout();
+        Ok(self.layout(None))
+    }
+
     pub async fn split(
         &self,
         pane_id: u64,
@@ -405,6 +542,8 @@ impl Session {
                 .remove(&pane_id)
                 .ok_or(SessionError::PaneNotFound(pane_id))?
         };
+        self.placements.lock().expect("placements").remove(&pane_id);
+        self.owners.lock().expect("owners").remove(&pane_id);
         let Some(next_root) = next_root else {
             return Ok(None);
         };
@@ -498,10 +637,10 @@ impl Session {
             .map(|pane| pane.last_activity_unix_ms())
             .max()
             .unwrap_or(self.created_at_unix_ms);
-        let infos: Vec<PaneInfo> = self
-            .pane_ids()
-            .into_iter()
-            .filter_map(|id| panes.iter().find(|pane| pane.id == id))
+        let placements = self.placements.lock().expect("placements");
+        let owners = self.owners.lock().expect("owners");
+        let infos: Vec<PaneInfo> = panes
+            .iter()
             .map(|pane| {
                 let meta = pane.meta();
                 PaneInfo {
@@ -511,9 +650,12 @@ impl Session {
                     cols: meta.cols,
                     rows: meta.rows,
                     alive: pane.is_alive(),
-                    placement: PanePlacement::Tiled,
+                    placement: placements
+                        .get(&pane.id)
+                        .copied()
+                        .unwrap_or(PanePlacement::Tiled),
                     window_id: Some(1),
-                    owner_client_id: None,
+                    owner_client_id: owners.get(&pane.id).copied(),
                     program_status: pane.program_status(),
                 }
             })
@@ -614,6 +756,8 @@ impl SessionRegistry {
                 revision: 1,
             }),
             panes: StdMutex::new(panes),
+            placements: StdMutex::new(BTreeMap::new()),
+            owners: StdMutex::new(BTreeMap::new()),
             ops: AsyncMutex::new(()),
             layout_tx,
         });

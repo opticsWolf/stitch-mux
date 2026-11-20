@@ -16,6 +16,7 @@ pub mod client {
     pub const HYPERLINKS: u64 = 1 << 13;
     pub const EVENTS: u64 = 1 << 14;
     pub const ACTIONS: u64 = 1 << 15;
+    pub const DETACHED_PANES: u64 = 1 << 16;
 }
 
 /// Server capability bits advertised in HelloAck.
@@ -49,7 +50,8 @@ pub const DEFAULT_CLIENT_CAPABILITIES: u64 = client::STRUCTURED_VIEW
     | client::SHELL_INTEGRATION
     | client::HYPERLINKS
     | client::EVENTS
-    | client::ACTIONS;
+    | client::ACTIONS
+    | client::DETACHED_PANES;
 
 pub const DEFAULT_SERVER_CAPABILITIES: u64 = server::STRUCTURED_VIEW
     | server::ANSI
@@ -62,7 +64,8 @@ pub const DEFAULT_SERVER_CAPABILITIES: u64 = server::STRUCTURED_VIEW
     | server::SHELL_INTEGRATION
     | server::HYPERLINKS
     | server::EVENTS
-    | server::ACTIONS;
+    | server::ACTIONS
+    | server::DETACHED_PANES;
 
 #[cfg(test)]
 mod tests {
@@ -72,6 +75,7 @@ mod tests {
     fn capability_bits_do_not_overlap_across_peers_by_mistake() {
         assert_eq!(client::STRUCTURED_VIEW, server::STRUCTURED_VIEW);
         assert_eq!(client::EVENTS, 1 << 14);
+        assert_eq!(client::DETACHED_PANES, 1 << 16);
         assert_eq!(server::DETACHED_PANES, 1 << 12);
     }
 }

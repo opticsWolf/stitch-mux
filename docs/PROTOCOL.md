@@ -543,6 +543,7 @@ struct SetLayout {
 }
 
 enum LayoutNode {
+    Empty,                       // window with no tiled panes
     Leaf { pane_id: u64 },
     Split {
         axis: SplitAxis,         // Columns = side-by-side, Rows = stacked
@@ -891,9 +892,10 @@ without attaching, including activity counts and detached panes.
 `Run`, `Wait`, `SendText`, `ListPanes`, and the action methods are the v0.2
 automation/agent surface. They use the same local connection and trust model as
 the GUI; there is no remote variant. `DetachPane`, `PlacePane`, `ClaimPane`, and
-`ReleasePane` are reserved for the v0.2 detached-pane/ownership model. A v1
-server that does not advertise the relevant capability returns
-`Error { code: Unsupported }` for these variants.
+`ReleasePane` are the v0.2 detached-pane/ownership model. A client that does
+not request `DETACHED_PANES` receives `Error { code: Unsupported }`; a server
+that does not advertise `server::DETACHED_PANES` is not a v0.2 owner-capable
+daemon.
 
 `CaptureResponse` is bounded by `lines <= 1000` and the 8 MiB frame limit.
 `format` selects the payload; unused payload fields are empty:
@@ -945,8 +947,9 @@ Detaching the last tiled pane leaves an empty window; closing the pane is the
 explicit destructive operation.
 
 `ClaimPane`/`ReleasePane` implement the optional size-owner policy. `Take` makes
-the caller the owner immediately; `Request` only claims unowned panes and waits
-in line otherwise. Ownership changes emit a `PaneOwnerChanged` event in the v0.2
+the caller the owner immediately; `Request` only claims unowned panes and
+returns a typed `Busy` error if another client already owns the pane (there is
+no waiting queue). Ownership changes emit a `PaneOwnerChanged` event in the v0.2
 event stream. Ownership is a local size preference, not authentication.
 
 ### 8.3 Automation and agent commands (v0.2)
@@ -966,7 +969,8 @@ The local CLI and agent skill use these control commands:
 sends `Event` (kind 27) frames with a monotonic daemon-wide `seq` and a typed
 payload. Implemented v0.2 kinds: `session_list` (initial state),
 `program_status_changed`, `activity_changed`, `pane_created`, `pane_exited`,
-`action_invoked`, `keymap_changed`, `actions_changed`, and `event_gap`.
+`pane_placement_changed`, `pane_owner_changed`, `action_invoked`,
+`keymap_changed`, `actions_changed`, and `event_gap`.
 Layout, window and owner events arrive with those features. Events are carried
 by a 256-entry broadcast queue; a subscriber that falls behind receives
 `Error { code: Busy, message: "event subscriber fell behind" }` and is
@@ -1034,6 +1038,7 @@ Client capabilities (requested):
 | 6 | `FOCUS` | Can report focus changes |
 | 7 | `BRACKETED_PASTE` | Can send paste events |
 | 8 | `LAYOUT_CONTROL` | May send `SetLayout` |
+| 16 | `DETACHED_PANES` | May detach/place panes and claim size ownership |
 | 9 | `CAPTURE` | Supports `CaptureRequest` |
 | 10 | `RESYNC` | Supports `Resync` |
 | 11 | `PROGRAM_STATUS` | Can display OSC 7501 status/activity |
