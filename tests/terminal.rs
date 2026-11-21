@@ -65,6 +65,12 @@ async fn wait_for(label: &str, session: &ClientSession, predicate: impl Fn(&Sess
     .unwrap_or_else(|_| panic!("{label} within timeout"));
 }
 
+fn capture_has_marker(text: &str, marker: &str) -> bool {
+    // A narrow split pane wraps the marker across rows and pads every line.
+    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    compact.contains(marker)
+}
+
 async fn captured_text(endpoint: &Endpoint, pane_id: u64) -> String {
     let response = command(
         endpoint,
@@ -135,12 +141,12 @@ async fn terminal_projection_shares_layout_and_output_with_a_structured_client()
     let mut text = String::new();
     for _ in 0..40 {
         text = captured_text(&endpoint, pane_id).await;
-        if text.contains("M4-SHARED") {
+        if capture_has_marker(&text, "M4-SHARED") {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(text.contains("M4-SHARED"), "capture: {text:?}");
+    assert!(capture_has_marker(&text, "M4-SHARED"), "capture: {text:?}");
     wait_for("incremental Render after output", &terminal, |view| {
         view.render_seq > first_seq
     })
@@ -190,12 +196,15 @@ async fn terminal_projection_shares_layout_and_output_with_a_structured_client()
     let mut text = String::new();
     for _ in 0..40 {
         text = captured_text(&endpoint, pane_id).await;
-        if text.contains("M4-SHARED") {
+        if capture_has_marker(&text, "M4-SHARED") {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(text.contains("M4-SHARED"), "capture after detach: {text:?}");
+    assert!(
+        capture_has_marker(&text, "M4-SHARED"),
+        "capture after detach: {text:?}"
+    );
 
     gui.detach().await;
     server.abort();
