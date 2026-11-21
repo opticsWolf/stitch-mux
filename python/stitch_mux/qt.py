@@ -134,6 +134,8 @@ class ViewSignaler(QThread):
             except RuntimeError as err:
                 self.connection_lost.emit(str(err))
                 return
+            if self.isInterruptionRequested():
+                break
             self.view_updated.emit(view)
             if view.get("connection") == "Lost":
                 message = view.get("error") or "connection lost"
@@ -200,7 +202,7 @@ class CellCanvas(QWidget):
         self.cell_height = max(1.0, metrics.height())
         self.setMinimumSize(int(self.cell_width * 8), int(self.cell_height * 4))
 
-    def set_session(self, session: SessionProtocol) -> None:
+    def set_session(self, session: SessionProtocol | None) -> None:
         self.session = session
 
     @Slot(dict)
@@ -611,12 +613,25 @@ class SessionWindow(QWidget):
     def retry(self) -> None:
         self.attach()
 
+    def _detach_session(self) -> None:
+        """Detach once; a session whose thread already stopped is harmless."""
+        session = self.session
+        self.session = None
+        self.canvas.set_session(None)
+        if session is None:
+            return
+        try:
+            session.detach()
+        except RuntimeError as err:
+            if "already stopped" not in str(err):
+                raise
+
     @Slot(str)
     def _run_command(self, command: str) -> None:
         if self.session is None:
             return
         if command == "Detach session":
-            self.session.detach()
+            self._detach_session()
             self.status.setText("detached; session is still alive")
             return
         if command == "Focus first pane":
@@ -634,11 +649,24 @@ class SessionWindow(QWidget):
             self.session.resize(cols, rows)
 
     def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt API
-        if self.worker is not None:
-            self.worker.requestInterruption()
-            self.worker.wait(500)
-        if self.session is not None:
-            self.session.detach()
+        worker = self.worker
+        if worker is not None:
+            # Disconnect first so the worker cannot wait on a queued signal
+            # while the GUI thread waits for the worker to stop.
+            for signal, slot in (
+                (worker.view_updated, self.on_view),
+                (worker.connection_lost, self.on_lost),
+            ):
+                try:
+                    signal.disconnect(slot)
+                except (RuntimeError, TypeError):
+                    pass
+            worker.requestInterruption()
+            if not worker.wait(2000):
+                worker.terminate()
+                worker.wait()
+            self.worker = None
+        self._detach_session()
         event.accept()
 
 

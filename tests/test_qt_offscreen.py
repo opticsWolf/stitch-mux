@@ -19,6 +19,7 @@ from stitch_mux.qt import (  # noqa: E402
     CellCanvas,
     CommandPalette,
     SessionPicker,
+    SessionWindow,
     color_key,
     style_key,
 )
@@ -196,6 +197,23 @@ def test_canvas_requests_palette_on_ctrl_p(app: QApplication) -> None:
         )
     )
     assert requests == [True]
+
+
+def test_session_window_detach_is_idempotent(
+    app: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StoppedSession(FakeSession):
+        def detach(self) -> None:
+            raise RuntimeError("session thread already stopped")
+
+    monkeypatch.setattr("stitch_mux.qt.attach", lambda *a, **k: StoppedSession())
+    window = SessionWindow("demo")
+    try:
+        window._detach_session()
+        window._detach_session()
+        assert window.session is None
+    finally:
+        window.close()
 
 
 def test_picker_lists_sessions(app: QApplication) -> None:
