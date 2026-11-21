@@ -1,0 +1,20 @@
+[package]
+name = "stitch-mux-benchmark"
+description = "Headless, GUI-free benchmark set for stitch-mux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "stitch-mux-benchmark"
+path = "src/main.rs"
+
+[dependencies]
+portable-pty = "0.9"
+serde_json.workspace = true
+stitch-pty.workspace = true
+stitch-mux = { path = ".." }
+tokio.workspace = true
+vte = "0.15"

@@ -60,9 +60,27 @@ update; fast bursts coalesce without blocking the Qt event loop.
 the same `InputEvent` codes as egui and the terminal client. Closing or
 detaching a window leaves the daemon's children alive.
 
+## Qt demo
+
+The fuller reference demo is `examples/python/qtdemo.py`. Its rendering model
+follows Stitch PTY's advanced terminal example: a custom `QPainter` cell grid,
+color themes, cursor shapes, bounded local scrollback, drag/word/line/block
+selection, clipboard, OSC 8 link hover, find, and a status bar. The data path
+is deliberately different: the demo consumes authoritative `SessionView`
+snapshots from the daemon, arranges one grid per pane from `Layout`, and sends
+host keys back as semantic `Session.key`/`input_text` calls. It never receives
+PTY bytes, parses ANSI, or encodes terminal keys.
+
+```sh
+uv run python examples/python/qtdemo.py --session demo
+# omit --session to pick from the local daemon's session list
+```
+
+The demo is a repository example, not part of the installed Python package.
+
 ## Packaging and licensing
 
-- The Rust crates are `MIT OR Apache-2.0`, matching `stitch-pty`.
+- The Rust package is `MIT OR Apache-2.0`, matching `stitch-pty`.
 - PySide6 is **LGPL-3.0 / GPL / commercial**. The wheel does not vendor Qt;
   users install their own PySide6 distribution via the `qt` extra.
 - If you redistribute a bundled Qt application, use dynamic linking and meet

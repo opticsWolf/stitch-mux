@@ -88,8 +88,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Inspect the crates.io archive
-        run: cargo package --list
+      - name: Verify the crates.io archive file list
+        run: |
+          mkdir -p .pytest_cache .venv/layout-check
+          touch .pytest_cache/README.md .venv/layout-check/LICENSE-MIT
+          package_files=$(cargo package --list)
+          printf '%s\n' "$package_files"
+          unexpected=$(printf '%s\n' "$package_files" | awk '
+            /^(\.cargo_vcs_info\.json|Cargo\.toml(\.orig)?|Cargo\.lock|README\.md|CHANGELOG\.md|LICENSE-(APACHE|MIT))$/ { next }
+            /^(src\/|agent-skill\/stitch-mux\/)/ { next }
+            { print }
+          ')
+          if [ -n "$unexpected" ]; then
+            printf 'Unexpected files in crates.io archive:\n%s\n' "$unexpected" >&2
+            exit 1
+          fi
       - name: Verify the publishable package
         run: cargo publish --dry-run
       - name: Build the packaged source with the GUI feature

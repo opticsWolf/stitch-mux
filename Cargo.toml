@@ -13,14 +13,14 @@ categories = ["command-line-utilities", "development-tools"]
 # in the crates.io archive. Tests, fixtures, bindings and demos stay in the
 # repository and run from repository CI.
 include = [
-    "Cargo.toml",
-    "Cargo.lock",
-    "README.md",
-    "CHANGELOG.md",
-    "LICENSE-APACHE",
-    "LICENSE-MIT",
-    "src/**",
-    "agent-skill/stitch-mux/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE-APACHE",
+    "/LICENSE-MIT",
+    "/src/**",
+    "/agent-skill/stitch-mux/**",
 ]
 
 [lib]
@@ -59,7 +59,12 @@ libc = "0.2"
 
 [workspace]
 resolver = "2"
-members = ["bindings/python", "examples/gpui", "tests/fixtures"]
+members = [
+    "benchmark",
+    "bindings/python",
+    "examples/gpui",
+    "tests/fixtures",
+]
 
 [workspace.package]
 version = "0.1.0"

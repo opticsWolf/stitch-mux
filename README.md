@@ -195,9 +195,18 @@ the log path; the GUI diagnostics panel shows it and the active endpoint.
 
 ### Verification
 
-`cargo test --workspace` runs the unit and real-PTY integration suites. The
-release stress job additionally runs the 10 MiB flood and the short
-detach/reattach soak on three platforms. For the 30-minute acceptance soak:
+Build the standalone test fixtures before running the unit and real-PTY
+integration suites:
+
+```sh
+cargo build -p stitch-mux-test-fixtures
+cargo test --workspace
+```
+
+If you use a custom Cargo target directory, set `STITCH_MUX_FIXTURE_DIR` to the
+directory containing the built fixture executables. The release stress job
+runs the 10 MiB flood and the short detach/reattach soak on three platforms.
+For the 30-minute acceptance soak:
 
 ```sh
 cargo build --release -p stitch-mux-test-fixtures

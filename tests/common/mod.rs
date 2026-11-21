@@ -5,9 +5,9 @@ use std::path::PathBuf;
 /// Resolve a repository-only PTY fixture binary.
 ///
 /// The fixtures live in the `stitch-mux-test-fixtures` package so they are not
-/// product binary targets and never ship in the crates.io archive. CI builds
-/// them explicitly; a local `cargo test --workspace` also builds the workspace
-/// member before running these tests.
+/// product binary targets. Run `cargo build -p stitch-mux-test-fixtures`
+/// before `cargo test --workspace`, using the same profile for both commands.
+/// Set `STITCH_MUX_FIXTURE_DIR` when building into a custom target directory.
 pub fn fixture_bin(name: &str) -> String {
     let suffix = if cfg!(windows) { ".exe" } else { "" };
     let file = format!("{name}{suffix}");
@@ -16,10 +16,10 @@ pub fn fixture_bin(name: &str) -> String {
         assert!(path.is_file(), "fixture not found: {}", path.display());
         return path.to_string_lossy().into_owned();
     }
-    let profile = if cfg!(debug_assertions) {
-        "debug"
+    let (profile, release_flag) = if cfg!(debug_assertions) {
+        ("debug", "")
     } else {
-        "release"
+        ("release", " --release")
     };
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
@@ -27,7 +27,7 @@ pub fn fixture_bin(name: &str) -> String {
         .join(&file);
     assert!(
         path.is_file(),
-        "fixture {} not built; run `cargo build -p stitch-mux-test-fixtures`",
+        "fixture {} not built; run `cargo build{release_flag} -p stitch-mux-test-fixtures` or set STITCH_MUX_FIXTURE_DIR",
         path.display()
     );
     path.to_string_lossy().into_owned()

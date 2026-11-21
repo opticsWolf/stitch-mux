@@ -12,6 +12,10 @@ name = "alt_fixture"
 path = "src/bin/alt_fixture.rs"
 
 [[bin]]
+name = "bench_fixture"
+path = "src/bin/bench_fixture.rs"
+
+[[bin]]
 name = "capture_fixture"
 path = "src/bin/capture_fixture.rs"
 

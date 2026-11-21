@@ -91,6 +91,7 @@ Run locally before marking Review, then again in CI:
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo build -p stitch-mux-test-fixtures
 cargo test --workspace
 cargo check --no-default-features
 cargo check --features gui
