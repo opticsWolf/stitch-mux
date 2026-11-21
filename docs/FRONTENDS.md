@@ -1,7 +1,7 @@
 # Frontend Adapters: egui, GPUI, and Qt/PySide6
 
 `stitch-mux` is deliberately **frontend-agnostic**. The daemon and
-`stitch-mux-client` know about cells, layout, input, and sessions; they know
+`src/client/` know about cells, layout, input, and sessions; they know
 nothing about egui, GPUI, Qt, or any other toolkit. Each GUI is an adapter over
 the same structured protocol.
 
@@ -11,7 +11,7 @@ session and one set of PTYs.
 ## 1. The adapter boundary
 
 ```text
-stitch-mux-client (toolkit-independent)
+src/client/ (toolkit-independent)
   ├─ protocol connection and reconnect
   ├─ SessionView: layout + panes + focus + seq state
   ├─ PaneView: cells, cursor, modes, title, links, status
@@ -26,17 +26,20 @@ frontend adapter (one per toolkit)
   └─ repaint scheduling / accessibility / IME
 ```
 
-`stitch-mux-client` must compile without any UI dependency. The reference
-adapters are separate crates:
+`src/client/` must compile without any UI dependency. The reference adapters
+live behind repository-only boundaries:
 
 ```text
-crates/
-  stitch-mux-client/       # protocol/state only
-  stitch-mux-gui-egui/     # egui/eframe reference
-  stitch-mux-gui-gpui/     # optional GPUI adapter
-  stitch-mux-py/           # PyO3 client + PySide6 adapter
-  stitch-mux-terminal/     # ANSI terminal compatibility
+src/client/           # protocol/state only
+src/gui/              # egui/eframe reference, feature = "gui"
+src/terminal.rs       # ANSI terminal compatibility
+bindings/python/      # PyO3 SDK manifest (publish = false)
+examples/gpui/        # GPUI boundary spike (publish = false)
 ```
+
+The default package contains the daemon, CLI, and ANSI attach. `cargo install
+stitch-mux --features gui` also enables `stitch-mux gui`; the duplicate
+`stitch-mux-gui` executable is retired.
 
 ## 2. Shared rendering model
 
@@ -141,7 +144,7 @@ on `KeymapChanged`.
 
 ### 2.4 Terminal projection
 
-`stitch-mux-terminal` is not a cell painter. The daemon composes the session
+`src/terminal.rs` is not a cell painter. The daemon composes the session
 layout, borders, status bar, styles, cursor, and dirty-cell diffs into `Render`
 frames; the adapter writes those bytes to stdout in sequence. It receives
 `Layout` for pane IDs and per-client focus, but never `PaneSnapshot`/
@@ -189,8 +192,8 @@ It is Apache-2.0 and designed for exactly this class of application.
 
 The risk is API stability: GPUI is pre-1.0 and explicitly warns about breaking
 changes. Treat it as an optional adapter behind a feature flag, pin a known
-version/commit, and keep the entire dependency in `stitch-mux-gui-gpui`. Do not
-let GPUI types leak into `stitch-mux-client`.
+version/commit, and keep the entire dependency in `examples/gpui/`. Do not
+let GPUI types leak into `src/client/`.
 
 If GPUI is chosen as the primary UI, budget time for API migrations and for
 platform-specific window/input testing (especially Windows and Linux).
@@ -326,7 +329,7 @@ clients.
 
 ## 8. Recommendation
 
-1. **Protocol first:** implement `stitch-mux-client` and the structured protocol
+1. **Protocol first:** implement `src/client/` and the structured protocol
    before any GUI-specific code.
 2. **egui reference:** build a small egui adapter to validate cells, layout,
    input, and reattach. Keep it intentionally plain.
@@ -335,7 +338,7 @@ clients.
 4. **Program status/activity before heavy polish:** add the status fields and a
    simple activity filter/list early; they are cheap and validate the structured
    metadata path.
-5. **Qt/PySide6 for Python:** expose `stitch-mux-py`, then a `QWidget` adapter
+5. **Qt/PySide6 for Python:** expose `bindings/python/`, then a `QWidget` adapter
    that paints row/style runs. Use Qt for mature IME/accessibility when Python
    is the product surface.
 6. **Actions and terminal fidelity next:** command palette/key hints, OSC 8,

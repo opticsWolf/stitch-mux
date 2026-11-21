@@ -1,8 +1,10 @@
 # Python SDK and PySide6 adapter
 
-The Python package is a maturin project. Rust owns the protocol connection on
-one background thread per `Session`; Python receives immutable view dicts and
-sends semantic commands. No Python code parses ANSI or encodes keys.
+The Python package is a maturin project rooted at `bindings/python/Cargo.toml`.
+That manifest is `publish = false` and consumes the root `stitch-mux` library
+by path. Rust owns the protocol connection on one background thread per
+`Session`; Python receives immutable view dicts and sends semantic commands.
+No Python code parses ANSI or encodes keys.
 
 ## Build and run
 
@@ -14,7 +16,7 @@ uv run python -m stitch_mux.qt --session demo
 For development against a checkout:
 
 ```sh
-maturin develop --features pyo3/extension-module
+maturin develop --manifest-path bindings/python/Cargo.toml --features pyo3/extension-module
 QT_QPA_PLATFORM=offscreen pytest -q
 ```
 

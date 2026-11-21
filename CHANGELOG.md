@@ -8,12 +8,20 @@ Python package version in `pyproject.toml`.
 
 ### Changed
 
+- The repository now has one publishable Cargo package. The former internal
+  crates are modules under `src/`, the executable ships from the same package,
+  and the egui reference GUI is a `gui` feature behind `stitch-mux gui`. The
+  Python binding, GPUI spike, PTY fixtures, and integration tests remain in
+  repository-only manifests and are absent from the crates.io archive.
 - Upgrade to Stitch PTY 0.16.0 and use its parser for terminal replies and OSC
   framing. Hyperlinks follow cells through reflow, and the pane reader uses
   its streaming drain before reporting exit.
 
 ### Fixed
 
+- The Qt adapter detaches at most once and waits for its polling thread before
+  the window closes, so a detach command followed by close no longer kills the
+  process.
 - Serialize window close with pane creation. Publish tab renames and order
   changes to attached clients.
 - Report rejected automation input when the pane writer queue is full or

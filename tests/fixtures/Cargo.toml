@@ -1,0 +1,36 @@
+[package]
+name = "stitch-mux-test-fixtures"
+description = "Repository-only PTY child fixtures for stitch-mux integration tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "alt_fixture"
+path = "src/bin/alt_fixture.rs"
+
+[[bin]]
+name = "capture_fixture"
+path = "src/bin/capture_fixture.rs"
+
+[[bin]]
+name = "detach_exit_fixture"
+path = "src/bin/detach_exit_fixture.rs"
+
+[[bin]]
+name = "exit_fixture"
+path = "src/bin/exit_fixture.rs"
+
+[[bin]]
+name = "flood_fixture"
+path = "src/bin/flood_fixture.rs"
+
+[[bin]]
+name = "shell_fixture"
+path = "src/bin/shell_fixture.rs"
+
+[[bin]]
+name = "status_fixture"
+path = "src/bin/status_fixture.rs"

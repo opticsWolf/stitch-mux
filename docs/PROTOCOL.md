@@ -14,7 +14,7 @@ first-class parts of the design. Some automation and detached-pane messages are
 marked **v0.2**; they use reserved kinds/capabilities and are not required for a
 v0.1 GUI client.
 
-The Rust DTOs live in `stitch-mux-protocol`; this file is the human-readable
+The Rust DTOs live in `src/protocol/`; this file is the human-readable
 contract.
 
 ## 1. Transport and endpoints
@@ -690,7 +690,7 @@ struct Render {
 
 On the wire, `Render` is not MessagePack: it is the 13-byte binary prefix
 followed by raw ANSI bytes shown above. The struct is the decoded form used by
-`stitch-mux-client`. The server composes the session layout, borders, status
+`src/client/`. The server composes the session layout, borders, status
 bar, and focused cursor, then encodes ANSI. Frames are bounded to a clipped
 300x100 grid. A full frame resets the screen; a later frame emits only changed
 cells plus the focused cursor. Geometry, layout revision, attach, and `Resync`
@@ -1127,7 +1127,7 @@ optional fields, but must ignore what it cannot render.
 
 ## 12. Frontend contract
 
-A frontend adapter consumes `SessionView` from `stitch-mux-client`:
+A frontend adapter consumes `SessionView` from `src/client/`:
 
 - `Layout` creates/updates pane widgets and their pixel rects;
 - `PaneSnapshot` replaces a pane buffer;

@@ -129,7 +129,7 @@ that exit status; `wait` does the same for an existing pane or session.
 session, pane, activity, and exit events as JSON Lines. `server --foreground`
 is the debugging entry point. See [AUTOMATION.md](AUTOMATION.md).
 
-### 4.2 Daemon: `stitch-mux-server`
+### 4.2 Daemon: `src/server/`
 
 One process holds all sessions and PTYs. It is normally started detached, but
 the same code path runs in the foreground for tests and debugging. It owns:
@@ -147,7 +147,7 @@ the same code path runs in the foreground for tests and debugging. It owns:
 The daemon is not a remote service. It has no TCP listener, SSH/Tailscale
 integration, user database, or multi-tenant authorization model.
 
-### 4.3 Core: `stitch-mux-core`
+### 4.3 Core: `src/core/`
 
 Pure domain types with no tokio, no filesystem, and no PTY dependency:
 
@@ -159,10 +159,10 @@ Pure domain types with no tokio, no filesystem, and no PTY dependency:
 - layout arithmetic and hit testing;
 - frame diff helpers.
 
-Keeping this crate pure makes geometry, frame encoding, and protocol tests fast
+Keeping these modules pure makes geometry, frame encoding, and protocol tests fast
 and deterministic. It can also compile to WASM later for a browser renderer.
 
-### 4.4 Protocol: `stitch-mux-protocol`
+### 4.4 Protocol: `src/protocol/`
 
 The wire contract, separate from the domain model where practical:
 
@@ -174,9 +174,9 @@ The wire contract, separate from the domain model where practical:
 
 See [PROTOCOL.md](PROTOCOL.md).
 
-### 4.5 Toolkit-agnostic client: `stitch-mux-client`
+### 4.5 Toolkit-agnostic client: `src/client/`
 
-This crate owns protocol/state only, with no UI toolkit dependency:
+This module owns protocol/state only, with no UI toolkit dependency:
 
 - connect, handshake, attach, detach, reconnect;
 - maintain `SessionView` (layout, panes, snapshots, focus, activity);
@@ -191,10 +191,12 @@ boundary that lets one daemon serve multiple frontends.
 
 ### 4.6 Frontend adapters
 
-- `stitch-mux-gui-egui`: reference GUI, using `eframe`/`egui`.
-- `stitch-mux-gui-gpui`: optional performance adapter for GPUI.
-- `stitch-mux-py` + Qt/PySide6 example: Python control and GUI path.
-- `stitch-mux-terminal`: ANSI terminal compatibility client.
+- `src/gui/`: egui reference GUI behind the `gui` feature, reachable through
+  `stitch-mux gui`.
+- `examples/gpui/`: optional GPUI boundary spike, not part of the package.
+- `bindings/python/` + `python/stitch_mux/qt.py`: PyO3 control SDK and Qt
+  adapter, built from a repository-only manifest.
+- `src/terminal.rs`: ANSI terminal compatibility frontend.
 
 Adapters map native events to `InputEvent`, convert pane cell rects to pixels,
 draw cells, render activity indicators, and expose the action palette. They do
@@ -649,7 +651,7 @@ changing pane geometry.
 
 #### Frontend independence
 
-The mux core and `stitch-mux-client` must not depend on egui, GPUI, Qt, or any
+The core and client modules must not depend on egui, GPUI, Qt, or any
 other toolkit. A frontend adapter:
 
 - owns the toolkit event loop and window;

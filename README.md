@@ -105,28 +105,28 @@ hosts, port forwarding, the web client, and the iOS client.
 
 ```text
 stitch-mux/
-├── Cargo.toml                 # workspace
+├── Cargo.toml                 # the single publishable package + workspace
 ├── README.md
-├── docs/
-│   ├── ARCHITECTURE.md        # components, data flow, decisions
-│   ├── PROTOCOL.md            # wire format and attach messages
-│   ├── FRONTENDS.md           # egui/GPUI/Qt-PySide6 adapter evaluation
-│   ├── AUTOMATION.md          # local CLI, events, and agent interface
-│   ├── IMPLEMENTATION_PLAN.md # milestones, tasks, acceptance criteria
-│   ├── IMPLEMENTATION_PROTOCOL.md # living execution rules and decision log
-│   └── REFERENCES.md          # rmux/Zellij/WezTerm/Rex evaluation
-├── agent-skill/               # portable local agent skill and installer
-└── crates/
-    ├── stitch-mux-core/       # IDs, layout, frame/cell model
-    ├── stitch-mux-protocol/   # framing, messages, capabilities
-    ├── stitch-mux-server/     # daemon, session actor, pane runtime
-    ├── stitch-mux-client/     # toolkit-agnostic protocol/state library
-    ├── stitch-mux-gui-egui/   # reference egui/eframe GUI
-    ├── stitch-mux-gui-gpui/   # optional GPUI adapter
-    ├── stitch-mux-terminal/   # ANSI terminal compatibility client
-    ├── stitch-mux/            # CLI binary
-    └── stitch-mux-py/         # PyO3 control SDK + PySide6 adapter (later)
+├── src/
+│   ├── lib.rs                 # public Rust client API and daemon entry point
+│   ├── main.rs                # stitch-mux executable
+│   ├── core/                  # IDs, layout, cells, actions, status
+│   ├── protocol/              # framing, DTOs, local IPC
+│   ├── server/                # daemon, sessions, panes, terminal state
+│   ├── client/                # attach, commands, SessionView
+│   ├── terminal.rs            # ANSI compatibility frontend
+│   └── gui/                   # egui reference adapter (feature = "gui")
+├── docs/                      # architecture, protocol, milestones, reviews
+├── agent-skill/               # assets embedded by skill-install
+├── bindings/python/           # PyO3 SDK manifest (publish = false)
+├── examples/gpui/             # GPUI spike (publish = false)
+└── tests/                     # integration tests and PTY fixtures
 ```
+
+`cargo install stitch-mux` installs the daemon, CLI, and ANSI attach. Add
+`--features gui` to include the egui reference adapter behind `stitch-mux gui`.
+The Python binding, GPUI spike, fixtures, and tests stay in the repository and
+are excluded from the crates.io archive.
 
 ## Quickstart
 
@@ -200,7 +200,8 @@ release stress job additionally runs the 10 MiB flood and the short
 detach/reattach soak on three platforms. For the 30-minute acceptance soak:
 
 ```sh
-STITCH_MUX_SOAK_MS=1800000 cargo test --release -p stitch-mux-server --test soak -- --ignored
+cargo build --release -p stitch-mux-test-fixtures
+STITCH_MUX_SOAK_MS=1800000 cargo test --release -p stitch-mux --test soak -- --ignored
 ```
 
 See [Python SDK](docs/PYTHON.md), [parity](docs/PARITY.md), and the

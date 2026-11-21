@@ -3387,76 +3387,29 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 name = "stitch-mux"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
- "serde_json",
- "stitch-mux-client",
- "stitch-mux-core",
- "stitch-mux-gui-egui",
- "stitch-mux-protocol",
- "stitch-mux-server",
- "stitch-mux-terminal",
- "stitch-pty",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "stitch-mux-client"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "stitch-mux-core",
- "stitch-mux-protocol",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
-name = "stitch-mux-core"
-version = "0.1.0"
-dependencies = [
- "rmp-serde",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "stitch-mux-gui-egui"
-version = "0.1.0"
-dependencies = [
+ "crossterm",
  "eframe",
  "egui",
- "serde_json",
- "stitch-mux-client",
- "stitch-mux-core",
- "stitch-mux-protocol",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "stitch-mux-gui-gpui"
-version = "0.1.0"
-dependencies = [
- "stitch-mux-client",
- "stitch-mux-core",
-]
-
-[[package]]
-name = "stitch-mux-protocol"
-version = "0.1.0"
-dependencies = [
  "libc",
  "rmp-serde",
  "serde",
  "serde_bytes",
  "serde_json",
- "stitch-mux-core",
+ "stitch-pty",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
+]
+
+[[package]]
+name = "stitch-mux-gpui"
+version = "0.1.0"
+dependencies = [
+ "stitch-mux",
 ]
 
 [[package]]
@@ -3466,40 +3419,14 @@ dependencies = [
  "pyo3",
  "pythonize",
  "serde_json",
- "stitch-mux-client",
- "stitch-mux-core",
- "stitch-mux-protocol",
+ "stitch-mux",
  "thiserror 2.0.21",
  "tokio",
 ]
 
 [[package]]
-name = "stitch-mux-server"
+name = "stitch-mux-test-fixtures"
 version = "0.1.0"
-dependencies = [
- "base64",
- "serde_json",
- "stitch-mux-client",
- "stitch-mux-core",
- "stitch-mux-protocol",
- "stitch-pty",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "unicode-width",
-]
-
-[[package]]
-name = "stitch-mux-terminal"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "stitch-mux-client",
- "stitch-mux-core",
- "stitch-mux-protocol",
- "thiserror 2.0.21",
- "tokio",
-]
 
 [[package]]
 name = "stitch-pty"

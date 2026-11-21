@@ -21,8 +21,8 @@ The priorities are explicit:
 
 M1–M4 are **toolkit-neutral at the product boundary**:
 
-- `stitch-mux-core`, `stitch-mux-protocol`, `stitch-mux-server`, and
-  `stitch-mux-client` have no egui/GPUI/Qt dependency.
+- `src/core/`, `src/protocol/`, `src/server/`, and `src/client/` have no
+  egui/GPUI/Qt dependency.
 - M1–M3 use **egui as a disposable reference adapter** to prove the structured
   protocol, layout, focus, and detach/reattach. It is not a product commitment.
 - M2/M3 acceptance can also be exercised with protocol-level/headless GUI tests.
@@ -701,8 +701,9 @@ These are mandatory, not optional:
 | qt-python (later) | maturin build, offscreen pytest, ruff, mypy |
 | docs | `cargo doc --no-deps` |
 
-Keep `stitch-mux-client` and `stitch-mux-core` buildable without GUI features:
-`cargo check -p stitch-mux-client --no-default-features`.
+Keep `src/client/` and `src/core/` buildable without GUI features:
+`cargo check --no-default-features`. The egui adapter is compiled by
+`cargo check --features gui`.
 
 ## 5. Performance budgets
 
@@ -731,7 +732,7 @@ bottlenecks, not PTY reads.
 |---|---|---|
 | Protocol designed around ANSI by accident | GUI needs a rewrite | Structured view is M0/M1; ANSI is M4 compatibility |
 | Detach/reattach bolted on later | Lost sessions, stale UI | Make detach/reattach the M1 acceptance test |
-| GUI toolkit leakage into core | Cannot support egui/GPUI/Qt together | `stitch-mux-client` has no UI deps; adapters are separate crates |
+| GUI toolkit leakage into core | Cannot support egui/GPUI/Qt together | `src/client/` has no UI deps; egui is feature-gated, GPUI and Qt live in repository-only manifests |
 | egui text shaping/performance | Poor CJK/emoji or slow large grids | Test early; batch style runs; keep GPUI/Qt options open |
 | GPUI API churn | Constant breakage | Feature-gate, pin version, optional until stable |
 | Python paint overhead | Low frame rate in Qt | Row runs, QImage/glyph atlas, Rust-side renderer; offscreen benchmarks |
@@ -753,7 +754,8 @@ bottlenecks, not PTY reads.
 - [x] `cargo fmt --check`
 - [x] `cargo clippy --workspace --all-targets -- -D warnings`
 - [x] `cargo test --workspace` on Windows, Linux, macOS
-- [x] `cargo check -p stitch-mux-client --no-default-features`
+- [x] `cargo check --no-default-features` and `cargo check --features gui`
+- [x] `cargo package --list` and a GUI-feature build of the unpacked archive
 - [x] egui adapter builds on all three platforms
 - [x] detach/reattach demo (normal close, process kill, reattach) passes —
       `tests/soak.rs` alternates `detach()` with abrupt `abort()` for 12 cycles

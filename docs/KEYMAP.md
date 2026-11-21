@@ -2,7 +2,7 @@
 
 All input surfaces use the same daemon-owned vocabulary: an action name from
 `stitch-mux actions`, a key sequence from `stitch-mux get-keymap`, and the
-built-in dispatcher in `stitch-mux-core`. No frontend hard-codes what a
+built-in dispatcher in `src/core/`. No frontend hard-codes what a
 shortcut means, and there is no Lua or plugin hook.
 
 ## Built-in base layer

@@ -6,7 +6,9 @@ This is the **operating protocol** for turning the design in
 document: update it in the **same commit** as the work it describes. It is not
 the wire protocol; that contract lives in [PROTOCOL.md](PROTOCOL.md).
 
-Last updated: **2026-11-20** — M0–M12 complete; version `0.1.0`. Two post-M5
+Last updated: **2026-11-21** — M0–M12 complete; version `0.1.0`. The root
+package is now the sole publishable Cargo package; the former crates are
+modules and repository-only adapters have `publish = false` manifests. Two post-M5
 review passes fixed split axes, viewport-delta drift, per-client delta seeding,
 named ANSI colors, egui/Qt input and scrolling, layout and pane-ID races,
 Windows endpoint concurrency, unbounded frame/input queues, and unbounded layout
@@ -24,8 +26,7 @@ without explicit approval.
    is updated by fast-forward only.
 3. M0–M4 are toolkit-neutral at the product boundary. No egui, GPUI, Qt,
    tokio-free core violation, or terminal dependency enters
-   `stitch-mux-core`, `stitch-mux-protocol`, `stitch-mux-server`, or
-   `stitch-mux-client`.
+   `src/core/`, `src/protocol/`, `src/server/`, or `src/client/`.
 4. The daemon owns PTYs, screens, layout, focus history, and scrollback.
    Clients are views. There is no second terminal emulator in a client.
 5. Keyboard encoding goes through `stitch-pty`'s `encode_key` with the focused
@@ -91,8 +92,8 @@ Run locally before marking Review, then again in CI:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo check -p stitch-mux-core --no-default-features
-cargo check -p stitch-mux-client --no-default-features
+cargo check --no-default-features
+cargo check --features gui
 cargo doc --no-deps --workspace
 ```
 
@@ -174,6 +175,9 @@ Before marking a task Ready for review:
 
 | Date | Decision | Context | Consequence |
 |---|---|---|---|
+| 2026-11-21 | One publishable package; adapters and fixtures stay in the repository | Publishing nine internal path crates would force version coupling and put fixture binaries and UI code in the crates.io archive. The root package now owns `src/core`, `src/protocol`, `src/server`, `src/client`, `src/terminal`, and feature-gated `src/gui`; `bindings/python`, `examples/gpui`, and `tests/fixtures` are `publish = false` workspace members. `cargo package --list` and a GUI-feature build of the unpacked archive are release gates |
+| 2026-11-21 | egui stays behind `stitch-mux --features gui` | The reference GUI is supported by the `stitch-mux gui` command, so moving it only into `examples/` would break the documented CLI. The duplicate `stitch-mux-gui` executable is retired; the default install stays toolkit-neutral |
+| 2026-11-21 | The Qt adapter tolerates a stopped session thread | A detach command followed by window close called `detach()` twice and could destroy a still-running `QThread`, taking down the process without a Python traceback. The adapter detaches at most once, disconnects the worker before waiting, and has an offscreen regression test |
 | 2026-11-20 | Parallel test endpoints include a process and counter suffix | The three automation tests derive Unix socket paths from a clock-only suffix; coarse clock granularity let two tests bind the same path and fail with `AlreadyExists`. Their helper now includes `std::process::id()` and an atomic counter alongside the clock value, so each test gets a distinct local endpoint |
 | 2026-11-20 | The 30-minute soak is an explicit operator gate, now closed | CI runs the 12-cycle detach/abort form on all three platforms; a 30-minute run would slow every PR and consume a local shell for half an hour. The operator run used `STITCH_MUX_SOAK_MS=1800000` at `7659f52`, completed 1686 cycles in `1800.6803842s`, and exited `0`. Publication still requires separate explicit approval |
 | 2026-11-18 | Use tokio's Unix socket / Windows named pipe instead of `interprocess` | Async endpoint already in the runtime; one abstraction over both platforms | `interprocess` remains a documented fallback; no blocking bridge needed |
@@ -281,7 +285,7 @@ Before marking a task Ready for review:
 | M4 — terminal ANSI compatibility | **Done** | 82 tests on Unix / 79 on Windows plus one release-only 10 MiB stress; bounded server compositor emits full and diff ANSI frames, terminal adapter writes them without parsing or key encoding, real-endpoint test attaches terminal + structured clients and asserts identical layout geometry/output/detach, deterministic conformance corpus covers bash/zsh, vim, less, htop/top and git log patterns, and CLI `attach` replaces the M4 stub; main CI `44598420738` green on all nine jobs |
 | M5 — Qt/PySide6 + optional GPUI | **Done** | 83 tests on Unix / 80 on Windows plus 10 Python tests (including a real-daemon attach/input/resize/detach/reattach SDK test and offscreen Qt widget tests) and one release-only 10 MiB stress; PySide6 paints style runs from the same `SessionView`, maps keys/IME/mouse, shows activity and a `Ctrl+P` command-palette stub, and requires no protocol change; GPUI stays a feature-gated boundary spike; CI `44607326689` green on all ten jobs |
 | Post-M5 review hardening | **Done** | `tests/concurrency.rs` covers concurrent splits, pane-ID uniqueness, the control-resize policy, and four simultaneous attaches; `tests/endpoint.rs` opens six concurrent connections; `tests/viewport.rs` covers scroll drift and reattach deltas; layout decoding is depth-limited; frame and pane-input queues are bounded; the Qt adapter has modified-key, clipping, and wheel tests; CI `44635966975` green on all ten jobs |
-| M6 — hardening / v0.1 | **Done** | Deterministic decoder fuzz (`tests/fuzz.rs`), 12-cycle crash/clean-detach soak plus 20-round three-client focus test (`tests/soak.rs`, `STITCH_MUX_SOAK_MS` extends to 30 minutes), 10 MiB stress, golden frames, three-platform CI, and local diagnostics with a file log; version `0.1.0`; main CI `44688437812` green on all ten jobs including the soak. Publication approval remains an explicit operator gate; the 30-minute manual soak completed at `7659f52` with 1686 cycles in `1800.6803842s` |
+| M6 — hardening / v0.1 | **Done** | The single-package migration keeps the wire format unchanged; `cargo test --workspace` and `cargo test --workspace --features gui` both pass. Deterministic decoder fuzz (`tests/fuzz.rs`), 12-cycle crash/clean-detach soak plus 20-round three-client focus test (`tests/soak.rs`, `STITCH_MUX_SOAK_MS` extends to 30 minutes), 10 MiB stress, golden frames, three-platform CI, and local diagnostics with a file log; version `0.1.0`; main CI `44688437812` green on all ten jobs including the soak. Publication approval remains an explicit operator gate; the 30-minute manual soak completed at `7659f52` with 1686 cycles in `1800.6803842s` |
 | M7 — Program status and activity | **Done** | Bounded OSC 7501 scanner, current-status propagation, activity aggregation, textual GUI attention UI, shell helper, real-PTY replacement test, and a 256-entry local event stream with `session_list`/`program_status_changed`/`activity_changed`/`pane_exited`, monotonic seq, and typed `Busy` on lag; `tests/events.rs` covers the stream and capability gate |
 | M8 — Local automation and agent CLI | **Done** | `run`/`wait`/`send`/`send-keys`/`capture`/`ls --json`/`events --json` with stable IDs and child exit codes; daemon-side `Run` (split placement), `Wait` (pane/session + timeout), authoritative exit state, `pane_created`/`pane_exited`/`program_status_changed`/`activity_changed` events; unscoped subscribers always receive `session_list`; portable agent skill with idempotent install; `tests/automation.rs`, `tests/events.rs`, and `tests/skill.rs` cover the gates |
 | M9 — Actions, keymaps, and command palette | **Done** | Typed action registry and argument validation; canonical key names, JSON keymap merge/reload, modes, sequences, double-prefix passthrough, and bounded hints; capability-gated `ListActions`/`GetKeymap`/`InvokeAction`/`ReloadKeymap` with local change events; CLI `actions`/`get-keymap`/`invoke`/`reload-keymap`; terminal and egui frontends dispatch the same daemon keymap, with palette and mode/hint UI; `tests/actions.rs` plus core/GUI unit tests cover the acceptance gates |

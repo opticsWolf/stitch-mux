@@ -23,6 +23,7 @@ jobs:
         with:
           components: clippy
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features gui -- -D warnings
 
   test:
     strategy:
@@ -33,7 +34,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build -p stitch-mux-test-fixtures
       - run: cargo test --workspace
+      - run: cargo test --workspace --features gui
 
   stress:
     strategy:
@@ -45,8 +48,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --release -p stitch-mux-server --test stress -- --ignored
-      - run: cargo test --release -p stitch-mux-server --test soak -- --ignored
+      - run: cargo build --release -p stitch-mux-test-fixtures
+      - run: cargo test --release -p stitch-mux --test stress -- --ignored
+      - run: cargo test --release -p stitch-mux --test soak -- --ignored
 
   python:
     runs-on: ubuntu-latest
@@ -75,7 +79,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check -p stitch-mux-core --no-default-features
-      - run: cargo check -p stitch-mux-client --no-default-features
-      - run: cargo check -p stitch-mux-gui-gpui --features gpui
+      - run: cargo check --no-default-features
+      - run: cargo check -p stitch-mux-gpui --features gpui
       - run: cargo doc --no-deps --workspace
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Inspect the crates.io archive
+        run: cargo package --list
+      - name: Verify the publishable package
+        run: cargo publish --dry-run
+      - name: Build the packaged source with the GUI feature
+        run: |
+          cargo package --no-verify
+          crate=$(ls target/package/stitch-mux-*.crate | head -1)
+          dir="${crate%.crate}"
+          tar -xzf "$crate" -C target/package
+          cargo build --manifest-path "$dir/Cargo.toml" --features gui

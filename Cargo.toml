@@ -1,16 +1,65 @@
+[package]
+name = "stitch-mux"
+description = "GUI-first local terminal multiplexer built on Stitch PTY"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["terminal", "multiplexer", "pty", "local", "tui"]
+categories = ["command-line-utilities", "development-tools"]
+
+# Only the publishable product source and the assets embedded by the CLI ship
+# in the crates.io archive. Tests, fixtures, bindings and demos stay in the
+# repository and run from repository CI.
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "src/**",
+    "agent-skill/stitch-mux/**",
+]
+
+[lib]
+name = "stitch_mux"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stitch-mux"
+path = "src/main.rs"
+
+[features]
+default = []
+# The egui reference adapter is a supported, opt-in frontend. The default
+# install contains the daemon, CLI, and ANSI terminal attach.
+gui = ["dep:eframe", "dep:egui"]
+
+[dependencies]
+base64.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.29"
+eframe = { version = "0.37", optional = true }
+egui = { version = "0.37", optional = true }
+rmp-serde.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+serde_json.workspace = true
+stitch-pty.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+unicode-width.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [workspace]
 resolver = "2"
-members = [
-    "crates/stitch-mux-core",
-    "crates/stitch-mux-protocol",
-    "crates/stitch-mux-server",
-    "crates/stitch-mux-client",
-    "crates/stitch-mux",
-    "crates/stitch-mux-gui-egui",
-    "crates/stitch-mux-gui-gpui",
-    "crates/stitch-mux-terminal",
-    "crates/stitch-mux-py",
-]
+members = ["bindings/python", "examples/gpui", "tests/fixtures"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,19 +68,14 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/opticsWolf/stitch-mux"
 
 [workspace.dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 base64 = "0.22"
 rmp-serde = "1.3"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json = "1"
+stitch-pty = "0.16.0"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 unicode-width = "0.2"
-stitch-pty = "0.16.0"
-stitch-mux-core = { path = "crates/stitch-mux-core" }
-stitch-mux-protocol = { path = "crates/stitch-mux-protocol" }
-stitch-mux-client = { path = "crates/stitch-mux-client" }
-stitch-mux-server = { path = "crates/stitch-mux-server" }
-stitch-mux-gui-egui = { path = "crates/stitch-mux-gui-egui" }
-stitch-mux-terminal = { path = "crates/stitch-mux-terminal" }

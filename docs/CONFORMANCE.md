@@ -1,6 +1,6 @@
 # M4 terminal conformance checks
 
-The automated `crates/stitch-mux-server/tests/conformance.rs` corpus is
+The automated `tests/conformance.rs` corpus is
 deterministic: it feeds representative cell/style snapshots through the real
 server compositor and checks the emitted ANSI. It covers shell prompts, vim's
 alternate screen and reverse status line, a `less` bottom prompt, `htop`-style
@@ -9,8 +9,8 @@ indexed-color bars, and a `git log` graph with a wide glyph.
 Run it with:
 
 ```sh
-cargo test -p stitch-mux-server --test conformance
-cargo test -p stitch-mux-server --test terminal
+cargo test -p stitch-mux --test conformance
+cargo test -p stitch-mux --test terminal
 ```
 
 For an interactive pass, start the daemon and one session, then attach both a

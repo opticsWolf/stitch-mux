@@ -1,6 +1,6 @@
 # GPUI spike (optional, not a v0.1 gate)
 
-`stitch-mux-gui-gpui` proves the frontend boundary without making GPUI a
+`examples/gpui/` proves the frontend boundary without making GPUI a
 release dependency:
 
 ```rust
@@ -13,7 +13,7 @@ and PySide6 consume. Enable the `gpui` feature for the feature-gated
 `window_title` hook:
 
 ```sh
-cargo check -p stitch-mux-gui-gpui --features gpui
+cargo check -p stitch-mux-gpui --features gpui
 ```
 
 ## Why no GPUI dependency yet

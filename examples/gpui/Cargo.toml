@@ -1,0 +1,20 @@
+[package]
+name = "stitch-mux-gpui"
+description = "Optional GPUI adapter spike for stitch-mux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+# Boundary-only spike. GPUI is pre-1.0 and is deliberately kept out of the
+# product dependency graph; see docs/GPUI-SPIKE.md.
+gpui = []
+
+[dependencies]
+stitch-mux = { path = "../.." }

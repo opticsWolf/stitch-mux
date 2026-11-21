@@ -28,7 +28,7 @@ Homepage = "https://github.com/opticsWolf/stitch-mux"
 features = ["pyo3/extension-module"]
 python-source = "python"
 module-name = "stitch_mux._native"
-manifest-path = "crates/stitch-mux-py/Cargo.toml"
+manifest-path = "bindings/python/Cargo.toml"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
