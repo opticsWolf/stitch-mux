@@ -361,9 +361,14 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("stitch-mux-perm-{}-{unique}", std::process::id()));
-        let path = dir.join("endpoint.sock");
+        // macOS SUN_LEN limits the whole path. Keep both the parent and the
+        // socket name short while staying unique across parallel test runs.
+        let dir = std::env::temp_dir().join(format!(
+            "smp{}-{}",
+            std::process::id(),
+            unique % 1_000_000_000
+        ));
+        let path = dir.join("s");
         let listener = Endpoint::Unix(path.clone()).bind().await.unwrap();
         let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "runtime directory must be owner-only");

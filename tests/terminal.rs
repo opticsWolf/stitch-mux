@@ -185,11 +185,17 @@ async fn terminal_projection_shares_layout_and_output_with_a_structured_client()
         view.attached_clients == 1
     })
     .await;
-    assert!(
-        captured_text(&endpoint, pane_id)
-            .await
-            .contains("M4-SHARED")
-    );
+    // ConPTY can report the child's exit before the final bytes are visible
+    // through HistoryScreen, so let the capture settle after detach too.
+    let mut text = String::new();
+    for _ in 0..40 {
+        text = captured_text(&endpoint, pane_id).await;
+        if text.contains("M4-SHARED") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(text.contains("M4-SHARED"), "capture after detach: {text:?}");
 
     gui.detach().await;
     server.abort();
