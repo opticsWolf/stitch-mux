@@ -3,8 +3,7 @@
 //! `PtySession` is transport-only. The screen, keyboard flags, scrollback and
 //! structured snapshot/delta stream belong here, not in a frontend.
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -22,19 +21,17 @@ use stitch_pty::terminal::{
     KeyCode as PtyKeyCode, KeyEvent as PtyKeyEvent, KeyEventKind as PtyKeyEventKind,
     Modifiers as PtyModifiers,
 };
-use stitch_pty::{HistoryScreen, PtySession, Winsize};
+use stitch_pty::{Char as PtyCell, DrainEnd, HistoryScreen, PtySession, Winsize};
 use thiserror::Error;
-use tokio::sync::{Notify, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use unicode_width::UnicodeWidthChar;
 
-use crate::link_scan::LinkScanner;
-use crate::notify_scan::NotifyScanner;
-use crate::shell_scan::ShellScanner;
-use crate::status_scan::StatusScanner;
+use crate::osc::{OscMetadata, update_marks};
 
 const UPDATE_QUEUE: usize = 256;
 const READ_CHUNK: usize = 16 * 1024;
+const DRAIN_LIMIT: Duration = Duration::from_secs(5);
 /// Bounded so a child that stops reading cannot grow memory without limit.
 const INPUT_QUEUE: usize = 256;
 /// Default scrollback budget. A child can write forever without growing the
@@ -47,6 +44,14 @@ pub enum PaneError {
     Pty(#[from] PtyErrorKind),
     #[error("invalid pane geometry {cols}x{rows}")]
     InvalidGeometry { cols: u16, rows: u16 },
+}
+
+#[derive(Debug, Error)]
+pub enum PaneInputError {
+    #[error("pane input queue is full")]
+    Busy,
+    #[error("pane input is closed")]
+    Closed,
 }
 
 #[derive(Clone, Debug)]
@@ -80,152 +85,28 @@ pub enum PaneUpdate {
     Exit(SessionExit),
 }
 
-/// Bounded absolute-cell → OSC 8 URI projection. Keys use the canonical pane
-/// width at the time the character was printed; a resize clears the map.
-#[derive(Default)]
-struct LinkCells {
-    cells: BTreeMap<u64, String>,
-}
-
-impl LinkCells {
-    const MAX_CELLS: usize = 20_000;
-
-    fn extend(&mut self, spans: Vec<(u64, String)>) {
-        for (cell, uri) in spans {
-            self.cells.insert(cell, uri);
-        }
-        while self.cells.len() > Self::MAX_CELLS {
-            let oldest = *self.cells.keys().next().expect("non-empty");
-            self.cells.remove(&oldest);
-        }
-    }
-
-    fn get(&self, row: u64, col: usize, cols: usize) -> Option<&str> {
-        let index = row.saturating_mul(cols as u64).saturating_add(col as u64);
-        self.cells.get(&index).map(String::as_str)
-    }
-
-    fn prune(&mut self, oldest_row: u64, cols: usize) {
-        let cutoff = oldest_row.saturating_mul(cols as u64);
-        self.cells.retain(|cell, _| *cell >= cutoff);
-    }
-
-    fn clear(&mut self) {
-        self.cells.clear();
-    }
-}
-
 struct PaneState {
     screen: HistoryScreen,
     seq: u64,
     program: String,
-    bell: bool,
     last_activity_unix_ms: u64,
-    queries: QueryScanner,
     /// Latest OSC 7501 record. Current state only, never a queue.
     program_status: Option<ProgramStatus>,
     /// Latest OSC 9/777 notification and OSC 9;4 progress. Current values only.
     notification: Option<Notification>,
     progress: Option<Progress>,
-    notify_scan: NotifyScanner,
-    status_scan: StatusScanner,
     /// Shell integration marks and cwd from OSC 133/1337. The scanner keeps
     /// only a bounded tail; no event history lives here.
-    shell_scan: ShellScanner,
     shell_cwd: Option<String>,
-    link_scan: LinkScanner,
-    links: LinkCells,
+    shell_marks: ShellMarks,
+    pending_metadata: Arc<Mutex<OscMetadata>>,
     /// Authoritative terminal state, recorded before any task cancellation.
     exit: Option<SessionExit>,
     exit_code: Option<i32>,
     /// Viewport rows as they were last published. The parser's dirty-row set
     /// only names rows that were written, not rows that shifted when the
     /// screen scrolled, so deltas are computed by comparing viewports.
-    last_viewport: Vec<Vec<(String, String, String, u8)>>,
-}
-
-/// Minimal terminal-query responder.
-///
-/// `stitch-pty` owns the screen but its `HistoryScreen` response callback is
-/// not settable through the published API, so DA/DSR requests would otherwise
-/// go unanswered and leave programs waiting. Scan the PTY byte stream for the
-/// queries the server must answer and write the replies back to the child.
-/// Remove this once `stitch-pty` exposes a response sink.
-#[derive(Default)]
-struct QueryScanner {
-    pending: Vec<u8>,
-}
-
-impl QueryScanner {
-    fn scan(&mut self, bytes: &[u8], cursor: (usize, usize)) -> Vec<Vec<u8>> {
-        const MAX_PENDING: usize = 64;
-        const ESC: u8 = 0x1b;
-        const FINAL_MIN: u8 = 0x40;
-        const FINAL_MAX: u8 = 0x7e;
-
-        self.pending.extend_from_slice(bytes);
-        let mut responses = Vec::new();
-        let mut consumed = 0;
-        let mut i = 0;
-        while i < self.pending.len() {
-            if self.pending[i] != ESC {
-                i += 1;
-                continue;
-            }
-            if i + 1 >= self.pending.len() {
-                break;
-            }
-            if self.pending[i + 1] != b'[' {
-                i += 1;
-                continue;
-            }
-            let mut end = i + 2;
-            while end < self.pending.len() && !(FINAL_MIN..=FINAL_MAX).contains(&self.pending[end])
-            {
-                end += 1;
-            }
-            if end == self.pending.len() {
-                break;
-            }
-            let params = &self.pending[i + 2..end];
-            let final_byte = self.pending[end];
-            if let Some(response) = query_response(params, final_byte, cursor) {
-                responses.push(response);
-            }
-            i = end + 1;
-            consumed = i;
-        }
-        if consumed > 0 {
-            self.pending.drain(..consumed);
-        }
-        if self.pending.len() > MAX_PENDING {
-            self.pending.clear();
-        }
-        responses
-    }
-}
-
-fn query_response(params: &[u8], final_byte: u8, cursor: (usize, usize)) -> Option<Vec<u8>> {
-    let private = params.first() == Some(&b'?');
-    let secondary = params.first() == Some(&b'>');
-    let body = params
-        .strip_prefix(b"?")
-        .or_else(|| params.strip_prefix(b">"))
-        .unwrap_or(params);
-    match final_byte {
-        b'c' if secondary => Some(b"\x1b[>0;276;0c".to_vec()),
-        b'c' if body.is_empty() || body == b"0" => Some(b"\x1b[?6c".to_vec()),
-        b'n' if body == b"5" && !private && !secondary => Some(b"\x1b[0n".to_vec()),
-        b'n' if body == b"6" => {
-            let (row, col) = cursor;
-            if private {
-                Some(format!("\x1b[?{};{}R", row + 1, col + 1).into_bytes())
-            } else {
-                Some(format!("\x1b[{};{}R", row + 1, col + 1).into_bytes())
-            }
-        }
-        _ => None,
-    }
+    last_viewport: Vec<Vec<PtyCell>>,
 }
 
 pub struct PaneRuntime {
@@ -238,9 +119,9 @@ pub struct PaneRuntime {
     /// Status records travel separately from cell updates so event subscribers
     /// cannot slow down the GUI's structured delta stream.
     status_tx: broadcast::Sender<ProgramStatus>,
+    watching_events: AtomicBool,
     input_tx: mpsc::Sender<Vec<u8>>,
-    dropped_input: AtomicU64,
-    reader_done: Arc<Notify>,
+    dropped_input: Arc<AtomicU64>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -289,11 +170,24 @@ impl PaneRuntime {
             }
         };
         let session = Arc::new(session);
-        let screen = HistoryScreen::new(cols as usize, rows as usize, scrollback_budget());
+        let mut screen = HistoryScreen::new(cols as usize, rows as usize, scrollback_budget());
         let (updates, _) = broadcast::channel(UPDATE_QUEUE);
         let (status_tx, _) = broadcast::channel(16);
         let (input_tx, mut input_rx) = mpsc::channel::<Vec<u8>>(INPUT_QUEUE);
-        let reader_done = Arc::new(Notify::new());
+
+        let dropped_input = Arc::new(AtomicU64::new(0));
+        connect_terminal_replies(
+            &mut screen,
+            id,
+            input_tx.clone(),
+            Arc::clone(&dropped_input),
+        );
+        let pending_metadata = Arc::new(Mutex::new(OscMetadata::default()));
+        let observer = Arc::clone(&pending_metadata);
+        screen.set_osc_observer(move |event| {
+            observer.lock().expect("OSC metadata").observe(event);
+        });
+        screen.set_hyperlink_tracking(true);
 
         let runtime = Arc::new(Self {
             id,
@@ -301,31 +195,26 @@ impl PaneRuntime {
             session: Arc::clone(&session),
             spec: spec.clone(),
             state: Mutex::new(PaneState {
-                last_viewport: screen.styled_range(screen.history_size(), screen.lines()),
+                last_viewport: screen.buffer().clone(),
                 screen,
                 seq: 0,
                 program: spec.program.clone(),
-                bell: false,
                 last_activity_unix_ms: now_unix_ms(),
-                queries: QueryScanner::default(),
-                shell_scan: ShellScanner::default(),
                 shell_cwd: None,
-                link_scan: LinkScanner::default(),
-                links: LinkCells::default(),
+                shell_marks: ShellMarks::default(),
+                pending_metadata,
                 program_status: None,
                 notification: None,
                 progress: None,
-                notify_scan: NotifyScanner::default(),
 
-                status_scan: StatusScanner::default(),
                 exit: None,
                 exit_code: None,
             }),
             updates,
             status_tx,
+            watching_events: AtomicBool::new(false),
             input_tx,
-            dropped_input: AtomicU64::new(0),
-            reader_done: Arc::clone(&reader_done),
+            dropped_input,
             tasks: Mutex::new(Vec::new()),
         });
 
@@ -334,118 +223,115 @@ impl PaneRuntime {
             while let Some(bytes) = input_rx.recv().await {
                 if let Err(err) = writer_session.write_all(&bytes).await {
                     tracing::warn!("pane write failed: {err}");
+                    break;
                 }
             }
         });
 
+        let writer_abort = writer.abort_handle();
         let reader_runtime = Arc::clone(&runtime);
-        let reader_notify = Arc::clone(&reader_done);
         let reader = tokio::spawn(async move {
-            let mut buf = vec![0_u8; READ_CHUNK];
-            loop {
-                match reader_runtime.session.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let (dirty, events, responses, link_changed) = {
-                            let mut state = reader_runtime.lock_state();
-                            let screen_cursor = state.screen.cursor();
-                            let origin_row = state.screen.history_size() as u64
-                                + u64::from(screen_cursor.y.min(u16::MAX as usize) as u16);
-                            let origin_col = screen_cursor.x.min(u16::MAX as usize);
-                            let cols = state.screen.columns().max(1);
-                            state.screen.feed(&buf[..n]);
-                            let cursor = {
-                                let cursor = state.screen.cursor();
-                                (cursor.y, cursor.x)
-                            };
-                            let responses = state.queries.scan(&buf[..n], cursor);
-                            let status = state.status_scan.scan(&buf[..n]);
-                            if let Some(status) = &status {
-                                state.program_status = Some(status.clone());
-                                let _ = reader_runtime.status_tx.send(status.clone());
-                            }
-                            let shell = state.shell_scan.scan(&buf[..n], origin_row);
-                            if shell.cwd.is_some() {
-                                state.shell_cwd = shell.cwd;
-                            }
-                            let notify = state.notify_scan.scan(&buf[..n]);
-                            if notify.notification.is_some() {
-                                state.notification = notify.notification;
-                            }
-                            if notify.progress.is_some() {
-                                state.progress = notify.progress;
-                            }
-                            let link =
-                                state
-                                    .link_scan
-                                    .scan(&buf[..n], origin_row, origin_col, cols);
-                            let link_changed = link.changed;
-                            state.links.extend(link.spans);
-                            let oldest_row = state.screen.total_lines().saturating_sub(
-                                scrollback_budget().saturating_add(state.screen.lines()),
-                            ) as u64;
-                            state.links.prune(oldest_row, cols);
-                            (
-                                state.screen.take_dirty_rows(),
-                                state.screen.take_events(),
-                                responses,
-                                link_changed,
-                            )
-                        };
-                        for response in responses {
-                            reader_runtime.write(response);
-                        }
-                        if link_changed {
-                            reader_runtime.publish_snapshot();
-                        } else {
-                            reader_runtime.publish_delta(dirty, &events);
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!("pane read failed: {err}");
-                        break;
-                    }
-                }
-            }
-            reader_notify.notify_one();
-        });
-
-        let exit_runtime = Arc::clone(&runtime);
-        let watcher = tokio::spawn(async move {
-            let status = exit_runtime.session.wait().await;
-            // The reader owns the PTY until EOF, so a fast child that exits
-            // after a large burst cannot lose its final bytes to a fixed
-            // drain sleep. Wait for that EOF, but do not hang the exit event
-            // forever if a platform leaves the reader blocked.
-            let _drained =
-                tokio::time::timeout(Duration::from_secs(5), exit_runtime.reader_done.notified());
-            let exit_code = status.map(|status| status.exit_code().min(i32::MAX as u32) as i32);
-            let exit = SessionExit {
-                session_id: exit_runtime.session_id,
-                pane_id: Some(exit_runtime.id),
-                reason: match exit_code {
-                    Some(code) => format!("exited with {code}"),
-                    None => "exit status unavailable".to_owned(),
-                },
-            };
-            {
-                let mut state = exit_runtime.lock_state();
-                state.exit = Some(exit.clone());
-                state.exit_code = exit_code;
-            }
-            exit_runtime.publish(PaneUpdate::Exit(exit));
+            reader_runtime.read_to_exit().await;
+            writer_abort.abort();
         });
 
         let mut tasks = runtime.tasks.lock().expect("task vec");
         tasks.push(writer);
         tasks.push(reader);
-        tasks.push(watcher);
         drop(tasks);
         Ok(runtime)
     }
 
     pub fn spec(&self) -> &PaneSpec {
         &self.spec
+    }
+
+    async fn read_to_exit(&self) {
+        let mut buf = vec![0; READ_CHUNK];
+        let wait = self.session.wait();
+        tokio::pin!(wait);
+        let status = loop {
+            tokio::select! {
+                biased;
+                status = &mut wait => {
+                    match self.session.drain_output(DRAIN_LIMIT, |chunk| self.ingest(chunk)).await {
+                        Ok(DrainEnd::Eof | DrainEnd::Quiet) => {}
+                        Ok(DrainEnd::Deadline) => {
+                            tracing::warn!(pane_id = self.id, "pane output drain reached its deadline");
+                        }
+                        Err(err) => tracing::warn!(pane_id = self.id, "pane output drain failed: {err}"),
+                    }
+                    break status;
+                }
+                read = self.session.read(&mut buf) => match read {
+                    Ok(0) => break wait.await,
+                    Ok(n) => self.ingest(&buf[..n]),
+                    Err(err) => {
+                        tracing::warn!(pane_id = self.id, "pane read failed: {err}");
+                        break wait.await;
+                    }
+                }
+            }
+        };
+        let code = status.map(|status| status.exit_code().min(i32::MAX as u32) as i32);
+        let reason = match code {
+            Some(code) => format!("exited with {code}"),
+            None => "exit status unavailable".to_owned(),
+        };
+        self.record_exit(code, reason);
+    }
+
+    fn ingest(&self, bytes: &[u8]) {
+        let mut state = self.lock_state();
+        let history_before = state.screen.history_size() as u64;
+        state.screen.feed(bytes);
+        let metadata = std::mem::take(&mut *state.pending_metadata.lock().expect("OSC metadata"));
+        // Scrolling can shift clean rows. Compare the authoritative cells,
+        // including color and hyperlink data, against the previous viewport.
+        state.screen.take_dirty_rows();
+        let events = state.screen.take_events();
+        let evicted = history_before
+            .saturating_add(scrollback_growth(&events))
+            .saturating_sub(state.screen.history_size() as u64);
+        let total = state.screen.total_lines() as u64;
+        update_marks(
+            &mut state.shell_marks,
+            metadata.marks,
+            history_before,
+            evicted,
+            total,
+        );
+
+        if let Some(status) = metadata.status {
+            state.program_status = Some(status.clone());
+            let _ = self.status_tx.send(status);
+        }
+        if metadata.cwd.is_some() {
+            state.shell_cwd = metadata.cwd;
+        }
+        if metadata.notification.is_some() {
+            state.notification = metadata.notification;
+        }
+        if metadata.progress.is_some() {
+            state.progress = metadata.progress;
+        }
+
+        state.seq = state.seq.saturating_add(1);
+        state.last_activity_unix_ms = now_unix_ms();
+        let rows = changed_rows(&state.last_viewport, state.screen.buffer());
+        let PaneState {
+            last_viewport,
+            screen,
+            ..
+        } = &mut *state;
+        last_viewport.clone_from(screen.buffer());
+        let delta = common_fields(&state, self.id, state.seq);
+        let bell = events.contains(&TermEvent::Bell);
+        self.publish(PaneUpdate::Delta(PaneDelta {
+            rows,
+            bell,
+            ..delta
+        }));
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<PaneUpdate>> {
@@ -456,6 +342,10 @@ impl PaneRuntime {
     pub fn exit_snapshot(&self) -> Option<(SessionExit, Option<i32>)> {
         let state = self.lock_state();
         state.exit.clone().map(|exit| (exit, state.exit_code))
+    }
+
+    pub(crate) fn start_watching_events(&self) -> bool {
+        !self.watching_events.swap(true, Ordering::Relaxed)
     }
 
     pub fn subscribe_status(&self) -> broadcast::Receiver<ProgramStatus> {
@@ -470,22 +360,14 @@ impl PaneRuntime {
         self.session.is_alive()
     }
 
-    pub fn write(&self, bytes: Vec<u8>) {
+    pub fn write(&self, bytes: Vec<u8>) -> Result<(), PaneInputError> {
         if bytes.is_empty() {
-            return;
+            return Ok(());
         }
-        match self.input_tx.try_send(bytes) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                if self.dropped_input.fetch_add(1, Ordering::Relaxed) == 0 {
-                    tracing::warn!(
-                        pane_id = self.id,
-                        "pane input queue is full; dropping input until the child reads"
-                    );
-                }
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        if !self.session.is_alive() {
+            return Err(PaneInputError::Closed);
         }
+        enqueue_input(self.id, &self.input_tx, &self.dropped_input, bytes)
     }
 
     /// Number of input chunks dropped because the child stopped reading.
@@ -539,16 +421,36 @@ impl PaneRuntime {
             tracing::warn!("pane resize failed: {err}");
         }
         let mut state = self.lock_state();
+        if state.screen.columns() != usize::from(cols)
+            || (state.screen.alt_screen() && state.screen.lines() != usize::from(rows))
+        {
+            // A reflow or resize of the parked primary buffer has no mapping
+            // from the old mark rows to the resized rows.
+            state.shell_marks = ShellMarks::default();
+        }
+        let history_before = state.screen.history_size() as u64;
         state.screen.resize(rows as usize, cols as usize);
-        // Absolute cell indices depend on the old width; drop stale links.
-        state.links.clear();
-        state.last_viewport = state
-            .screen
-            .styled_range(state.screen.history_size(), state.screen.lines());
+        let events = state.screen.take_events();
+        let evicted = history_before
+            .saturating_add(scrollback_growth(&events))
+            .saturating_sub(state.screen.history_size() as u64);
+        let total = state.screen.total_lines() as u64;
+        update_marks(
+            &mut state.shell_marks,
+            ShellMarks::default(),
+            history_before,
+            evicted,
+            total,
+        );
+        let PaneState {
+            last_viewport,
+            screen,
+            ..
+        } = &mut *state;
+        last_viewport.clone_from(screen.buffer());
         let seq = state.seq.saturating_add(1);
         state.seq = seq;
         let snapshot = snapshot_from(&state, self.id, seq);
-        drop(state);
         self.publish(PaneUpdate::Snapshot(snapshot));
     }
 
@@ -566,7 +468,7 @@ impl PaneRuntime {
         let state = self.lock_state();
         PaneMeta {
             title: state.screen.title().to_owned(),
-            cwd: state.screen.cwd().map(str::to_owned),
+            cwd: metadata_cwd(&state),
             cols: state.screen.columns().min(u16::MAX as usize) as u16,
             rows: state.screen.lines().min(u16::MAX as usize) as u16,
         }
@@ -590,18 +492,12 @@ impl PaneRuntime {
         let state = self.lock_state();
         let start = start as usize;
         let count = (lines as usize).min(1000);
-        let tuples = state.screen.styled_range(start, count);
         let total_lines = state.screen.total_lines() as u64;
-        let rows: Vec<CapturedRow> = tuples
-            .iter()
-            .enumerate()
-            .map(|(index, line)| CapturedRow {
-                cells: cells_from_row(
-                    line,
-                    Some(&state.links),
-                    start.saturating_add(index) as u64,
-                    state.screen.columns(),
-                ),
+        let end = start.saturating_add(count).min(state.screen.total_lines());
+        let rows: Vec<CapturedRow> = (start..end)
+            .filter_map(|index| state.screen.row_cells(index))
+            .map(|line| CapturedRow {
+                cells: cells_from_row(line),
                 wrapped: false,
             })
             .collect();
@@ -624,77 +520,32 @@ impl PaneRuntime {
 
     pub async fn kill(&self) {
         let _ = self.session.terminate(Duration::from_millis(250)).await;
-        // Aborting the tasks below can race the exit watcher; publish the
-        // authoritative exit once here so clients/events always see it.
-        let exit = SessionExit {
-            session_id: self.session_id,
-            pane_id: Some(self.id),
-            reason: "killed".to_owned(),
-        };
-        {
-            let mut state = self.lock_state();
-            state.exit = Some(exit.clone());
-            state.exit_code = None;
-        }
-        self.publish(PaneUpdate::Exit(exit));
+        self.record_exit(None, "killed".to_owned());
         let mut tasks = self.tasks.lock().expect("task vec");
         for task in tasks.drain(..) {
             task.abort();
         }
     }
 
+    fn record_exit(&self, code: Option<i32>, reason: String) {
+        let exit = SessionExit {
+            session_id: self.session_id,
+            pane_id: Some(self.id),
+            reason,
+        };
+        let mut state = self.lock_state();
+        if state.exit.is_some() {
+            return;
+        }
+        state.exit = Some(exit.clone());
+        state.exit_code = code;
+        drop(state);
+        self.publish(PaneUpdate::Exit(exit));
+    }
+
     fn publish(&self, update: PaneUpdate) {
         // No receivers is normal for detached sessions; keep the state anyway.
         let _ = self.updates.send(Arc::new(update));
-    }
-
-    /// Publish a full snapshot. OSC 8 link changes need a repaint of the
-    /// affected cells; one bounded snapshot is simpler than a second link
-    /// history for delta comparison.
-    fn publish_snapshot(&self) {
-        let mut state = self.lock_state();
-        state.seq = state.seq.saturating_add(1);
-        state.last_activity_unix_ms = now_unix_ms();
-        state.last_viewport = state
-            .screen
-            .styled_range(state.screen.history_size(), state.screen.lines());
-        let snapshot = snapshot_from(&state, self.id, state.seq);
-        drop(state);
-        self.publish(PaneUpdate::Snapshot(snapshot));
-    }
-
-    /// `_dirty` is drained only to keep the parser set bounded; the delta rows
-    /// come from a viewport diff so scroll-shifted rows are never dropped.
-    fn publish_delta(&self, _dirty: Vec<usize>, events: &[TermEvent]) {
-        let mut state = self.lock_state();
-        state.seq += 1;
-        state.last_activity_unix_ms = now_unix_ms();
-        let seq = state.seq;
-        let screen = &state.screen;
-        let visible = screen.styled_range(screen.history_size(), screen.lines());
-        let rows = changed_rows(
-            &state.last_viewport,
-            &visible,
-            &state.links,
-            screen.history_size() as u64,
-            screen.columns(),
-        );
-        for event in events {
-            // Title/cwd/alt-screen changes are already applied to the screen
-            // by the parser and are read back below.
-            if event == &TermEvent::Bell {
-                state.bell = true;
-            }
-        }
-        let bell = std::mem::take(&mut state.bell);
-        state.last_viewport = visible;
-        let delta = common_fields(&state, self.id, seq);
-        drop(state);
-        self.publish(PaneUpdate::Delta(PaneDelta {
-            rows,
-            bell,
-            ..delta
-        }));
     }
 
     fn lock_state(&self) -> MutexGuard<'_, PaneState> {
@@ -751,18 +602,11 @@ fn common_fields(state: &PaneState, pane_id: u64, seq: u64) -> PaneDelta {
 
 fn snapshot_from(state: &PaneState, pane_id: u64, seq: u64) -> PaneSnapshot {
     let screen = &state.screen;
-    let start = screen.history_size();
     let cells = screen
-        .styled_range(start, screen.lines())
+        .buffer()
         .iter()
-        .enumerate()
-        .map(|(index, line)| Row {
-            cells: cells_from_row(
-                line,
-                Some(&state.links),
-                start.saturating_add(index) as u64,
-                screen.columns(),
-            ),
+        .map(|line| Row {
+            cells: cells_from_row(line),
             wrapped: false,
         })
         .collect();
@@ -797,19 +641,52 @@ fn metadata_cwd(state: &PaneState) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Mark rows are absolute. Drop rows whose scrollback has already been
-/// evicted so a frontend can never jump to a line it no longer has.
 fn metadata_marks(state: &PaneState) -> Option<ShellMarks> {
-    let mut marks = state.shell_scan.marks().clone();
-    let total = state.screen.total_lines();
-    let oldest =
-        total.saturating_sub(scrollback_budget().saturating_add(state.screen.lines())) as u64;
-    marks.prompt_rows.retain(|row| *row >= oldest);
-    marks.command_rows.retain(|row| *row >= oldest);
-    if marks.prompt_rows.is_empty() && marks.command_rows.is_empty() {
-        None
-    } else {
-        Some(marks)
+    let marks = &state.shell_marks;
+    (!state.screen.alt_screen()
+        && (!marks.prompt_rows.is_empty() || !marks.command_rows.is_empty()))
+    .then(|| marks.clone())
+}
+
+fn scrollback_growth(events: &[TermEvent]) -> u64 {
+    events
+        .iter()
+        .find_map(|event| match event {
+            TermEvent::ScrollbackGrew(count) => Some(*count),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn connect_terminal_replies(
+    screen: &mut HistoryScreen,
+    pane_id: u64,
+    sender: mpsc::Sender<Vec<u8>>,
+    dropped: Arc<AtomicU64>,
+) {
+    screen.set_write_process_input(move |response| {
+        let _ = enqueue_input(pane_id, &sender, &dropped, response.as_bytes().to_vec());
+    });
+}
+
+fn enqueue_input(
+    pane_id: u64,
+    sender: &mpsc::Sender<Vec<u8>>,
+    dropped: &AtomicU64,
+    bytes: Vec<u8>,
+) -> Result<(), PaneInputError> {
+    match sender.try_send(bytes) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            if dropped.fetch_add(1, Ordering::Relaxed) == 0 {
+                tracing::warn!(
+                    pane_id,
+                    "pane input queue is full; dropping input until the child reads"
+                );
+            }
+            Err(PaneInputError::Busy)
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(PaneInputError::Closed),
     }
 }
 
@@ -826,39 +703,14 @@ fn now_unix_ms() -> u64 {
 /// scroll (which shifts every row up and only marks the new bottom row) would
 /// leave the client with stale rows. Diffing the viewport is the only way to
 /// keep a cell-delta client correct.
-fn changed_rows(
-    previous: &[Vec<(String, String, String, u8)>],
-    visible: &[Vec<(String, String, String, u8)>],
-    links: &LinkCells,
-    row_base: u64,
-    cols: usize,
-) -> Vec<RowUpdate> {
+fn changed_rows(previous: &[Vec<PtyCell>], visible: &[Vec<PtyCell>]) -> Vec<RowUpdate> {
     visible
         .iter()
         .enumerate()
-        .map(|(index, line)| {
-            let cells = cells_from_row(
-                line,
-                Some(links),
-                row_base.saturating_add(index as u64),
-                cols,
-            );
-            (index, cells)
-        })
-        .filter(|(index, cells)| {
-            let previous_line = previous.get(*index);
-            previous_line.is_none_or(|line| line.len() != cells.len())
-                || cells.iter().enumerate().any(|(x, cell)| {
-                    previous_line.is_none_or(|line| {
-                        line.get(x).is_none_or(|(text, _, _, attrs)| {
-                            text != &cell.text || *attrs as u32 != cell.attrs.0
-                        })
-                    })
-                })
-        })
-        .map(|(index, cells)| RowUpdate {
+        .filter(|(index, line)| previous.get(*index) != Some(*line))
+        .map(|(index, line)| RowUpdate {
             row: index as u16,
-            cells,
+            cells: cells_from_row(line),
             wrapped: false,
         })
         .collect()
@@ -1035,38 +887,47 @@ fn html_text(rows: &[CapturedRow]) -> String {
     out
 }
 
-fn cells_from_row(
-    line: &[(String, String, String, u8)],
-    links: Option<&LinkCells>,
-    row: u64,
-    cols: usize,
-) -> Vec<Cell> {
+fn cells_from_row(line: &[PtyCell]) -> Vec<Cell> {
     let mut cells = Vec::with_capacity(line.len());
     let mut previous_wide = false;
-    let mut previous_link: Option<String> = None;
-    for (x, (text, fg, bg, attrs)) in line.iter().enumerate() {
-        let width = text
+    let mut previous_link = None;
+    for cell in line {
+        let width = cell
+            .data
             .chars()
             .next()
             .and_then(UnicodeWidthChar::width)
             .unwrap_or(1);
-        let continuation = previous_wide && (text.is_empty() || text == " ");
+        let continuation = previous_wide && (cell.data.is_empty() || cell.data == " ");
         previous_wide = width >= 2;
         let link = if continuation {
-            previous_link.clone()
+            previous_link
         } else {
-            links
-                .and_then(|map| map.get(row, x, cols))
-                .map(str::to_owned)
+            cell.hyperlink.as_deref()
         };
-        previous_link = link.clone();
+        previous_link = link;
+        let mut attrs = Attrs::empty();
+        for (enabled, attr) in [
+            (cell.bold, Attrs::BOLD),
+            (cell.dim, Attrs::DIM),
+            (cell.italics, Attrs::ITALIC),
+            (cell.underscore, Attrs::UNDERLINE),
+            (cell.blink, Attrs::BLINK),
+            (cell.reverse, Attrs::REVERSE),
+            (cell.hidden, Attrs::HIDDEN),
+            (cell.strikethrough, Attrs::STRIKETHROUGH),
+        ] {
+            if enabled {
+                attrs.insert(attr);
+            }
+        }
         cells.push(Cell {
-            text: text.clone(),
-            fg: parse_color(fg),
-            bg: parse_color(bg),
-            attrs: Attrs(*attrs as u32),
+            text: cell.data.clone(),
+            fg: parse_color(&cell.fg),
+            bg: parse_color(&cell.bg),
+            attrs,
             width: if continuation { 0 } else { width.min(2) as u8 },
-            link,
+            link: link.map(str::to_owned),
         });
     }
     cells
@@ -1124,11 +985,11 @@ mod tests {
 
     #[test]
     fn scrolled_rows_are_reported_even_though_the_parser_only_marks_the_bottom() {
-        let row = |text: &str| vec![(text.to_owned(), "default".into(), "default".into(), 0)];
+        let row = |text: &str| vec![PtyCell::new(text)];
         let previous = vec![row("a"), row("b"), row("c"), row("d")];
         // One line scrolled off: the parser reports only row 3 as dirty.
         let visible = vec![row("b"), row("c"), row("d"), row("e")];
-        let updates = changed_rows(&previous, &visible, &LinkCells::default(), 0, 1);
+        let updates = changed_rows(&previous, &visible);
         assert_eq!(
             updates.iter().map(|update| update.row).collect::<Vec<_>>(),
             vec![0, 1, 2, 3]
@@ -1137,59 +998,126 @@ mod tests {
         assert_eq!(updates[3].cells[0].text, "e");
 
         // A no-op repaint reports nothing.
-        assert!(changed_rows(&visible, &visible, &LinkCells::default(), 0, 1).is_empty());
+        assert!(changed_rows(&visible, &visible).is_empty());
 
         // A viewport of a different height does not panic and reports the tail.
         let shorter = vec![row("c"), row("d")];
-        let updates = changed_rows(&previous, &shorter, &LinkCells::default(), 0, 1);
+        let updates = changed_rows(&previous, &shorter);
         assert_eq!(updates.len(), 2);
     }
 
     #[test]
+    fn terminal_replies_join_the_pane_writer_queue_at_dispatch() {
+        let mut screen = HistoryScreen::new(20, 10, 20);
+        let (sender, mut writer) = mpsc::channel(8);
+        connect_terminal_replies(&mut screen, 1, sender, Arc::new(AtomicU64::new(0)));
+        screen.feed(b"\x1b[c\x1b[>c\x1b[5n\x1b[3;5H\x1b[6");
+        screen.feed(b"n\x1b[?6n\x1b[1;1H\x1b[>3u\x1b[?u\x1b[<u");
+        for expected in [
+            &b"\x1b[?6c"[..],
+            b"\x1b[>0;276;0c",
+            b"\x1b[0n",
+            b"\x1b[3;5R",
+            b"\x1b[?3;5R",
+            b"\x1b[?3u",
+        ] {
+            assert_eq!(writer.try_recv().unwrap(), expected);
+        }
+        assert!(writer.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn input_queue_distinguishes_full_and_closed() {
+        let shell = if cfg!(windows) { "cmd.exe" } else { "sh" };
+        let pane = PaneRuntime::spawn(1, 1, &PaneSpec::new(shell, &[], None, None), 80, 24)
+            .await
+            .expect("spawn pane");
+        // Fill the queue before yielding to the writer on this runtime.
+        for _ in 0..INPUT_QUEUE {
+            pane.write(vec![b'x']).expect("queue input");
+        }
+        assert!(matches!(pane.write(vec![b'x']), Err(PaneInputError::Busy)));
+        pane.kill().await;
+        assert!(matches!(
+            pane.write(vec![b'x']),
+            Err(PaneInputError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn osc_marks_follow_wrapping_and_retained_scrollback() {
+        let shell = if cfg!(windows) { "cmd.exe" } else { "sh" };
+        let pane = PaneRuntime::spawn(1, 1, &PaneSpec::new(shell, &[], None, None), 8, 2)
+            .await
+            .expect("spawn pane");
+        pane.lock_state().screen.set_scrollback_lines(2);
+
+        // The ninth character soft-wraps to row 1. The split OSC starts there.
+        pane.ingest(b"\x1b]133;A\x07abcdefghx\x1b]133;");
+        pane.ingest(b"A\x1b\\\r\none\r\ntwo\r\nthree\x1b]133;A\x07");
+        let snapshot = pane.snapshot();
+        assert_eq!(snapshot.scrollback_len, 2);
+        assert_eq!(snapshot.shell_marks.unwrap().prompt_rows, [0, 3]);
+
+        pane.ingest(b"\x1b[?1049h\x1b]133;A\x07alternate");
+        assert!(pane.snapshot().shell_marks.is_none());
+        pane.ingest(b"\x1b[?1049l");
+        assert_eq!(pane.snapshot().shell_marks.unwrap().prompt_rows, [0, 3]);
+        pane.kill().await;
+    }
+
+    #[tokio::test]
+    async fn hyperlink_only_changes_reach_deltas_and_links_survive_resize() {
+        let shell = if cfg!(windows) { "cmd.exe" } else { "sh" };
+        let pane = PaneRuntime::spawn(1, 1, &PaneSpec::new(shell, &[], None, None), 12, 3)
+            .await
+            .expect("spawn pane");
+        let mut updates = pane.subscribe();
+        pane.ingest(b"AB");
+        let _ = updates.try_recv().unwrap();
+
+        // Redraw the same text with a link and a foreground color change.
+        pane.ingest(b"\r\x1b[31m\x1b]8;;https://example.test\x07AB\x1b]8;;\x07");
+        let update = updates.try_recv().unwrap();
+        let PaneUpdate::Delta(delta) = update.as_ref() else {
+            panic!("expected a row delta");
+        };
+        assert_eq!(delta.rows.len(), 1);
+        let cells = &delta.rows[0].cells;
+        assert_eq!(cells[0].link.as_deref(), Some("https://example.test"));
+        assert_eq!(cells[0].fg, Color::Indexed(1));
+
+        // A link-only overwrite must update the row even with identical SGR.
+        pane.ingest(b"\rA");
+        let update = updates.try_recv().unwrap();
+        let PaneUpdate::Delta(delta) = update.as_ref() else {
+            panic!("expected a row delta");
+        };
+        assert!(delta.rows[0].cells[0].link.is_none());
+
+        pane.resize(20, 3);
+        let capture = pane.capture(0, 3, CaptureFormat::Cells);
+        let linked: Vec<_> = capture
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .filter(|cell| cell.link.is_some())
+            .map(|cell| cell.text.as_str())
+            .collect();
+        assert_eq!(linked, ["B"]);
+        pane.kill().await;
+    }
+
+    #[test]
     fn marks_wide_character_continuation() {
-        let line = vec![
-            ("漢".to_owned(), "default".into(), "default".into(), 0),
-            (" ".to_owned(), "default".into(), "default".into(), 0),
-            ("a".to_owned(), "default".into(), "default".into(), 0),
+        let line = [
+            PtyCell::new("\u{6f22}"),
+            PtyCell::blank(),
+            PtyCell::new("a"),
         ];
-        let cells = cells_from_row(&line, None, 0, 1);
+        let cells = cells_from_row(&line);
         assert_eq!(cells[0].width, 2);
         assert_eq!(cells[1].width, 0);
         assert_eq!(cells[2].width, 1);
-    }
-}
-
-#[cfg(test)]
-mod query_tests {
-    use super::QueryScanner;
-
-    #[test]
-    fn answers_da_and_dsr_queries() {
-        let mut scanner = QueryScanner::default();
-        let mut responses = scanner.scan(b"\x1b[c\x1b[>c\x1b[5n\x1b[6n\x1b[?6n", (2, 4));
-        assert_eq!(responses.len(), 5);
-        assert_eq!(responses.remove(0), b"\x1b[?6c");
-        assert_eq!(responses.remove(0), b"\x1b[>0;276;0c");
-        assert_eq!(responses.remove(0), b"\x1b[0n");
-        assert_eq!(responses.remove(0), b"\x1b[3;5R");
-        assert_eq!(responses.remove(0), b"\x1b[?3;5R");
-    }
-
-    #[test]
-    fn buffers_a_query_split_across_reads() {
-        let mut scanner = QueryScanner::default();
-        assert!(scanner.scan(b"\x1b[6", (1, 1)).is_empty());
-        let responses = scanner.scan(b"n", (1, 1));
-        assert_eq!(responses, vec![b"\x1b[2;2R".to_vec()]);
-    }
-
-    #[test]
-    fn ignores_other_escape_sequences() {
-        let mut scanner = QueryScanner::default();
-        assert!(
-            scanner
-                .scan(b"\x1b[2J\x1b[31mhello\x1b[0m", (0, 0))
-                .is_empty()
-        );
     }
 }

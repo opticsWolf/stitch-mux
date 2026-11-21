@@ -9,9 +9,10 @@ use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use stitch_mux_core::{
-    ActivitySummary, Direction, FloatBounds, FloatingPane, LayoutError, LayoutNode, PaneId, Rect,
-    Size, SplitAxis, Window, Workspace, close_leaf, first_leaf, layout_contains, layout_leaves,
-    place_leaf, remove_leaf, resolve_layout, validate_layout,
+    ActivitySummary, Direction, FloatBounds, FloatingPane, LayoutError, LayoutNode,
+    MAX_LAYERS_PER_WINDOW, PaneId, Rect, Size, SplitAxis, Window, Workspace, close_leaf,
+    first_leaf, layout_contains, layout_leaves, place_leaf, remove_leaf, resolve_layout,
+    validate_layout,
 };
 use stitch_mux_protocol::{
     Attached, FloatingPaneInfo, Layout, PaneGeometry, PaneInfo, PanePlacement, SessionInfo,
@@ -243,8 +244,9 @@ impl Session {
         let size = self.size();
         let windows: Vec<WindowInfo> = state
             .workspace
-            .windows
-            .values()
+            .order
+            .iter()
+            .map(|id| &state.workspace.windows[id])
             .map(|window| WindowInfo {
                 id: window.id,
                 name: window.name.clone(),
@@ -454,14 +456,15 @@ impl Session {
     }
 
     pub async fn close_window(&self, window_id: u64) -> Result<(), SessionError> {
+        let _op = self.ops.lock().await;
         let panes: Vec<Arc<PaneRuntime>> = {
             let state = self.state();
-            if state.workspace.windows.len() == 1 {
-                return Err(SessionError::LastWindow);
-            }
             let Some(window) = state.workspace.windows.get(&window_id) else {
                 return Err(SessionError::WindowNotFound(window_id));
             };
+            if state.workspace.windows.len() == 1 {
+                return Err(SessionError::LastWindow);
+            }
             let mut ids: Vec<u64> = layout_leaves(&window.root)
                 .into_iter()
                 .map(PaneId::get)
@@ -510,14 +513,18 @@ impl Session {
                 .ok_or(SessionError::WindowNotFound(window_id))?;
             window.name = name.to_owned();
             Ok(())
-        })
+        })?;
+        self.publish_layout();
+        Ok(())
     }
 
     pub fn move_window(&self, window_id: u64, index: usize) -> Result<(), SessionError> {
         self.apply_workspace(|state| {
             state.workspace.move_window(window_id, index)?;
             Ok(())
-        })
+        })?;
+        self.publish_layout();
+        Ok(())
     }
 
     pub fn focus_window(&self, target: WindowFocus) -> Result<u64, SessionError> {
@@ -844,12 +851,7 @@ impl Session {
         })
         .unwrap_or((2, 1));
         let pane = PaneRuntime::spawn(self.id, new_id, &spec, cols, rows).await?;
-        self.panes.lock().expect("panes").insert(new_id, pane);
-        self.placements
-            .lock()
-            .expect("placements")
-            .insert(new_id, PanePlacement::Tiled);
-        self.apply_workspace(|state| {
+        let applied = self.apply_workspace(|state| {
             let window = state
                 .workspace
                 .windows
@@ -858,7 +860,16 @@ impl Session {
             window.root = root.clone();
             window.zoom = None;
             Ok(())
-        })?;
+        });
+        if let Err(err) = applied {
+            pane.kill().await;
+            return Err(err);
+        }
+        self.panes.lock().expect("panes").insert(new_id, pane);
+        self.placements
+            .lock()
+            .expect("placements")
+            .insert(new_id, PanePlacement::Tiled);
         self.resize_panes();
         self.publish_layout();
         Ok((new_id, self.layout(Some(new_id))))
@@ -873,17 +884,21 @@ impl Session {
     ) -> Result<(u64, u64, Layout), SessionError> {
         let _op = self.ops.lock().await;
         bounds.validate()?;
+        let state = self.state();
+        let window = state
+            .workspace
+            .windows
+            .get(&window_id)
+            .ok_or(SessionError::WindowNotFound(window_id))?;
+        if window.floating.len() >= MAX_LAYERS_PER_WINDOW {
+            return Err(LayoutError::TooManyLayers.into());
+        }
         let layer_id = NEXT_LAYER_ID.fetch_add(1, Ordering::SeqCst);
         let pane_id = next_pane_id();
         let rect = bounds.to_rect(self.size());
         let pane =
             PaneRuntime::spawn(self.id, pane_id, &spec, rect.cols.max(1), rect.rows.max(1)).await?;
-        self.panes.lock().expect("panes").insert(pane_id, pane);
-        self.placements
-            .lock()
-            .expect("placements")
-            .insert(pane_id, PanePlacement::Floating { layer_id });
-        self.apply_workspace(|state| {
+        let applied = self.apply_workspace(|state| {
             let window = state
                 .workspace
                 .windows
@@ -900,7 +915,16 @@ impl Session {
                 },
             );
             Ok(())
-        })?;
+        });
+        if let Err(err) = applied {
+            pane.kill().await;
+            return Err(err);
+        }
+        self.panes.lock().expect("panes").insert(pane_id, pane);
+        self.placements
+            .lock()
+            .expect("placements")
+            .insert(pane_id, PanePlacement::Floating { layer_id });
         self.resize_panes();
         self.publish_layout();
         Ok((pane_id, layer_id, self.layout(Some(pane_id))))
@@ -1295,11 +1319,13 @@ fn now_unix_ms() -> u64 {
 mod tests {
     use super::*;
 
+    const TEST_SHELL: &str = if cfg!(windows) { "cmd.exe" } else { "sh" };
+
     #[tokio::test]
     async fn repeated_detach_place_close_does_not_retain_a_pane_runtime() {
         let mut registry = SessionRegistry::new();
         let session = registry
-            .create("recycle", "sh", &[], None, None, 80, 24, false)
+            .create("recycle", TEST_SHELL, &[], None, None, 80, 24, false)
             .await
             .unwrap();
         let pane_id = session.pane_ids()[0];
@@ -1337,10 +1363,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn closing_a_window_waits_for_in_flight_pane_operations() {
+        let mut registry = SessionRegistry::new();
+        let session = registry
+            .create("workspace", TEST_SHELL, &[], None, None, 80, 24, false)
+            .await
+            .unwrap();
+        let window = session.create_window(None).await.unwrap();
+        let operation = session.ops.lock().await;
+        let close = session.close_window(window);
+        tokio::pin!(close);
+        tokio::select! {
+            biased;
+            result = &mut close => panic!("close bypassed operation lock: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+        assert!(session.has_window(window));
+        drop(operation);
+        close.await.unwrap();
+
+        let result = session
+            .run_floating(
+                window,
+                PaneSpec::new(TEST_SHELL, &[], None, None),
+                FloatBounds::new(0, 0, 5000, 5000),
+            )
+            .await;
+        assert!(matches!(result, Err(SessionError::WindowNotFound(id)) if id == window));
+        assert_eq!(session.pane_ids().len(), 1);
+        registry.kill("workspace").await.unwrap();
+    }
+
+    #[tokio::test]
     async fn closing_the_last_pane_is_explicit() {
         let mut registry = SessionRegistry::new();
         let session = registry
-            .create("demo", "sh", &[], None, None, 80, 24, false)
+            .create("demo", TEST_SHELL, &[], None, None, 80, 24, false)
             .await
             .unwrap();
         let pane_id = session.pane_ids()[0];

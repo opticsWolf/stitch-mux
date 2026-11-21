@@ -6,6 +6,21 @@ Python package version in `pyproject.toml`.
 
 ## Unreleased (v0.2 work)
 
+### Changed
+
+- Upgrade to Stitch PTY 0.16.0 and use its parser for terminal replies and OSC
+  framing. Hyperlinks follow cells through reflow, and the pane reader uses
+  its streaming drain before reporting exit.
+
+### Fixed
+
+- Serialize window close with pane creation. Publish tab renames and order
+  changes to attached clients.
+- Report rejected automation input when the pane writer queue is full or
+  closed, and publish a pane's exit once even when observation starts late.
+- Send row deltas for color-only and hyperlink-only changes. Rebase shell
+  marks when bounded scrollback evicts rows.
+
 ### Added
 
 - **M12 workspace controls:** GUI tab strip with window create/focus controls,

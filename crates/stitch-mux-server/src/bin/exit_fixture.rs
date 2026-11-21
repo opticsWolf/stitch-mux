@@ -16,7 +16,7 @@ fn main() -> ExitCode {
         }
     }
     let code: u8 = first.parse().unwrap_or(0);
-    print!("ready\r\n");
+    print!("ready\r\nfinal-marker\r\n");
     let _ = std::io::stdout().flush();
     ExitCode::from(code)
 }

@@ -3,9 +3,12 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use stitch_mux_client::command;
+use stitch_mux_client::{ClientSession, command};
 use stitch_mux_core::{FLOAT_BPS, FloatBounds, LayoutNode, PanePlacement, SplitAxis};
-use stitch_mux_protocol::{ClaimMode, Command, Endpoint, ErrorCode, WindowFocus};
+use stitch_mux_protocol::{
+    ClaimMode, Command, DEFAULT_CLIENT_CAPABILITIES, Endpoint, ErrorCode, Hello, PROTOCOL_VERSION,
+    ViewMode, WindowFocus,
+};
 
 fn test_endpoint(label: &str) -> (Endpoint, Option<PathBuf>) {
     let unique = format!(
@@ -137,6 +140,77 @@ async fn two_windows_share_a_session_with_independent_tiled_layouts() {
     assert_eq!(layout.panes.len(), 2);
     assert!(layout.panes.iter().any(|pane| pane.pane_id == second_pane));
     assert!(!layout.panes.iter().any(|pane| pane.pane_id == first_pane));
+
+    let attached = ClientSession::attach(
+        &endpoint,
+        "workspace",
+        Hello {
+            protocol_version: PROTOCOL_VERSION,
+            client_name: "workspace test".into(),
+            client_instance: "workspace-test".into(),
+            view_mode: ViewMode::Structured,
+            cols: 80,
+            rows: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+            capabilities: DEFAULT_CLIENT_CAPABILITIES,
+        },
+    )
+    .await
+    .expect("attach separate client");
+    let mut view = attached.subscribe();
+
+    let renamed = command(
+        &endpoint,
+        Command::RenameWindow {
+            window_id,
+            name: "renamed".into(),
+        },
+    )
+    .await
+    .expect("rename window");
+    assert!(renamed.ok, "{:?}", renamed.error);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        view.wait_for(|state| {
+            state.layout.as_ref().is_some_and(|layout| {
+                layout
+                    .windows
+                    .iter()
+                    .any(|window| window.id == window_id && window.name == "renamed")
+            })
+        }),
+    )
+    .await
+    .expect("rename broadcast")
+    .expect("client view");
+
+    let moved = command(
+        &endpoint,
+        Command::MoveWindow {
+            window_id,
+            index: 0,
+        },
+    )
+    .await
+    .expect("move window");
+    assert!(moved.ok, "{:?}", moved.error);
+    assert_eq!(moved.layout.unwrap().windows[0].id, window_id);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        view.wait_for(|state| {
+            state.layout.as_ref().is_some_and(|layout| {
+                layout
+                    .windows
+                    .first()
+                    .is_some_and(|window| window.id == window_id)
+            })
+        }),
+    )
+    .await
+    .expect("reorder broadcast")
+    .expect("client view");
+    attached.detach().await;
 
     let claimed = command(
         &endpoint,

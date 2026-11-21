@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "D:\User\Documents\Python\stitch-mux\python\stitch_mux\qt.py", line 634, in _on_resize
+    self.session.resize(cols, rows)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+RuntimeError: session thread stopped
+Error calling Python override of QWidget::closeEvent(): Traceback (most recent call last):
+  File "D:\User\Documents\Python\stitch-mux\python\stitch_mux\qt.py", line 641, in closeEvent
+    self.session.detach()
+    ~~~~~~~~~~~~~~~~~~~^^
+RuntimeError: session thread already stopped

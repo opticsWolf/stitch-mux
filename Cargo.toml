@@ -28,7 +28,7 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 unicode-width = "0.2"
-stitch-pty = "0.15.0"
+stitch-pty = "0.16.0"
 stitch-mux-core = { path = "crates/stitch-mux-core" }
 stitch-mux-protocol = { path = "crates/stitch-mux-protocol" }
 stitch-mux-client = { path = "crates/stitch-mux-client" }

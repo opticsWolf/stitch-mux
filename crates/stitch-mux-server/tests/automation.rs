@@ -116,9 +116,6 @@ async fn run_wait_capture_and_close_without_a_gui() {
     let wait = waited.wait.expect("wait result");
     assert!(!wait.timed_out);
     assert_eq!(wait.exit_code, Some(7));
-    // ConPTY can report the child exit before its final bytes are observable
-    // through the screen; capture is a snapshot of the fed viewport.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     let captured = command(
         &endpoint,
@@ -138,8 +135,23 @@ async fn run_wait_capture_and_close_without_a_gui() {
             .text
             .as_deref()
             .unwrap_or_default()
-            .contains("ready"),
-        "child output was not captured"
+            .contains("final-marker"),
+        "final child output was not captured immediately after wait"
+    );
+
+    let sent = command(
+        &endpoint,
+        Command::SendText {
+            pane_id,
+            text: "late input".into(),
+        },
+    )
+    .await
+    .expect("send to exited pane");
+    assert!(!sent.ok);
+    assert_eq!(
+        sent.error.expect("closed pane error").code,
+        stitch_mux_protocol::ErrorCode::InvalidArgs
     );
 
     let closed = command(&endpoint, Command::ClosePane { pane_id })

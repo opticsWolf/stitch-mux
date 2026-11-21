@@ -6,12 +6,9 @@
 
 pub mod ansi;
 pub mod client_updates;
-pub mod link_scan;
-pub mod notify_scan;
+mod osc;
 pub mod pane;
 pub mod session;
-pub mod shell_scan;
-pub mod status_scan;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -41,7 +38,7 @@ use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
 pub use ansi::AnsiCompositor;
-pub use pane::{PaneError, PaneRuntime, PaneSpec, PaneUpdate};
+pub use pane::{PaneError, PaneInputError, PaneRuntime, PaneSpec, PaneUpdate};
 pub use session::{Session, SessionError, SessionRegistry};
 
 type Writer = FrameWriter<tokio::io::WriteHalf<Stream>>;
@@ -109,7 +106,6 @@ pub struct ServerState {
     shutdown_tx: watch::Sender<bool>,
     events_tx: broadcast::Sender<Arc<WireEvent>>,
     event_seq: AtomicU64,
-    watched_panes: StdMutex<std::collections::BTreeSet<u64>>,
     actions: ActionRegistry,
     keymap: StdRwLock<CoreKeymap>,
     keymap_path: Option<PathBuf>,
@@ -145,7 +141,6 @@ impl Default for ServerState {
             shutdown_tx,
             events_tx,
             event_seq: AtomicU64::new(0),
-            watched_panes: StdMutex::new(std::collections::BTreeSet::new()),
             actions,
             keymap: StdRwLock::new(keymap),
             keymap_path,
@@ -250,58 +245,68 @@ impl ServerState {
     }
 
     fn watch_pane(self: &Arc<Self>, session: Arc<Session>, pane: Arc<PaneRuntime>) {
-        let mut watched = self.watched_panes.lock().expect("watched panes");
-        if !watched.insert(pane.id) {
+        if !pane.start_watching_events() {
             return;
         }
-        drop(watched);
         let state = Arc::clone(self);
         let pane_id = pane.id;
         let mut statuses = pane.subscribe_status();
         let mut updates = pane.subscribe();
         tokio::spawn(async move {
-            loop {
+            let publish_status = |status| {
+                state.publish_event(
+                    Some(session.id),
+                    "program_status_changed",
+                    serde_json::json!({ "pane_id": pane_id, "status": status }),
+                );
+                state.publish_event(
+                    Some(session.id),
+                    "activity_changed",
+                    serde_json::json!({ "activity": session.info(0).activity }),
+                );
+            };
+            let publish_gap = || {
+                state.publish_event(
+                    Some(session.id),
+                    "event_gap",
+                    serde_json::json!({ "pane_id": pane_id }),
+                );
+            };
+            let exit = loop {
+                // The child may have completed before the first subscription,
+                // or its exit update may have fallen out of the broadcast ring.
+                if let Some((exit, _)) = pane.exit_snapshot() {
+                    break exit;
+                }
                 tokio::select! {
                     status = statuses.recv() => match status {
-                        Ok(status) => {
-                            state.publish_event(
-                                Some(session.id),
-                                "program_status_changed",
-                                serde_json::json!({ "pane_id": pane_id, "status": status }),
-                            );
-                            state.publish_event(
-                                Some(session.id),
-                                "activity_changed",
-                                serde_json::json!({ "activity": session.info(0).activity }),
-                            );
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                            state.publish_event(
-                                Some(session.id),
-                                "event_gap",
-                                serde_json::json!({ "pane_id": pane_id }),
-                            );
-                        }
+                        Ok(status) => publish_status(status),
+                        Err(broadcast::error::RecvError::Closed) => return,
+                        Err(broadcast::error::RecvError::Lagged(_)) => publish_gap(),
                     },
                     update = updates.recv() => match update {
                         Ok(update) => {
                             if let PaneUpdate::Exit(exit) = update.as_ref() {
-                                state.publish_event(
-                                    Some(session.id),
-                                    "pane_exited",
-                                    serde_json::json!({
-                                        "pane_id": pane_id,
-                                        "reason": exit.reason,
-                                    }),
-                                );
+                                break exit.clone();
                             }
                         }
-                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Closed) => return,
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
                     },
                 }
+            };
+            loop {
+                match statuses.try_recv() {
+                    Ok(status) => publish_status(status),
+                    Err(broadcast::error::TryRecvError::Lagged(_)) => publish_gap(),
+                    Err(_) => break,
+                }
             }
+            state.publish_event(
+                Some(session.id),
+                "pane_exited",
+                serde_json::json!({ "pane_id": pane_id, "reason": exit.reason }),
+            );
         });
     }
 
@@ -1176,23 +1181,20 @@ fn route_input(session: &Session, focus: Option<u64>, event: InputEvent) {
     let Some(pane) = session.pane(pane_id) else {
         return;
     };
-    match event {
-        InputEvent::Text(text) => pane.write(text.into_bytes()),
+    let bytes = match event {
+        InputEvent::Text(text) => text.into_bytes(),
         InputEvent::Paste(text) => {
-            let bytes = if pane.snapshot().modes.bracketed_paste {
+            if pane.snapshot().modes.bracketed_paste {
                 format!("\x1b[200~{text}\x1b[201~").into_bytes()
             } else {
                 text.into_bytes()
-            };
-            pane.write(bytes);
+            }
         }
-        InputEvent::Bytes(bytes) => pane.write(bytes),
-        InputEvent::Key(key) => {
-            let bytes = pane.encode_key(&key);
-            pane.write(bytes);
-        }
-        InputEvent::Focus(_) | InputEvent::Mouse(_) => {}
-    }
+        InputEvent::Bytes(bytes) => bytes,
+        InputEvent::Key(key) => pane.encode_key(&key),
+        InputEvent::Focus(_) | InputEvent::Mouse(_) => return,
+    };
+    let _ = pane.write(bytes);
 }
 
 fn focused_pane(session: &Session, focus: Option<u64>) -> Option<u64> {
@@ -2170,12 +2172,12 @@ async fn handle_command(
             };
             match spawned {
                 Ok((session, new_pane_id, window_id, _layout)) => {
-                    state.watch_session(Arc::clone(&session));
                     state.publish_event(
                         Some(session.id),
                         "pane_created",
                         serde_json::json!({ "pane_id": new_pane_id, "window_id": window_id, "program": program }),
                     );
+                    state.watch_session(Arc::clone(&session));
                     let mut result = RunResult {
                         pane_id: new_pane_id,
                         window_id,
@@ -2183,17 +2185,23 @@ async fn handle_command(
                         timed_out: false,
                     };
                     if wait {
-                        let pane = session
-                            .pane(new_pane_id)
-                            .expect("newly spawned pane is registered");
-                        let (exit_code, timed_out) = wait_for_pane(Arc::clone(&pane), None).await;
-                        result.exit_code = exit_code;
-                        result.timed_out = timed_out;
-                        if !keep_open
-                            && !timed_out
-                            && let Err(err) = session.close(new_pane_id).await
-                        {
-                            set_error(&mut response, session_error_code(&err), err);
+                        if let Some(pane) = session.pane(new_pane_id) {
+                            let (exit_code, timed_out) = wait_for_pane(pane, None).await;
+                            result.exit_code = exit_code;
+                            result.timed_out = timed_out;
+                            if !keep_open
+                                && !timed_out
+                                && let Err(err) = session.close(new_pane_id).await
+                                && !matches!(err, SessionError::PaneNotFound(_))
+                            {
+                                set_error(&mut response, session_error_code(&err), err);
+                            }
+                        } else {
+                            set_error(
+                                &mut response,
+                                ErrorCode::NotFound,
+                                "pane was closed before wait started",
+                            );
                         }
                     }
                     response.run = Some(result);
@@ -2362,7 +2370,15 @@ async fn handle_command(
                 .find_by_pane(pane_id)
                 .and_then(|session| session.pane(pane_id));
             match pane {
-                Some(pane) => pane.write(text.into_bytes()),
+                Some(pane) => {
+                    if let Err(err) = pane.write(text.into_bytes()) {
+                        let code = match err {
+                            PaneInputError::Busy => ErrorCode::Busy,
+                            PaneInputError::Closed => ErrorCode::InvalidArgs,
+                        };
+                        set_error(&mut response, code, err);
+                    }
+                }
                 None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
             }
         }
@@ -2374,7 +2390,15 @@ async fn handle_command(
                 .find_by_pane(pane_id)
                 .and_then(|session| session.pane(pane_id));
             match pane {
-                Some(pane) => pane.write(bytes),
+                Some(pane) => {
+                    if let Err(err) = pane.write(bytes) {
+                        let code = match err {
+                            PaneInputError::Busy => ErrorCode::Busy,
+                            PaneInputError::Closed => ErrorCode::InvalidArgs,
+                        };
+                        set_error(&mut response, code, err);
+                    }
+                }
                 None => set_error(&mut response, ErrorCode::NotFound, "pane not found"),
             }
         }
@@ -2464,6 +2488,44 @@ where
 mod tests {
     use super::*;
     use stitch_mux_protocol::FrameReader;
+
+    #[tokio::test]
+    async fn late_pane_watch_reports_an_exit_once() {
+        let state = Arc::new(ServerState::default());
+        let mut events = state.events_tx.subscribe();
+        let (shell, flag) = if cfg!(windows) {
+            ("cmd.exe", "/C")
+        } else {
+            ("sh", "-c")
+        };
+        let args = [flag.to_owned(), "exit 7".to_owned()];
+        let session = state
+            .registry
+            .lock()
+            .await
+            .create("finished", shell, &args, None, None, 80, 24, false)
+            .await
+            .expect("create session");
+        let pane = session.panes().pop().expect("pane");
+        let pane_id = pane.id;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert_eq!(wait_for_pane(pane, Some(deadline)).await, (Some(7), false));
+
+        state.watch_session(Arc::clone(&session));
+        state.watch_session(session);
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("exit event timeout")
+            .expect("exit event");
+        assert_eq!(event.kind, "pane_exited");
+        assert_eq!(event.payload["pane_id"], pane_id);
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        state.registry.lock().await.kill("finished").await.unwrap();
+    }
 
     #[tokio::test]
     async fn slow_client_error_is_typed_busy() {

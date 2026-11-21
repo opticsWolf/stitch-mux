@@ -27,9 +27,9 @@ and local automation.
 
 1. **Server-authoritative terminal state.** The daemon owns every PTY and every
    pane's terminal screen. Clients are views, not the source of truth.
-2. **`stitch-pty` stays transport-only.** The mux owns session, layout, and
-   composition. It uses `PtySession` plus `HistoryScreen`, not a modified
-   `stitch-pty`.
+2. **Transport and emulation are separate.** Stitch PTY provides
+   `PtySession` for transport and `HistoryScreen` for emulation. Mux owns
+   sessions, layout, and composition.
 3. **No second terminal emulator in the client.** Clients receive prepared
    cells (structured view) or composed ANSI (terminal view), never raw PTY bytes
    by default. This keeps reattach fidelity high and GUI rendering deterministic.
@@ -379,26 +379,12 @@ resizes, captures, and query replies. `PtySession` plus an owned
 
 ### 6.2 Reader task
 
-The reader loop reads fixed-size chunks (64 KiB target), feeds them into the
-screen exactly once, and publishes state changes:
-
-```text
-loop:
-  n = session.read(&mut buf).await
-  if n > 0:
-      screen.feed(&buf[..n])
-      answer DA/DSR queries from the same bytes
-      publish dirty rows + metadata (coalesced)
-  if n == 0 or read fails:
-      notify reader_done
-      break
-```
-
-The reader owns the PTY until EOF. The exit watcher waits for `reader_done`
-(with a bounded fallback) before publishing `Exited`, so a child that exits
-immediately after a large burst cannot lose its final bytes to a fixed drain
-sleep. Pane commands (resize, capture, close, write) are handled between reads
-by the pane runtime, not by blocking the reader.
+One task reads fixed-size chunks, feeds each chunk into the screen, and
+publishes row deltas and metadata. After the child exits, that same task
+calls `PtySession::drain_output` and feeds pending chunks through the same
+path. The drain stops on EOF, a quiet period, or the deadline. The daemon
+records exit after the drain finishes, so `wait` and `pane_exited` follow
+the final screen update.
 
 ### 6.3 Writer and terminal replies
 
@@ -411,12 +397,10 @@ client input ─┐
 parser reply ─┘
 ```
 
-`HistoryScreen` parses device-attribute/status and keyboard-mode queries, but
-the published `stitch-pty` API exposes its response callback only as an
-invocation accessor, not a settable sink. The pane therefore scans the same PTY
-bytes for DA/DSR queries and sends the replies through the existing writer
-queue. The scanner is bounded, never blocks, and answers even when no client is
-attached. Replace it with the emulator callback once `stitch-pty` exposes one.
+`HistoryScreen::set_write_process_input` supplies replies for device
+attributes, device status, and Kitty keyboard mode at parser dispatch.
+Those bytes join the same bounded writer queue as client input, including
+when the pane is detached.
 
 ### 6.4 Screen snapshot
 
@@ -436,7 +420,7 @@ The pane publishes a `PaneSnapshot` after a dirty batch:
 
 The snapshot is pane-local. The session compositor places it into the layout.
 Scrollback is not copied into every snapshot; `Capture` requests fetch bounded
-ranges from `HistoryScreen::styled_range`. Detached panes publish snapshots and
+ranges through `HistoryScreen::row_cells`. Detached panes publish snapshots and
 activity too, but have no geometry until placed.
 
 ### 6.5 Program status and activity
@@ -445,11 +429,10 @@ The daemon recognizes **OSC 7501**, Rex's generic program-status protocol. A
 program reports a state (`idle`, `working`, `done`, `blocked`, `error`), an
 optional kind (`permission`, `question`, `auth`), an app name, and a message.
 The pane keeps the latest record as `ProgramStatus` and updates it in place.
-`stitch-pty` does not expose a status-record sink, so the daemon observes the
-same PTY bytes with a bounded 8 KiB OSC scanner. Records may arrive with a BEL
-or ST terminator, may be split across reads, and may carry unknown `key=value`
-fields; unknown fields are ignored and a record without a valid `state` is
-discarded. The scanner stores one current record, never a queue.
+Stitch PTY frames the OSC through `HistoryScreen::set_osc_observer`.
+It accepts BEL and ST terminators, carries partial records across reads,
+and reports payloads beyond 8 KiB as overflow. Mux ignores overflow and
+unknown status fields and retains one current record per pane.
 
 This is state, not a notification stream:
 

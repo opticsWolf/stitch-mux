@@ -217,7 +217,7 @@ See [Python SDK](docs/PYTHON.md), [parity](docs/PARITY.md), and the
 - [GPUI spike](docs/GPUI-SPIKE.md) — optional second-native-toolkit boundary.
 - [Conformance](docs/CONFORMANCE.md) — M4 terminal corpus and interactive checks.
 - [Automation](docs/AUTOMATION.md) — local CLI, event stream, and agent skill.
-- [stitch-pty API gaps](docs/STITCH_PTY_GAPS.md) — upstream findings from status and automation work.
+- [Stitch PTY integration](docs/STITCH_PTY_GAPS.md) — terminal replies, OSC metadata, hyperlinks, and exit draining.
 - [Keymaps](docs/KEYMAP.md) — action names, JSON bindings, modes, and reload.
 - [Terminal fidelity](docs/TERMINAL-FIDELITY.md) — capture formats, links, and
   explicit fidelity limits.
