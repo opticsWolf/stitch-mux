@@ -47,7 +47,15 @@ cargo run -p stitch-mux-benchmark --release -- \
 The workspace root patches `crates.io` `stitch-pty` to the sibling
 `../stitch-pty` checkout so these numbers always exercise the local optimized
 terminal engine. `Cargo.lock` records the path dependency; verify with
+`bash scripts/check-local-pty.sh` or
 `cargo tree -p stitch-mux | grep stitch-pty` before publishing results.
+
+`benchmark/results/latest.json` was refreshed after the dependency moved to
+`stitch-pty 0.17.0`. The local path resolves to 0.17.0, the screen oracle has
+0 failures, and the report records the commit/profile/host/dependency
+provenance. The 0.17.0 parser and screen lanes are faster; end-to-end mux
+numbers remain host-noise-sensitive and should be compared only from the same
+run, geometry, and payload.
 
 Pane deltas are computed from per-row hashes of the authoritative screen,
 so a PTY read no longer clones the whole viewport into `last_viewport`.

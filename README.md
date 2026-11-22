@@ -52,7 +52,9 @@ references and a source of proven ideas.
   center.
 - Rust-first internals, with a Python control SDK and PySide6 reference adapter
   added after the core is stable.
-- Reuse `stitch-pty` for PTY, screen, resize, and Kitty key encoding.
+- Reuse `stitch-pty` 0.17.0 for PTY, screen, resize, and Kitty key encoding.
+  The workspace patches the crates.io dependency to the sibling checkout so
+  benchmarks exercise the same local engine used for validation.
 - Explicit, versioned, local-only IPC with bounded memory and backpressure.
 
 ## Non-goals for the first release

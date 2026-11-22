@@ -1,7 +1,23 @@
 # Stitch PTY integration
 
-Mux uses the published Stitch PTY 0.16.0 crate. The daemon feeds each output
+Mux uses the published Stitch PTY 0.17.0 crate. The daemon feeds each output
 chunk to one `HistoryScreen` and projects that state into the Mux protocol.
+
+## 0.17.0 integration status
+
+- The workspace dependency and local patch both resolve to 0.17.0. Run
+  `bash scripts/check-local-pty.sh` to reject a registry-linked engine.
+- Existing integration points (`HistoryScreen`, `set_write_process_input`,
+  `set_osc_observer`, `drain_output`, and `encode_key`) are unchanged, so no
+  protocol or wire-format change was needed.
+- 0.17.0 fixes consecutive width-two cursor placement and pre-wraps wide glyphs
+  before the right margin. The mux screen oracle still reports 0 failures.
+- 0.17.0 adds path-aware spawn and `PtyFailure` for Rust callers; the mux keeps
+  its existing `&str` spawn wrappers and `PtyErrorKind` handling for now.
+- Parser/screen throughput improvements in 0.17.0 are exercised through the
+  same `HistoryScreen` feed path; see `benchmark/README.md` for the measured
+  headless lanes. End-to-end mux numbers are reported separately from parser
+  and screen floors.
 
 | Gap | Integration |
 |---|---|

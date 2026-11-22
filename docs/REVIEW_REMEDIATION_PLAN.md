@@ -550,7 +550,7 @@ cargo test --release -p stitch-mux --test stress -- --ignored
 Expected local dependency:
 
 ```text
-stitch-pty v0.16.0 (D:\User\Documents\Python\stitch-pty)
+stitch-pty v0.17.0 (D:\User\Documents\Python\stitch-pty)
 ```
 
 Final benchmark:

@@ -111,7 +111,7 @@ Timers perturb absolutes, so these are attribution signals, not SLA numbers.
    Expected:
 
    ```text
-   stitch-pty v0.16.0 (D:\User\Documents\Python\stitch-pty)
+   stitch-pty v0.17.0 (D:\User\Documents\Python\stitch-pty)
    ```
 
 3. Never claim “faster/slower than tmux/RMUX/Zellij” without same-outer-PTY
