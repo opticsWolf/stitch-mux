@@ -72,6 +72,11 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/opticsWolf/stitch-mux"
 
+# Local development override: benchmark against the checked-out stitch-pty
+# instead of the published 0.16.0 crate.
+[patch.crates-io]
+stitch-pty = { path = "../stitch-pty" }
+
 [workspace.dependencies]
 base64 = "0.22"
 rmp-serde = "1.3"

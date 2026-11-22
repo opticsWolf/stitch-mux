@@ -44,6 +44,11 @@ cargo run -p stitch-mux-benchmark --release -- \
   --out benchmark/results/latest.json
 ```
 
+The workspace root patches `crates.io` `stitch-pty` to the sibling
+`../stitch-pty` checkout so these numbers always exercise the local optimized
+terminal engine. `Cargo.lock` records the path dependency; verify with
+`cargo tree -p stitch-mux | grep stitch-pty` before publishing results.
+
 Options: `--samples`, `--warmup`, `--burst-bytes`, `--fixture-dir`,
 `--stitch-bin`, `--tmux-bin`, `--skip-tmux`, `--outer-lane`, `--out`, `--help`.
 The fixture is resolved from `--fixture-dir`,
