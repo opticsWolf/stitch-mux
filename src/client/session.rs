@@ -255,6 +255,12 @@ impl ClientSession {
         self.view_rx.borrow().clone()
     }
 
+    /// Borrow the current view without cloning the whole session snapshot.
+    /// Polling code should prefer this over [`Self::view`].
+    pub fn borrowed_view(&self) -> watch::Ref<'_, SessionView> {
+        self.view_rx.borrow()
+    }
+
     pub fn send(&self, outbound: Outbound) {
         self.offer(outbound);
     }

@@ -225,20 +225,28 @@ async fn kill_session(endpoint: &Endpoint) {
     let _ = command(endpoint, Command::KillSession { name: SESSION.into() }).await;
 }
 
-fn screen_text(view: &SessionView, pane_id: u64) -> String {
-    view.pane_cells(pane_id)
-        .map(|rows| {
-            rows.iter()
-                .map(|row| {
-                    row.cells
-                        .iter()
-                        .map(|cell| cell.text.as_str())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default()
+fn view_contains_marker(view: &SessionView, pane_id: u64, marker: &str) -> bool {
+    let needle = marker.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    let mut matched = 0usize;
+    for row in view.pane_cells(pane_id).into_iter().flatten() {
+        for cell in &row.cells {
+            for &byte in cell.text.as_bytes() {
+                if byte == needle[matched] {
+                    matched += 1;
+                    if matched == needle.len() {
+                        return true;
+                    }
+                } else {
+                    matched = usize::from(byte == needle[0]);
+                }
+            }
+        }
+        matched = 0; // a marker must live on one row
+    }
+    false
 }
 
 async fn wait_until<F>(client: &ClientSession, timeout: Duration, predicate: F) -> bool
@@ -247,7 +255,10 @@ where
 {
     tokio::time::timeout(timeout, async {
         loop {
-            if predicate(&client.view()) {
+            let view = client.borrowed_view();
+            let found = predicate(&view);
+            drop(view);
+            if found {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(2)).await;
@@ -259,7 +270,7 @@ where
 
 async fn wait_for_marker(client: &ClientSession, pane_id: u64, marker: &str) -> bool {
     wait_until(client, Duration::from_secs(15), |view| {
-        screen_text(view, pane_id).contains(marker)
+        view_contains_marker(view, pane_id, marker)
     })
     .await
 }
@@ -469,9 +480,11 @@ async fn measure_output(
     config: &Config,
     burst_bin: &str,
     oracle: &mut Oracle,
-) -> (Sample, Sample) {
+) -> (Sample, Sample, Sample, Sample) {
     let mut completion = Sample::new("terminal_output_completion", "ms", "lower");
     let mut ingest = Sample::new("terminal_output_ingest_rate", "MiB/s", "higher");
+    let mut trigger = Sample::new("output_trigger_ipc_ms", "ms", "lower");
+    let mut visible = Sample::new("output_visible_after_trigger_ms", "ms", "lower");
     let mib = config.burst_bytes as f64 / (1024.0 * 1024.0);
 
     for index in 0..config.warmup + config.samples {
@@ -505,7 +518,10 @@ async fn measure_output(
         .await
         .expect("burst trigger");
         assert!(triggered.ok, "{:?}", triggered.error);
-        let visible = wait_for_marker(&client, pane_id, &marker).await;
+        let trigger_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let visible_start = Instant::now();
+        let marker_visible = wait_for_marker(&client, pane_id, &marker).await;
+        let visible_ms = visible_start.elapsed().as_secs_f64() * 1000.0;
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let captured = wait_for_capture_marker(
@@ -516,20 +532,22 @@ async fn measure_output(
         )
         .await;
         let capture_ok = captured.as_deref().is_some_and(|text| text.contains(&marker));
-        if !visible || !capture_ok {
+        if !marker_visible || !capture_ok {
             oracle.fail(
                 "terminal_output_completion",
-                &format!("marker {marker} view={visible} capture={capture_ok}"),
+                &format!("marker {marker} view={marker_visible} capture={capture_ok}"),
             );
         } else if index >= config.warmup {
             completion.push(elapsed_ms);
             ingest.push(mib / (elapsed_ms / 1000.0));
+            trigger.push(trigger_ms);
+            visible.push(visible_ms);
         }
 
         client.detach().await;
         kill_session(endpoint).await;
     }
-    (completion, ingest)
+    (completion, ingest, trigger, visible)
 }
 
 async fn measure_multiclient(
@@ -1119,7 +1137,8 @@ async fn main() {
 
     let control = measure_control(&endpoint, &config).await;
     let input = measure_input(&endpoint, &config, &echo_bin, &mut oracle).await;
-    let (completion, ingest) = measure_output(&endpoint, &config, &burst_bin, &mut oracle).await;
+    let (completion, ingest, trigger, visible) =
+        measure_output(&endpoint, &config, &burst_bin, &mut oracle).await;
     let multiclient = measure_multiclient(&endpoint, &config, &echo_bin, &mut oracle).await;
     let split = measure_split(&endpoint, &config, &echo_bin).await;
 
@@ -1186,6 +1205,8 @@ async fn main() {
         input.name: input.json(),
         completion.name: completion.json(),
         ingest.name: ingest.json(),
+        trigger.name: trigger.json(),
+        visible.name: visible.json(),
         multiclient.name: multiclient.json(),
         split.name: split.json(),
         "server_shutdown": {

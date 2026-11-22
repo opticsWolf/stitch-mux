@@ -49,6 +49,12 @@ The workspace root patches `crates.io` `stitch-pty` to the sibling
 terminal engine. `Cargo.lock` records the path dependency; verify with
 `cargo tree -p stitch-mux | grep stitch-pty` before publishing results.
 
+The output lane also records `output_trigger_ipc_ms` and
+`output_visible_after_trigger_ms`, which split the completion measurement into
+command round trip and server/client propagation. Marker polling uses
+`ClientSession::borrowed_view()` and an allocation-free cell scan, so the
+measurement does not clone the whole `SessionView` every 2 ms.
+
 Options: `--samples`, `--warmup`, `--burst-bytes`, `--fixture-dir`,
 `--stitch-bin`, `--tmux-bin`, `--skip-tmux`, `--outer-lane`, `--out`, `--help`.
 The fixture is resolved from `--fixture-dir`,
