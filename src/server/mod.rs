@@ -20,6 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "bench-profile")]
+use crate::bench_profile;
 use crate::core::action::{ActionError, ActionRegistry};
 use crate::core::keymap::{ActionInvocation, Keymap as CoreKeymap, KeymapError};
 use crate::core::{Direction, FLOAT_BPS, FloatBounds, LayoutError, Size, SplitAxis, layout_leaves};
@@ -31,9 +33,8 @@ use crate::protocol::{
     ResizeRequest, RunPlacement, RunResult, Stream, SubscribeEvents, ViewMode, WaitResult,
     WaitTarget, WindowFocus, capabilities, decode_message,
 };
-#[cfg(feature = "bench-profile")]
-use crate::bench_profile;
 use thiserror::Error;
+use tokio::io::AsyncWrite;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -587,7 +588,21 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
             let _ = send_backpressure_error(&mut writer).await;
             break;
         }
+        // A lost acknowledgement must trigger a repaint even if no PTY update
+        // arrives. When no frame is outstanding this branch never resolves.
+        let ack_deadline = if view_mode == ViewMode::Structured {
+            coalescer.next_deadline()
+        } else {
+            None
+        };
+        let ack_timer = async move {
+            match ack_deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         let event = tokio::select! {
+            _ = ack_timer => Event::AckDeadline,
             _ = detach.notified() => Event::DetachedByControl,
             incoming = frame_rx.recv() => match incoming {
                 Some(Ok(frame)) => Event::Frame(frame),
@@ -733,31 +748,36 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                             break;
                         }
                     }
-                    let overdue = coalescer.deadline_panes();
-                    if !overdue.is_empty()
-                        && let Some(session) = attached.as_ref()
-                        && {
-                            #[cfg(feature = "bench-profile")]
-                            bench_profile::add(
-                                &bench_profile::FULL_REPAINTS,
-                                overdue.len() as u64,
-                            );
-                            true
-                        }
-                        && let Err(err) = send_session_state(
-                            &mut writer,
-                            session,
-                            focus,
-                            &state,
-                            view_mode,
-                            &mut compositor,
-                            &mut coalescer,
-                        )
-                        .await
+                    if let Err(err) = repaint_overdue_panes(
+                        &mut writer,
+                        attached.as_ref(),
+                        focus,
+                        &state,
+                        view_mode,
+                        &mut compositor,
+                        &mut coalescer,
+                    )
+                    .await
                     {
                         failure = Some(err);
                         break;
                     }
+                }
+            }
+            Event::AckDeadline => {
+                if let Err(err) = repaint_overdue_panes(
+                    &mut writer,
+                    attached.as_ref(),
+                    focus,
+                    &state,
+                    view_mode,
+                    &mut compositor,
+                    &mut coalescer,
+                )
+                .await
+                {
+                    failure = Some(err);
+                    break;
                 }
             }
             Event::DetachedByControl => {
@@ -816,6 +836,7 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
 enum Event {
     Frame(Frame),
     Update(Arc<PaneUpdate>),
+    AckDeadline,
     Layout,
     Wire(Arc<WireEvent>),
     WireLagged,
@@ -870,10 +891,13 @@ async fn send_exit_frames(
     Ok(())
 }
 
-async fn send_render_frame(
-    writer: &mut Writer,
+async fn send_render_frame<W>(
+    writer: &mut FrameWriter<W>,
     render: crate::protocol::Render,
-) -> Result<(), ServerError> {
+) -> Result<(), ServerError>
+where
+    W: AsyncWrite + Unpin,
+{
     writer
         .send_render(
             render.seq,
@@ -889,15 +913,18 @@ async fn send_render_frame(
 /// Publish a full authoritative state. Structured clients get geometry plus
 /// cell snapshots; terminal clients get geometry (for focus) plus one composed
 /// ANSI frame. A connection never receives both cell frames and Render frames.
-async fn send_session_state(
-    writer: &mut Writer,
+async fn send_session_state<W>(
+    writer: &mut FrameWriter<W>,
     session: &Session,
     focus: Option<u64>,
     state: &ServerState,
     view_mode: ViewMode,
     compositor: &mut AnsiCompositor,
     coalescer: &mut client_updates::UpdateCoalescer,
-) -> Result<(), ServerError> {
+) -> Result<(), ServerError>
+where
+    W: AsyncWrite + Unpin,
+{
     let layout = with_attached_count(state, session.layout(focus));
     writer.send(MessageKind::Layout, &layout).await?;
     match view_mode {
@@ -925,6 +952,46 @@ async fn send_session_state(
     Ok(())
 }
 
+/// Repaint every pane whose last structured frame was not acknowledged.
+///
+/// Full snapshots are authoritative, so they supersede the missing delta. Any
+/// pane not present in the current layout is cleared from the retry set to
+/// avoid re-arming a deadline the connection can never satisfy.
+async fn repaint_overdue_panes<W>(
+    writer: &mut FrameWriter<W>,
+    attached: Option<&Arc<Session>>,
+    focus: Option<u64>,
+    state: &ServerState,
+    view_mode: ViewMode,
+    compositor: &mut AnsiCompositor,
+    coalescer: &mut client_updates::UpdateCoalescer,
+) -> Result<(), ServerError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let overdue = coalescer.deadline_panes();
+    if overdue.is_empty() {
+        return Ok(());
+    }
+    let Some(session) = attached else {
+        for pane_id in overdue {
+            coalescer.clear_in_flight(pane_id);
+        }
+        return Ok(());
+    };
+
+    #[cfg(feature = "bench-profile")]
+    bench_profile::add(&bench_profile::FULL_REPAINTS, overdue.len() as u64);
+    let result = send_session_state(
+        writer, session, focus, state, view_mode, compositor, coalescer,
+    )
+    .await;
+    for pane_id in overdue {
+        coalescer.clear_in_flight(pane_id);
+    }
+    result
+}
+
 /// Send the next incremental ANSI projection after pane updates or a resize.
 async fn send_terminal_update(
     writer: &mut Writer,
@@ -942,7 +1009,10 @@ async fn send_terminal_update(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "connection handler mirrors the fixed server event contract"
+)]
 async fn handle_frame(
     frame: Frame,
     client_id: u64,
@@ -2578,6 +2648,67 @@ mod tests {
         let error: ErrorInfo = decode_message(&frame).expect("typed error");
         assert_eq!(error.code, ErrorCode::Busy);
         assert_eq!(error.message, "client fell behind");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn overdue_ack_forces_a_full_snapshot_without_new_updates() {
+        let state = Arc::new(ServerState::default());
+        let (shell, flag) = if cfg!(windows) {
+            ("cmd.exe", "/C")
+        } else {
+            ("sh", "-c")
+        };
+        let args = [flag.to_owned(), "exit 0".to_owned()];
+        let session = state
+            .registry
+            .lock()
+            .await
+            .create("ack-repaint", shell, &args, None, None, 80, 24, false)
+            .await
+            .expect("create session");
+        let pane_id = session.panes().pop().expect("pane").id;
+
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let mut writer = FrameWriter::new(server);
+        let mut compositor = AnsiCompositor::new();
+        let mut coalescer = client_updates::UpdateCoalescer::default();
+        coalescer.mark_in_flight_for_test(pane_id, 1, Instant::now() - Duration::from_secs(1));
+
+        repaint_overdue_panes(
+            &mut writer,
+            Some(&session),
+            None,
+            &state,
+            ViewMode::Structured,
+            &mut compositor,
+            &mut coalescer,
+        )
+        .await
+        .expect("repaint overdue pane");
+        drop(writer);
+
+        let mut reader = FrameReader::new(client);
+        let mut saw_snapshot = false;
+        for _ in 0..10 {
+            let frame = tokio::time::timeout(Duration::from_millis(500), reader.recv_frame())
+                .await
+                .expect("snapshot frame timeout")
+                .expect("snapshot frame");
+            if frame.kind == MessageKind::PaneSnapshot {
+                saw_snapshot = true;
+                break;
+            }
+        }
+        assert!(saw_snapshot, "overdue pane must be repainted in full");
+        assert!(coalescer.deadline_panes().is_empty());
+
+        state
+            .registry
+            .lock()
+            .await
+            .kill("ack-repaint")
+            .await
+            .expect("kill test session");
     }
 
     #[test]

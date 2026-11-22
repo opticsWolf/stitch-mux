@@ -345,19 +345,12 @@ where
     result
 }
 
-async fn ack_pane<W>(
-    writer: &mut FrameWriter<W>,
-    pane_id: u64,
-    seq: u64,
-) -> Result<(), FrameError>
+async fn ack_pane<W>(writer: &mut FrameWriter<W>, pane_id: u64, seq: u64) -> Result<(), FrameError>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
     writer
-        .send(
-            MessageKind::PaneFrameAck,
-            &PaneFrameAck { pane_id, seq },
-        )
+        .send(MessageKind::PaneFrameAck, &PaneFrameAck { pane_id, seq })
         .await
 }
 

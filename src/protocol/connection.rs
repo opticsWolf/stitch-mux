@@ -5,6 +5,7 @@ use crate::protocol::frame::{
     encode_render,
 };
 use std::collections::VecDeque;
+use std::fmt;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -21,6 +22,21 @@ pub struct FrameReader<R> {
 /// Write half of a split framed connection.
 pub struct FrameWriter<W> {
     io: W,
+}
+
+impl<R> fmt::Debug for FrameReader<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrameReader")
+            .field("pending", &self.pending.len())
+            .field("buffered", &self.decoder.buffered())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<W> fmt::Debug for FrameWriter<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrameWriter").finish_non_exhaustive()
+    }
 }
 
 impl<R> FrameReader<R>

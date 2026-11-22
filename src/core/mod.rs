@@ -23,12 +23,12 @@ pub use cell_text::CellText;
 pub use frame::{Frame, changed_rows};
 pub use geometry::{Rect, Size};
 pub use ids::{ClientId, PaneId, SessionId, WindowId};
-pub use revision_coalescer::{CoalescedRevision, RevisionCoalescer};
 pub use layout::{
     Direction, LayoutError, LayoutNode, PanePlacement, ResolvedPane, SplitAxis, close_leaf,
     contains as layout_contains, first_leaf, focus_direction, hit_test, leaves as layout_leaves,
     place_leaf, remove_leaf, resolve as resolve_layout, split_leaf, validate as validate_layout,
 };
+pub use revision_coalescer::{CoalescedRevision, RevisionCoalescer};
 pub use status::{ActivitySummary, ProgramState, ProgramStatus, ProgramStatusKind};
 pub use workspace::{
     FLOAT_BPS, FloatBounds, FloatingPane, MAX_LAYERS_PER_WINDOW, MAX_WINDOWS, MIN_FLOAT_DIM_BPS,

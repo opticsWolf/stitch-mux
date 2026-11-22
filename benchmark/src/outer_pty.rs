@@ -45,10 +45,7 @@ impl DsrBootstrap {
         combined.extend_from_slice(bytes);
         let mut responses = 0;
 
-        loop {
-            let Some(offset) = find_subslice(&combined, DSR_REQUEST) else {
-                break;
-            };
+        while let Some(offset) = find_subslice(&combined, DSR_REQUEST) {
             let mut next = Vec::with_capacity(combined.len() - DSR_REQUEST.len());
             next.extend_from_slice(&combined[..offset]);
             next.extend_from_slice(&combined[offset + DSR_REQUEST.len()..]);
@@ -213,14 +210,6 @@ impl LineOracle {
         let doubled: String = marker.chars().flat_map(|c| [c, c]).collect();
         text.contains(&doubled)
     }
-
-    fn debug_text(&self) -> &str {
-        &self.sink.all
-    }
-
-    fn debug_screen(&self) -> String {
-        self.sink.text()
-    }
 }
 
 pub struct OuterSession {
@@ -228,7 +217,6 @@ pub struct OuterSession {
     reader: Receiver<Vec<u8>>,
     oracle: LineOracle,
     dsr: DsrBootstrap,
-    raw: Vec<u8>,
     child: Box<dyn Child + Send + Sync>,
     _slave: Box<dyn SlavePty + Send>,
 }
@@ -274,7 +262,6 @@ impl OuterSession {
             reader: rx,
             oracle: LineOracle::new(),
             dsr: DsrBootstrap::new(),
-            raw: Vec::new(),
             child,
             _slave: slave,
         }
@@ -285,18 +272,6 @@ impl OuterSession {
             return;
         }
         let _ = self.writer.flush();
-    }
-
-    pub fn debug_text(&self) -> &str {
-        self.oracle.debug_text()
-    }
-
-    pub fn debug_compact(&self) -> String {
-        self.oracle.debug_screen()
-    }
-
-    pub fn debug_raw(&self) -> &[u8] {
-        &self.raw
     }
 
     pub fn wait_for(&mut self, marker: &str, timeout: Duration) -> bool {
@@ -333,7 +308,6 @@ impl OuterSession {
             let _ = self.writer.write_all(DSR_RESPONSE);
             let _ = self.writer.flush();
         }
-        self.raw.extend_from_slice(&visible);
         self.oracle.feed(&visible);
     }
 

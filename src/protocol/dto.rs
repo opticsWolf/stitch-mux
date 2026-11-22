@@ -228,6 +228,52 @@ pub struct PaneDelta {
     pub bell: bool,
 }
 
+impl PaneDelta {
+    /// Overlays the newest non-row state from `newer`.
+    ///
+    /// Rows are merged separately by the update coalescer. Exhaustive
+    /// destructuring here makes a newly added `PaneDelta` field a compile
+    /// error until its merge behavior is chosen explicitly.
+    pub fn overlay_state(&mut self, newer: Self) {
+        debug_assert_eq!(self.pane_id, newer.pane_id);
+        let Self {
+            pane_id: _,
+            seq,
+            rows: _,
+            cursor,
+            modes,
+            title,
+            cwd,
+            foreground,
+            shell_marks,
+            program_status,
+            notification,
+            progress,
+            alt_screen,
+            scrollback_len,
+            total_lines,
+            scrollback_bytes,
+            bell,
+        } = newer;
+
+        self.seq = seq;
+        self.cursor = cursor;
+        self.modes = modes;
+        self.title = title;
+        self.cwd = cwd;
+        self.foreground = foreground;
+        self.shell_marks = shell_marks;
+        self.program_status = program_status;
+        self.notification = notification;
+        self.progress = progress;
+        self.alt_screen = alt_screen;
+        self.scrollback_len = scrollback_len;
+        self.total_lines = total_lines;
+        self.scrollback_bytes = scrollback_bytes;
+        self.bell |= bell;
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FocusRequest {
     pub pane_id: u64,

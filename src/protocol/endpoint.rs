@@ -78,6 +78,7 @@ impl Endpoint {
 
 #[cfg(unix)]
 fn platform_default() -> Result<Endpoint, EndpointError> {
+    // SAFETY: `getuid` is a side-effect-free libc query with no preconditions.
     let uid = unsafe { libc::getuid() };
     if let Ok(base) = std::env::var("XDG_RUNTIME_DIR") {
         let dir = PathBuf::from(base).join("stitch-mux");
@@ -113,6 +114,7 @@ async fn bind_unix(path: &PathBuf) -> Result<Listener, EndpointError> {
         // runtime directory is created by us; an explicit path in a shared,
         // root-owned directory (for example /tmp) is still allowed.
         let meta = std::fs::metadata(parent)?;
+        // SAFETY: `geteuid` is a side-effect-free libc query with no preconditions.
         if !directory_owner_is_trusted(meta.uid(), unsafe { libc::geteuid() }) {
             return Err(EndpointError::NotOwner);
         }
@@ -122,6 +124,7 @@ async fn bind_unix(path: &PathBuf) -> Result<Listener, EndpointError> {
             return Err(EndpointError::AddrInUse);
         }
         let meta = std::fs::metadata(path)?;
+        // SAFETY: `geteuid` is a side-effect-free libc query with no preconditions.
         if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() } {
             return Err(EndpointError::NotOwner);
         }

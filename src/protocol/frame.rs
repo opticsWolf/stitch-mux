@@ -164,35 +164,180 @@ pub struct FrameKindSpec {
 /// Stable v1 wire ledger. Removed kinds must be marked `Reserved`; their
 /// numeric values are never reused.
 pub const WIRE_LEDGER_V1: &[FrameKindSpec] = &[
-    FrameKindSpec { kind: MessageKind::Hello, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "handshake" },
-    FrameKindSpec { kind: MessageKind::HelloAck, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "handshake" },
-    FrameKindSpec { kind: MessageKind::Attach, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "session" },
-    FrameKindSpec { kind: MessageKind::Attached, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "session" },
-    FrameKindSpec { kind: MessageKind::Layout, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "layout" },
-    FrameKindSpec { kind: MessageKind::PaneSnapshot, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "panes" },
-    FrameKindSpec { kind: MessageKind::PaneDelta, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "panes" },
-    FrameKindSpec { kind: MessageKind::Focus, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "focus" },
-    FrameKindSpec { kind: MessageKind::Render, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "terminal" },
-    FrameKindSpec { kind: MessageKind::Input, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "input" },
-    FrameKindSpec { kind: MessageKind::ResizeRequest, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "layout" },
-    FrameKindSpec { kind: MessageKind::ResizeEvent, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "layout" },
-    FrameKindSpec { kind: MessageKind::FocusRequest, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "focus" },
-    FrameKindSpec { kind: MessageKind::SetLayout, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "layout" },
-    FrameKindSpec { kind: MessageKind::Detach, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "session" },
-    FrameKindSpec { kind: MessageKind::Clipboard, status: FrameStatus::Active, direction: FrameDirection::Bidirectional, feature: "clipboard" },
-    FrameKindSpec { kind: MessageKind::Exit, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "session" },
-    FrameKindSpec { kind: MessageKind::Error, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "errors" },
-    FrameKindSpec { kind: MessageKind::Ping, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "health" },
-    FrameKindSpec { kind: MessageKind::Pong, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "health" },
-    FrameKindSpec { kind: MessageKind::Resync, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "resync" },
-    FrameKindSpec { kind: MessageKind::CaptureRequest, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "capture" },
-    FrameKindSpec { kind: MessageKind::CaptureResponse, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "capture" },
-    FrameKindSpec { kind: MessageKind::CommandRequest, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "commands" },
-    FrameKindSpec { kind: MessageKind::CommandResponse, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "commands" },
-    FrameKindSpec { kind: MessageKind::SubscribeEvents, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "events" },
-    FrameKindSpec { kind: MessageKind::Event, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "events" },
-    FrameKindSpec { kind: MessageKind::StructuredPaneFrame, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "panes" },
-    FrameKindSpec { kind: MessageKind::PaneFrameAck, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "panes" },
+    FrameKindSpec {
+        kind: MessageKind::Hello,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ClientToServer,
+        feature: "handshake",
+    },
+    FrameKindSpec {
+        kind: MessageKind::HelloAck,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "handshake",
+    },
+    FrameKindSpec {
+        kind: MessageKind::Attach,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ClientToServer,
+        feature: "session",
+    },
+    FrameKindSpec {
+        kind: MessageKind::Attached,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "session",
+    },
+    FrameKindSpec {
+        kind: MessageKind::Layout,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "layout",
+    },
+    FrameKindSpec {
+        kind: MessageKind::PaneSnapshot,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "panes",
+    },
+    FrameKindSpec {
+        kind: MessageKind::PaneDelta,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "panes",
+    },
+    FrameKindSpec {
+        kind: MessageKind::Focus,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "focus",
+    },
+    FrameKindSpec {
+        kind: MessageKind::Render,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "terminal",
+    },
+    FrameKindSpec {
+        kind: MessageKind::Input,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ClientToServer,
+        feature: "input",
+    },
+    FrameKindSpec {
+        kind: MessageKind::ResizeRequest,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ClientToServer,
+        feature: "layout",
+    },
+    FrameKindSpec {
+        kind: MessageKind::ResizeEvent,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "layout",
+    },
+    FrameKindSpec {
+        kind: MessageKind::FocusRequest,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ClientToServer,
+        feature: "focus",
+    },
+    FrameKindSpec {
+        kind: MessageKind::SetLayout,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ClientToServer,
+        feature: "layout",
+    },
+    FrameKindSpec {
+        kind: MessageKind::Detach,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ClientToServer,
+        feature: "session",
+    },
+    FrameKindSpec {
+        kind: MessageKind::Clipboard,
+        status: FrameStatus::Active,
+        direction: FrameDirection::Bidirectional,
+        feature: "clipboard",
+    },
+    FrameKindSpec {
+        kind: MessageKind::Exit,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "session",
+    },
+    FrameKindSpec {
+        kind: MessageKind::Error,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "errors",
+    },
+    FrameKindSpec {
+        kind: MessageKind::Ping,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ClientToServer,
+        feature: "health",
+    },
+    FrameKindSpec {
+        kind: MessageKind::Pong,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "health",
+    },
+    FrameKindSpec {
+        kind: MessageKind::Resync,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ClientToServer,
+        feature: "resync",
+    },
+    FrameKindSpec {
+        kind: MessageKind::CaptureRequest,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ClientToServer,
+        feature: "capture",
+    },
+    FrameKindSpec {
+        kind: MessageKind::CaptureResponse,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "capture",
+    },
+    FrameKindSpec {
+        kind: MessageKind::CommandRequest,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ClientToServer,
+        feature: "commands",
+    },
+    FrameKindSpec {
+        kind: MessageKind::CommandResponse,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "commands",
+    },
+    FrameKindSpec {
+        kind: MessageKind::SubscribeEvents,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ClientToServer,
+        feature: "events",
+    },
+    FrameKindSpec {
+        kind: MessageKind::Event,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "events",
+    },
+    FrameKindSpec {
+        kind: MessageKind::StructuredPaneFrame,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ServerToClient,
+        feature: "panes",
+    },
+    FrameKindSpec {
+        kind: MessageKind::PaneFrameAck,
+        status: FrameStatus::Active,
+        direction: FrameDirection::ClientToServer,
+        feature: "panes",
+    },
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -474,9 +619,49 @@ mod tests {
                 "missing or duplicate ledger entry for {kind:?}"
             );
         }
-        assert!(WIRE_LEDGER_V1
-            .iter()
-            .all(|entry| entry.status == FrameStatus::Active));
+        assert!(
+            WIRE_LEDGER_V1
+                .iter()
+                .all(|entry| entry.status == FrameStatus::Active)
+        );
+
+        // Wire numbers are part of the v1 contract. Renumbering an existing
+        // kind must fail this test; removed kinds become Reserved instead.
+        const EXPECTED_KIND_CODES: [(MessageKind, u8); 29] = [
+            (MessageKind::Hello, 1),
+            (MessageKind::HelloAck, 2),
+            (MessageKind::Attach, 3),
+            (MessageKind::Attached, 4),
+            (MessageKind::Layout, 5),
+            (MessageKind::PaneSnapshot, 6),
+            (MessageKind::PaneDelta, 7),
+            (MessageKind::Focus, 8),
+            (MessageKind::Render, 9),
+            (MessageKind::Input, 10),
+            (MessageKind::ResizeRequest, 11),
+            (MessageKind::ResizeEvent, 12),
+            (MessageKind::FocusRequest, 13),
+            (MessageKind::SetLayout, 14),
+            (MessageKind::Detach, 15),
+            (MessageKind::Clipboard, 16),
+            (MessageKind::Exit, 17),
+            (MessageKind::Error, 18),
+            (MessageKind::Ping, 19),
+            (MessageKind::Pong, 20),
+            (MessageKind::Resync, 21),
+            (MessageKind::CaptureRequest, 22),
+            (MessageKind::CaptureResponse, 23),
+            (MessageKind::CommandRequest, 24),
+            (MessageKind::CommandResponse, 25),
+            (MessageKind::SubscribeEvents, 26),
+            (MessageKind::Event, 27),
+            (MessageKind::StructuredPaneFrame, 28),
+            (MessageKind::PaneFrameAck, 29),
+        ];
+        for (kind, code) in EXPECTED_KIND_CODES {
+            assert_eq!(kind.as_u8(), code, "wire number changed for {kind:?}");
+            assert_eq!(MessageKind::try_from(code).unwrap(), kind);
+        }
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::time::Duration;
 #[cfg(feature = "bench-profile")]
 use crate::bench_profile;
 use crate::core::{
-    Attrs, CaptureFormat, Cell, Color, Cursor, CursorShape, Modes, ProgramStatus, Row,
+    Attrs, CaptureFormat, Cell, CellText, Color, Cursor, CursorShape, Modes, ProgramStatus, Row,
 };
 use crate::protocol::{
     CaptureResponse, CapturedRow, Notification, PaneDelta, PaneSnapshot, ProcessInfo, Progress,
@@ -328,14 +328,12 @@ impl PaneRuntime {
         state.last_activity_unix_ms = now_unix_ms();
         #[cfg(feature = "bench-profile")]
         let diff_start = bench_profile::begin();
-        let rows = changed_rows(&state.last_row_hashes, state.screen.buffer());
         let PaneState {
             last_row_hashes,
             screen,
             ..
         } = &mut *state;
-        last_row_hashes.clear();
-        last_row_hashes.extend(screen.buffer().iter().map(|row| row_hash(row)));
+        let rows = changed_rows_in_place(last_row_hashes, screen.buffer());
         #[cfg(feature = "bench-profile")]
         {
             bench_profile::record(&bench_profile::PANE_DIFF_NS, diff_start);
@@ -753,8 +751,12 @@ fn changed_rows_at(
 ) -> Vec<RowUpdate> {
     let mut rows = Vec::new();
     for index in candidates {
-        let Some(line) = visible.get(index) else { continue };
-        let Some(slot) = previous.get_mut(index) else { continue };
+        let Some(line) = visible.get(index) else {
+            continue;
+        };
+        let Some(slot) = previous.get_mut(index) else {
+            continue;
+        };
         let hash = row_hash(line);
         if *slot == hash {
             continue;
@@ -769,9 +771,17 @@ fn changed_rows_at(
     rows
 }
 
-fn changed_rows(previous: &[u64], visible: &[Vec<PtyCell>]) -> Vec<RowUpdate> {
-    let mut hashes = previous.to_vec();
-    changed_rows_at(&mut hashes, visible, 0..visible.len())
+/// Recomputes every visible row hash in place and reports changed rows.
+///
+/// This is deliberately a full recomputation. Previous attempts at partial,
+/// scroll-aware hashing broke the screen oracle and stay reverted.
+fn changed_rows_in_place(previous: &mut Vec<u64>, visible: &[Vec<PtyCell>]) -> Vec<RowUpdate> {
+    if previous.len() < visible.len() {
+        previous.resize(visible.len(), 0);
+    }
+    let rows = changed_rows_at(previous, visible, 0..visible.len());
+    previous.truncate(visible.len());
+    rows
 }
 
 fn scrollback_budget() -> usize {
@@ -980,7 +990,7 @@ fn cells_from_row(line: &[PtyCell]) -> Vec<Cell> {
             }
         }
         cells.push(Cell {
-            text: cell.data.clone().into(),
+            text: CellText::new(&cell.data),
             fg: parse_color(&cell.fg),
             bg: parse_color(&cell.bg),
             attrs,
@@ -1044,26 +1054,51 @@ mod tests {
     #[test]
     fn scrolled_rows_are_reported_even_though_the_parser_only_marks_the_bottom() {
         let row = |text: &str| vec![PtyCell::new(text)];
-        let previous = vec![row("a"), row("b"), row("c"), row("d")];
+        let previous = [row("a"), row("b"), row("c"), row("d")];
         // One line scrolled off: the parser reports only row 3 as dirty.
-        let visible = vec![row("b"), row("c"), row("d"), row("e")];
+        let visible = [row("b"), row("c"), row("d"), row("e")];
         let previous_hashes = previous.iter().map(|row| row_hash(row)).collect::<Vec<_>>();
-        let visible_hashes = visible.iter().map(|row| row_hash(row)).collect::<Vec<_>>();
-        let updates = changed_rows(&previous_hashes, &visible);
+        let mut visible_hashes = previous_hashes.clone();
+        let updates = changed_rows_in_place(&mut visible_hashes, &visible);
         assert_eq!(
             updates.iter().map(|update| update.row).collect::<Vec<_>>(),
-            vec![0, 1, 2, 3]
+            [0, 1, 2, 3]
         );
         assert_eq!(updates[0].cells[0].text, "b");
         assert_eq!(updates[3].cells[0].text, "e");
 
         // A no-op repaint reports nothing.
-        assert!(changed_rows(&visible_hashes, &visible).is_empty());
+        assert!(changed_rows_in_place(&mut visible_hashes, &visible).is_empty());
 
         // A viewport of a different height does not panic and reports the tail.
         let shorter = vec![row("c"), row("d")];
-        let updates = changed_rows(&previous_hashes, &shorter);
+        let mut shorter_hashes = previous_hashes;
+        let updates = changed_rows_in_place(&mut shorter_hashes, &shorter);
         assert_eq!(updates.len(), 2);
+    }
+
+    #[test]
+    fn in_place_row_hashes_match_copying_reference() {
+        let row = |text: &str| vec![PtyCell::new(text)];
+        let scenes = [
+            vec![row("a"), row("b")],
+            vec![row("a"), row("b"), row("c")],
+            vec![row("x"), row("b")],
+        ];
+        let initial = vec![0_u64; 3];
+        for visible in &scenes {
+            let mut expected_hashes = initial.clone();
+            let expected = changed_rows_at(&mut expected_hashes, visible, 0..visible.len());
+            if expected_hashes.len() > visible.len() {
+                expected_hashes.truncate(visible.len());
+            }
+
+            let mut actual_hashes = initial.clone();
+            let actual = changed_rows_in_place(&mut actual_hashes, visible);
+
+            assert_eq!(actual, expected);
+            assert_eq!(actual_hashes, expected_hashes);
+        }
     }
 
     #[test]

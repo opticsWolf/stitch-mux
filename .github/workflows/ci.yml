@@ -24,6 +24,7 @@ jobs:
           components: clippy
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --workspace --all-targets --features gui -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     strategy:
@@ -37,6 +38,7 @@ jobs:
       - run: cargo build -p stitch-mux-test-fixtures
       - run: cargo test --workspace
       - run: cargo test --workspace --features gui
+      - run: cargo test --workspace --all-features
 
   stress:
     strategy:

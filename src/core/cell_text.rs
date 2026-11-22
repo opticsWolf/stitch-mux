@@ -10,6 +10,7 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
+use std::str::FromStr;
 
 use compact_str::CompactString;
 use serde::de::Deserializer;
@@ -20,7 +21,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Equality and hashing are defined by the visible string, not by the storage
 /// representation, so an inline `"a"` and an extended `"a"` compare equal.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct CellText {
     inline: [u8; 4],
     inline_len: u8,
@@ -40,11 +41,12 @@ impl CellText {
     }
 
     /// Creates text from a string slice, keeping one scalar value inline.
-    pub fn from_str(text: &str) -> Self {
+    pub fn new(text: &str) -> Self {
         if text.is_empty() {
             return Self::default();
         }
         let mut chars = text.chars();
+        // `text.is_empty()` above guarantees at least one scalar.
         let first = chars.next().expect("non-empty text");
         if chars.next().is_none() {
             return Self::from_char(first);
@@ -81,13 +83,11 @@ impl CellText {
     }
 }
 
-impl Default for CellText {
-    fn default() -> Self {
-        Self {
-            inline: [0; 4],
-            inline_len: 0,
-            extended: None,
-        }
+impl FromStr for CellText {
+    type Err = std::convert::Infallible;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Ok(Self::new(text))
     }
 }
 
@@ -153,19 +153,19 @@ impl From<char> for CellText {
 
 impl From<&str> for CellText {
     fn from(value: &str) -> Self {
-        Self::from_str(value)
+        Self::new(value)
     }
 }
 
 impl From<String> for CellText {
     fn from(value: String) -> Self {
-        Self::from_str(&value)
+        Self::new(&value)
     }
 }
 
 impl From<&String> for CellText {
     fn from(value: &String) -> Self {
-        Self::from_str(value)
+        Self::new(value)
     }
 }
 
@@ -178,7 +178,7 @@ impl Serialize for CellText {
 impl<'de> Deserialize<'de> for CellText {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = CompactString::deserialize(deserializer)?;
-        Ok(Self::from_str(text.as_str()))
+        Ok(Self::new(text.as_str()))
     }
 }
 
@@ -198,8 +198,8 @@ mod tests {
     fn common_cells_stay_inline() {
         assert!(CellText::from_char('a').extended.is_none());
         assert!(CellText::from_char('漢').extended.is_none());
-        assert!(CellText::from_str("").extended.is_none());
-        assert!(CellText::from_str("e\u{301}").extended.is_some());
+        assert!(CellText::new("").extended.is_none());
+        assert!(CellText::new("e\u{301}").extended.is_some());
     }
 
     #[test]
@@ -219,5 +219,11 @@ mod tests {
         let value: CellText = "he\u{301}llo".into();
         assert_eq!(value.as_str(), "he\u{301}llo");
         assert_eq!(value, String::from("he\u{301}llo"));
+    }
+
+    #[test]
+    fn from_str_trait_round_trips() {
+        let parsed: CellText = "\u{6f22}".parse().expect("infallible");
+        assert_eq!(parsed.as_str(), "\u{6f22}");
     }
 }

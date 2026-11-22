@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
-use stitch_mux::client::{ClientSession, Outbound, SessionView, command};
 use stitch_mux::bench_profile;
+use stitch_mux::client::{ClientSession, Outbound, SessionView, command};
 use stitch_mux::core::{CaptureFormat, SplitAxis};
 use stitch_mux::protocol::{
     Command, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, InputEvent, PROTOCOL_VERSION, ViewMode,
@@ -223,7 +223,13 @@ async fn new_session(endpoint: &Endpoint, program: String, args: Vec<String>) ->
 }
 
 async fn kill_session(endpoint: &Endpoint) {
-    let _ = command(endpoint, Command::KillSession { name: SESSION.into() }).await;
+    let _ = command(
+        endpoint,
+        Command::KillSession {
+            name: SESSION.into(),
+        },
+    )
+    .await;
 }
 
 fn view_contains_marker(view: &SessionView, pane_id: u64, marker: &str) -> bool {
@@ -360,7 +366,10 @@ async fn measure_startup(config: &Config, oracle: &mut Oracle) -> Sample {
             }
         }
         if !ready {
-            oracle.fail("server_startup_ready", "daemon never answered a session probe");
+            oracle.fail(
+                "server_startup_ready",
+                "daemon never answered a session probe",
+            );
         } else {
             sample.push(start.elapsed().as_secs_f64() * 1000.0);
         }
@@ -525,14 +534,11 @@ async fn measure_output(
         let visible_ms = visible_start.elapsed().as_secs_f64() * 1000.0;
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-        let captured = wait_for_capture_marker(
-            endpoint,
-            pane_id,
-            &marker,
-            Duration::from_secs(5),
-        )
-        .await;
-        let capture_ok = captured.as_deref().is_some_and(|text| text.contains(&marker));
+        let captured =
+            wait_for_capture_marker(endpoint, pane_id, &marker, Duration::from_secs(5)).await;
+        let capture_ok = captured
+            .as_deref()
+            .is_some_and(|text| text.contains(&marker));
         if !marker_visible || !capture_ok {
             oracle.fail(
                 "terminal_output_completion",
@@ -978,15 +984,15 @@ impl OuterTarget<'_> {
                 echo_bin,
                 burst_bin,
             } => {
-                let program = if mode == "echo" { *echo_bin } else { *burst_bin };
+                let program = if mode == "echo" {
+                    *echo_bin
+                } else {
+                    *burst_bin
+                };
                 let args = if mode == "echo" {
                     vec!["--echo".to_owned()]
                 } else {
-                    vec![
-                        "--burst".to_owned(),
-                        bytes.to_string(),
-                        marker.to_owned(),
-                    ]
+                    vec!["--burst".to_owned(), bytes.to_string(), marker.to_owned()]
                 };
                 new_session(endpoint, program.to_owned(), args).await;
             }
@@ -1052,7 +1058,10 @@ async fn measure_outer_input(
                 sample.push(elapsed);
             }
         } else {
-            oracle.fail(label, &format!("marker {marker} never reached the outer PTY"));
+            oracle.fail(
+                label,
+                &format!("marker {marker} never reached the outer PTY"),
+            );
         }
         target.teardown().await;
     }
@@ -1100,7 +1109,10 @@ async fn measure_outer_output(
                 ingest.push(mib / (elapsed_ms / 1000.0));
             }
         } else {
-            oracle.fail(label, &format!("marker {marker} never reached the outer PTY"));
+            oracle.fail(
+                label,
+                &format!("marker {marker} never reached the outer PTY"),
+            );
         }
         target.teardown().await;
     }

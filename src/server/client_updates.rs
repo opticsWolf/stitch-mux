@@ -13,9 +13,7 @@ use crate::core::RevisionCoalescer;
 
 #[cfg(feature = "bench-profile")]
 use crate::bench_profile;
-use crate::protocol::{
-    FrameError, FrameWriter, PaneDelta, StructuredPaneFrame, client_caps,
-};
+use crate::protocol::{FrameError, FrameWriter, PaneDelta, StructuredPaneFrame, client_caps};
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
 
@@ -25,6 +23,7 @@ pub const CLIENT_UPDATE_QUEUE: usize = 64;
 pub const MAX_CLIENT_OVERFLOWS: u32 = 1;
 const MAX_DRAIN_PER_WAKE: usize = 256;
 
+#[derive(Debug)]
 pub struct ClientUpdateQueue {
     tx: mpsc::Sender<Arc<PaneUpdate>>,
     rx: mpsc::Receiver<Arc<PaneUpdate>>,
@@ -99,7 +98,7 @@ pub fn offer_update(
 
 /// Coalesces pending deltas per pane while preserving the latest cursor,
 /// modes, title, metadata, and newest row for each changed row.
-#[derive(Default)]
+#[derive(Debug)]
 pub struct UpdateCoalescer {
     ordered: Vec<Arc<PaneUpdate>>,
     deltas: BTreeMap<u64, PaneDelta>,
@@ -107,52 +106,103 @@ pub struct UpdateCoalescer {
     emitters: BTreeMap<u64, RevisionCoalescer>,
     in_flight: BTreeMap<u64, (u64, Instant)>,
     max_delta_hz: u32,
+    ack_deadline: Duration,
     client_caps: u64,
 }
 
+/// Default upper bound for structured frame revisions per second.
 const DEFAULT_MAX_DELTA_HZ: u32 = 60;
+/// Upper clamp: beyond this, pacing adds timers without useful latency gain.
+const MAX_MAX_DELTA_HZ: u32 = 1_000;
+/// Default wait for a `PaneFrameAck` before forcing a full repaint.
+const DEFAULT_ACK_DEADLINE_MS: u64 = 50;
+/// Lower clamp: zero would mark every frame overdue immediately.
+const MIN_ACK_DEADLINE_MS: u64 = 1;
+/// Upper clamp: avoid leaving a slow client unrepaired for minutes.
+const MAX_ACK_DEADLINE_MS: u64 = 5_000;
 
 fn configured_max_delta_hz() -> u32 {
     std::env::var("STITCH_MUX_MAX_DELTA_HZ")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(DEFAULT_MAX_DELTA_HZ)
-        .clamp(1, 1_000)
+        .clamp(1, MAX_MAX_DELTA_HZ)
 }
 
-fn ack_deadline() -> Duration {
+fn configured_ack_deadline() -> Duration {
     let ms = std::env::var("STITCH_MUX_ACK_DEADLINE_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(50)
-        .clamp(1, 5_000);
+        .unwrap_or(DEFAULT_ACK_DEADLINE_MS)
+        .clamp(MIN_ACK_DEADLINE_MS, MAX_ACK_DEADLINE_MS);
     Duration::from_millis(ms)
+}
+
+impl Default for UpdateCoalescer {
+    fn default() -> Self {
+        Self::with_timing(0, configured_max_delta_hz(), configured_ack_deadline())
+    }
 }
 
 impl UpdateCoalescer {
     pub fn with_capabilities(client_caps: u64) -> Self {
-        Self {
-            max_delta_hz: configured_max_delta_hz(),
+        Self::with_timing(
             client_caps,
-            ..Self::default()
+            configured_max_delta_hz(),
+            configured_ack_deadline(),
+        )
+    }
+
+    fn with_timing(client_caps: u64, max_delta_hz: u32, ack_deadline: Duration) -> Self {
+        Self {
+            max_delta_hz,
+            ack_deadline,
+            client_caps,
+            ..Self::empty()
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            ordered: Vec::new(),
+            deltas: BTreeMap::new(),
+            last_sent: BTreeMap::new(),
+            emitters: BTreeMap::new(),
+            in_flight: BTreeMap::new(),
+            max_delta_hz: DEFAULT_MAX_DELTA_HZ,
+            ack_deadline: Duration::from_millis(DEFAULT_ACK_DEADLINE_MS),
+            client_caps: 0,
         }
     }
 
     /// Records an acknowledgement. Stale or mismatched acks are ignored.
     pub fn ack(&mut self, pane_id: u64, seq: u64) {
-        if self.in_flight.get(&pane_id).is_some_and(|(pending, _)| *pending == seq) {
+        if self
+            .in_flight
+            .get(&pane_id)
+            .is_some_and(|(pending, _)| *pending == seq)
+        {
             self.in_flight.remove(&pane_id);
         }
     }
 
     /// Panes whose last frame was not acknowledged within the deadline.
     pub fn deadline_panes(&self) -> Vec<u64> {
-        let deadline = ack_deadline();
         self.in_flight
             .iter()
-            .filter(|(_, (_, sent_at))| sent_at.elapsed() >= deadline)
+            .filter(|(_, (_, sent_at))| sent_at.elapsed() >= self.ack_deadline)
             .map(|(pane_id, _)| *pane_id)
             .collect()
+    }
+
+    /// Earliest instant at which an outstanding ack becomes overdue.
+    ///
+    /// The connection loop uses this to wake even when no PTY update arrives.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.in_flight
+            .values()
+            .filter_map(|(_, sent_at)| sent_at.checked_add(self.ack_deadline))
+            .min()
     }
 
     /// Clears in-flight state after a full snapshot has been sent.
@@ -171,6 +221,11 @@ impl UpdateCoalescer {
         self.in_flight.insert(pane_id, (seq, Instant::now()));
     }
 
+    #[cfg(test)]
+    pub(crate) fn mark_in_flight_for_test(&mut self, pane_id: u64, seq: u64, sent_at: Instant) {
+        self.in_flight.insert(pane_id, (seq, sent_at));
+    }
+
     pub fn set_capabilities(&mut self, client_caps: u64) {
         self.client_caps = client_caps;
     }
@@ -184,18 +239,7 @@ impl UpdateCoalescer {
                             pending.rows.retain(|existing| existing.row != row.row);
                             pending.rows.push(row.clone());
                         }
-                        pending.seq = delta.seq;
-                        pending.cursor = delta.cursor;
-                        pending.modes = delta.modes;
-                        pending.title = delta.title.clone();
-                        pending.cwd = delta.cwd.clone();
-                        pending.foreground = delta.foreground.clone();
-                        pending.shell_marks = delta.shell_marks.clone();
-                        pending.program_status = delta.program_status.clone();
-                        pending.alt_screen = delta.alt_screen;
-                        pending.scrollback_len = delta.scrollback_len;
-                        pending.scrollback_bytes = delta.scrollback_bytes;
-                        pending.bell |= delta.bell;
+                        pending.overlay_state((*delta).clone());
                     }
                     None => {
                         self.deltas.insert(delta.pane_id, (*delta).clone());
@@ -359,7 +403,7 @@ impl UpdateCoalescer {
 mod tests {
     use super::*;
     use crate::core::{Cursor, Modes, Row};
-    use crate::protocol::{PaneSnapshot, RowUpdate};
+    use crate::protocol::{Notification, PaneSnapshot, Progress, ProgressState, RowUpdate};
 
     fn delta(pane_id: u64, seq: u64, row: u16) -> Arc<PaneUpdate> {
         Arc::new(PaneUpdate::Delta(PaneDelta {
@@ -418,6 +462,55 @@ mod tests {
         assert_eq!(first.rows.len(), 2);
         assert_eq!(second.seq, 1);
         assert_eq!(second.rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn coalesces_total_lines_notification_and_progress() {
+        let (mut tx, mut rx) = tokio::io::duplex(16 * 1024);
+        let mut coalescer = UpdateCoalescer::default();
+
+        let mut first = match delta(1, 1, 0).as_ref() {
+            PaneUpdate::Delta(delta) => delta.clone(),
+            _ => unreachable!("test helper produces deltas"),
+        };
+        first.total_lines = 10;
+        first.notification = Some(Notification {
+            title: None,
+            message: "first".into(),
+            updated_at_unix_ms: 1,
+        });
+        coalescer.add(Arc::new(PaneUpdate::Delta(first)));
+
+        let expected_notification = Notification {
+            title: Some("job".into()),
+            message: "second".into(),
+            updated_at_unix_ms: 2,
+        };
+        let expected_progress = Progress {
+            state: ProgressState::Normal,
+            value: Some(42),
+            message: Some("running".into()),
+            updated_at_unix_ms: 2,
+        };
+        let mut second = match delta(1, 2, 1).as_ref() {
+            PaneUpdate::Delta(delta) => delta.clone(),
+            _ => unreachable!("test helper produces deltas"),
+        };
+        second.total_lines = 20;
+        second.notification = Some(expected_notification.clone());
+        second.progress = Some(expected_progress.clone());
+        coalescer.add(Arc::new(PaneUpdate::Delta(second)));
+
+        {
+            let mut writer = FrameWriter::new(&mut tx);
+            coalescer.flush(&mut writer).await.unwrap();
+        }
+        let mut reader = crate::protocol::FrameReader::new(&mut rx);
+        let frame = reader.recv_frame().await.unwrap();
+        let emitted: PaneDelta = crate::protocol::decode_message(&frame).unwrap();
+        assert_eq!(emitted.total_lines, 20);
+        assert_eq!(emitted.notification, Some(expected_notification));
+        assert_eq!(emitted.progress, Some(expected_progress));
     }
 
     #[tokio::test]
@@ -482,6 +575,21 @@ mod tests {
         let frame = reader.recv_frame().await.unwrap();
         let delta: PaneDelta = crate::protocol::decode_message(&frame).unwrap();
         assert_eq!(delta.seq, 14, "the stale snapshot must be dropped");
+    }
+
+    #[test]
+    fn next_deadline_tracks_oldest_in_flight_frame() {
+        let mut coalescer = UpdateCoalescer::with_timing(0, 60, Duration::from_millis(40));
+        assert!(coalescer.next_deadline().is_none());
+
+        let now = Instant::now();
+        let older = now - Duration::from_millis(10);
+        coalescer.in_flight.insert(2, (1, older));
+        coalescer.in_flight.insert(1, (1, now));
+        assert_eq!(
+            coalescer.next_deadline(),
+            Some(older + Duration::from_millis(40))
+        );
     }
 
     #[tokio::test]

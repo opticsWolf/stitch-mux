@@ -1234,7 +1234,10 @@ impl SessionRegistry {
             .collect()
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "session creation mirrors the public command contract"
+    )]
     pub async fn create(
         &mut self,
         name: &str,

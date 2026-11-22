@@ -12,9 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{Attrs, Cell, Color, Cursor, Modes};
 
-use super::{
-    Frame, FrameError, MessageKind, Notification, ProcessInfo, Progress, ShellMarks,
-};
+use super::{Frame, FrameError, MessageKind, Notification, ProcessInfo, Progress, ShellMarks};
 
 /// Fixed-width encoded cell. Twenty bytes, no padding read by the codec.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -29,8 +27,14 @@ pub struct PaneWireCell {
     pub link: u32,
 }
 
+/// Serialized size of one `PaneWireCell`.
+///
+/// Fixed at 20 bytes so decoders can slice cell sections without per-cell
+/// length prefixes. Changing it breaks the v1 structured-frame wire format.
 pub const CELL_LEN: usize = 20;
+/// High bit of `PaneWireCell::ch` marks an interned cluster index.
 const CLUSTER_FLAG: u32 = 1 << 31;
+/// Serialized size of one `PaneRowRecord`.
 const ROW_RECORD_LEN: usize = 8;
 
 impl PaneWireCell {
@@ -200,21 +204,30 @@ impl StructuredPaneFrame {
 
     /// Serializes into a `Frame` payload.
     pub fn encode(self) -> Result<Frame, FrameError> {
-        let meta = self.meta.ok_or_else(|| FrameError::Decode("missing pane frame metadata".into()))?;
-        let meta_bytes = rmp_serde::to_vec(&meta)
-            .map_err(|error| FrameError::Encode(error.to_string()))?;
+        let meta = self
+            .meta
+            .ok_or_else(|| FrameError::Decode("missing pane frame metadata".into()))?;
+        let meta_bytes =
+            rmp_serde::to_vec(&meta).map_err(|error| FrameError::Encode(error.to_string()))?;
 
         let mut record_bytes = vec![0_u8; self.records.len() * ROW_RECORD_LEN];
         for (slot, record) in record_bytes
-            .chunks_exact_mut(ROW_RECORD_LEN)
+            .as_chunks_mut::<ROW_RECORD_LEN>()
+            .0
+            .iter_mut()
             .zip(&self.records)
         {
-            record.to_bytes(slot.try_into().expect("row record slot"));
+            record.to_bytes(slot);
         }
 
         let mut cell_bytes = vec![0_u8; self.cells.len() * CELL_LEN];
-        for (slot, cell) in cell_bytes.chunks_exact_mut(CELL_LEN).zip(&self.cells) {
-            cell.to_bytes(slot.try_into().expect("cell slot"));
+        for (slot, cell) in cell_bytes
+            .as_chunks_mut::<CELL_LEN>()
+            .0
+            .iter_mut()
+            .zip(&self.cells)
+        {
+            cell.to_bytes(slot);
         }
 
         let cluster_bytes = rmp_serde::to_vec(&self.clusters)
@@ -223,8 +236,11 @@ impl StructuredPaneFrame {
             .map_err(|error| FrameError::Encode(error.to_string()))?;
 
         let mut payload = Vec::with_capacity(
-            20 + meta_bytes.len() + record_bytes.len() + cell_bytes.len()
-                + cluster_bytes.len() + link_bytes.len(),
+            20 + meta_bytes.len()
+                + record_bytes.len()
+                + cell_bytes.len()
+                + cluster_bytes.len()
+                + link_bytes.len(),
         );
         push_section(&mut payload, &meta_bytes);
         push_section(&mut payload, &record_bytes);
@@ -250,8 +266,8 @@ impl<'a> DecodedPaneFrame<'a> {
     pub fn to_delta(&self) -> Result<super::PaneDelta, FrameError> {
         let mut rows = Vec::with_capacity(self.records.len() / ROW_RECORD_LEN);
         let mut cell_offset = 0_usize;
-        for record in self.records.chunks_exact(ROW_RECORD_LEN) {
-            let record = PaneRowRecord::from_bytes(record.try_into().expect("row record"));
+        for record in self.records.as_chunks::<ROW_RECORD_LEN>().0 {
+            let record = PaneRowRecord::from_bytes(record);
             let len = usize::from(record.len) * CELL_LEN;
             let raw = self
                 .cells
@@ -260,13 +276,9 @@ impl<'a> DecodedPaneFrame<'a> {
             cell_offset += len;
 
             let mut cells = Vec::with_capacity(usize::from(record.len));
-            for chunk in raw.chunks_exact(CELL_LEN) {
-                let wire = PaneWireCell::from_bytes(chunk.try_into().expect("cell"));
-                cells.push(unwire_cell(
-                    wire,
-                    &self.clusters,
-                    &self.links,
-                )?);
+            for chunk in raw.as_chunks::<CELL_LEN>().0 {
+                let wire = PaneWireCell::from_bytes(chunk);
+                cells.push(unwire_cell(wire, &self.clusters, &self.links)?);
             }
             rows.push(super::RowUpdate {
                 row: record.row,
@@ -300,12 +312,12 @@ pub fn decode_pane_frame(frame: &Frame) -> Result<DecodedPaneFrame<'_>, FrameErr
         return Err(FrameError::Decode("trailing pane frame bytes".into()));
     }
 
-    let meta: PaneFrameMeta = rmp_serde::from_slice(meta_bytes)
-        .map_err(|error| FrameError::Decode(error.to_string()))?;
+    let meta: PaneFrameMeta =
+        rmp_serde::from_slice(meta_bytes).map_err(|error| FrameError::Decode(error.to_string()))?;
     let clusters: Vec<String> = rmp_serde::from_slice(cluster_bytes)
         .map_err(|error| FrameError::Decode(error.to_string()))?;
-    let links: Vec<String> = rmp_serde::from_slice(link_bytes)
-        .map_err(|error| FrameError::Decode(error.to_string()))?;
+    let links: Vec<String> =
+        rmp_serde::from_slice(link_bytes).map_err(|error| FrameError::Decode(error.to_string()))?;
 
     if record_bytes.len() % ROW_RECORD_LEN != 0 || cell_bytes.len() % CELL_LEN != 0 {
         return Err(FrameError::Decode("unaligned pane frame sections".into()));
@@ -387,9 +399,7 @@ fn unwire_cell(
             .cloned()
             .ok_or_else(|| FrameError::Decode("cluster index out of range".into()))?
     } else {
-        char::from_u32(wire.ch)
-            .unwrap_or(' ')
-            .to_string()
+        char::from_u32(wire.ch).unwrap_or(' ').to_string()
     };
 
     let link = if wire.link == 0 {
@@ -413,11 +423,7 @@ fn unwire_cell(
     })
 }
 
-fn intern(
-    values: &mut Vec<String>,
-    ids: &mut HashMap<String, u32>,
-    value: &str,
-) -> u32 {
+fn intern(values: &mut Vec<String>, ids: &mut HashMap<String, u32>, value: &str) -> u32 {
     if let Some(id) = ids.get(value) {
         return *id;
     }
@@ -427,15 +433,14 @@ fn intern(
     id
 }
 
+/// Marker separating indexed colors from packed RGB colors.
 const RGB_FLAG: u32 = 1 << 16;
 
 fn color_code(color: Color) -> u32 {
     match color {
         Color::Default => 0,
         Color::Indexed(index) => u32::from(index) + 1,
-        Color::Rgb(r, g, b) => {
-            RGB_FLAG | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
-        }
+        Color::Rgb(r, g, b) => RGB_FLAG | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b),
     }
 }
 
@@ -529,7 +534,9 @@ mod tests {
     fn structured_frame_round_trip_preserves_clusters_and_links() {
         let mut source = delta();
         source.rows[0].cells[1].link = Some("https://example.com".into());
-        let frame = StructuredPaneFrame::from_delta(&source).encode().expect("encode");
+        let frame = StructuredPaneFrame::from_delta(&source)
+            .encode()
+            .expect("encode");
         let decoded = decode_pane_frame(&frame).expect("decode");
         let round_trip = decoded.to_delta().expect("materialize");
         assert_eq!(round_trip, source);
