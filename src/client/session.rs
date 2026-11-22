@@ -6,6 +6,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(feature = "bench-profile")]
+use crate::bench_profile;
 use crate::core::{Direction, PaneId, ResolvedPane, Size};
 use crate::protocol::{
     Attach, Command, CommandRequest, CommandResponse, Connection, Detach, Endpoint, ErrorInfo,
@@ -325,6 +327,25 @@ enum Event {
 }
 
 async fn apply_frame<W>(
+    view: &mut SessionView,
+    frame: &Frame,
+    writer: &mut FrameWriter<W>,
+) -> Result<(), FrameError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    #[cfg(feature = "bench-profile")]
+    let apply_start = bench_profile::begin();
+    let result = apply_frame_inner(view, frame, writer).await;
+    #[cfg(feature = "bench-profile")]
+    {
+        bench_profile::record(&bench_profile::CLIENT_APPLY_NS, apply_start);
+        bench_profile::add(&bench_profile::CLIENT_FRAMES, 1);
+    }
+    result
+}
+
+async fn apply_frame_inner<W>(
     view: &mut SessionView,
     frame: &Frame,
     writer: &mut FrameWriter<W>,

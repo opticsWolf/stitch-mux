@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+#[cfg(feature = "bench-profile")]
+use crate::bench_profile;
 use crate::protocol::{FrameError, FrameWriter, PaneDelta};
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
@@ -163,7 +165,15 @@ impl UpdateCoalescer {
                         continue;
                     }
                     self.last_sent.insert(snapshot.pane_id, snapshot.seq);
-                    writer.send(MessageKind::PaneSnapshot, snapshot).await?;
+                    #[cfg(feature = "bench-profile")]
+                    let send_start = bench_profile::begin();
+                    let sent = writer.send(MessageKind::PaneSnapshot, snapshot).await;
+                    #[cfg(feature = "bench-profile")]
+                    {
+                        bench_profile::record(&bench_profile::SERVER_SEND_NS, send_start);
+                        bench_profile::add(&bench_profile::SERVER_FRAMES, 1);
+                    }
+                    sent?;
                 }
                 PaneUpdate::Delta(delta) => {
                     let Some(mut pending) = self.deltas.remove(&delta.pane_id) else {
@@ -172,10 +182,26 @@ impl UpdateCoalescer {
                     let next = self.last_sent.entry(delta.pane_id).or_insert(0);
                     *next = next.saturating_add(1);
                     pending.seq = *next;
-                    writer.send(MessageKind::PaneDelta, &pending).await?;
+                    #[cfg(feature = "bench-profile")]
+                    let send_start = bench_profile::begin();
+                    let sent = writer.send(MessageKind::PaneDelta, &pending).await;
+                    #[cfg(feature = "bench-profile")]
+                    {
+                        bench_profile::record(&bench_profile::SERVER_SEND_NS, send_start);
+                        bench_profile::add(&bench_profile::SERVER_FRAMES, 1);
+                    }
+                    sent?;
                 }
                 PaneUpdate::Exit(exit) => {
-                    writer.send(MessageKind::Exit, exit).await?;
+                    #[cfg(feature = "bench-profile")]
+                    let send_start = bench_profile::begin();
+                    let sent = writer.send(MessageKind::Exit, exit).await;
+                    #[cfg(feature = "bench-profile")]
+                    {
+                        bench_profile::record(&bench_profile::SERVER_SEND_NS, send_start);
+                        bench_profile::add(&bench_profile::SERVER_FRAMES, 1);
+                    }
+                    sent?;
                 }
             }
         }

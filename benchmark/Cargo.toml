@@ -15,6 +15,6 @@ path = "src/main.rs"
 portable-pty = "0.9"
 serde_json.workspace = true
 stitch-pty.workspace = true
-stitch-mux = { path = ".." }
+stitch-mux = { path = "..", features = ["bench-profile"] }
 tokio.workspace = true
 vte = "0.15"

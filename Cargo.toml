@@ -36,6 +36,8 @@ default = []
 # The egui reference adapter is a supported, opt-in frontend. The default
 # install contains the daemon, CLI, and ANSI terminal attach.
 gui = ["dep:eframe", "dep:egui"]
+# Opt-in timing counters for the benchmark harness.
+bench-profile = []
 
 [dependencies]
 base64.workspace = true

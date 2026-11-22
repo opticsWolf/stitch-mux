@@ -49,11 +49,24 @@ The workspace root patches `crates.io` `stitch-pty` to the sibling
 terminal engine. `Cargo.lock` records the path dependency; verify with
 `cargo tree -p stitch-mux | grep stitch-pty` before publishing results.
 
+Pane deltas are computed from per-row hashes of the authoritative screen,
+so a PTY read no longer clones the whole viewport into `last_viewport`.
+Only changed rows are converted to wire cells.
+
 The output lane also records `output_trigger_ipc_ms` and
 `output_visible_after_trigger_ms`, which split the completion measurement into
 command round trip and server/client propagation. Marker polling uses
 `ClientSession::borrowed_view()` and an allocation-free cell scan, so the
 measurement does not clone the whole `SessionView` every 2 ms.
+
+Enabling the `bench-profile` feature adds `output_pipeline_profile`, which
+times pane feed, row diffing, delta publish, server frame writes, and client
+frame application. Timers perturb the absolute numbers; use the breakdown for
+attribution. On the 1 MiB burst the dominant serial cost is pane diffing
+(~205 ms per sample), followed by screen feed (~77 ms); server send and client
+apply are much smaller. Throttling pane publishes and scrolling-aware partial
+hashes were both tried and reverted: they broke the screen oracle or input
+latency without improving throughput.
 
 Options: `--samples`, `--warmup`, `--burst-bytes`, `--fixture-dir`,
 `--stitch-bin`, `--tmux-bin`, `--skip-tmux`, `--outer-lane`, `--out`, `--help`.

@@ -3,10 +3,14 @@
 //! `PtySession` is transport-only. The screen, keyboard flags, scrollback and
 //! structured snapshot/delta stream belong here, not in a frontend.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+#[cfg(feature = "bench-profile")]
+use crate::bench_profile;
 use crate::core::{
     Attrs, CaptureFormat, Cell, Color, Cursor, CursorShape, Modes, ProgramStatus, Row,
 };
@@ -103,10 +107,10 @@ struct PaneState {
     /// Authoritative terminal state, recorded before any task cancellation.
     exit: Option<SessionExit>,
     exit_code: Option<i32>,
-    /// Viewport rows as they were last published. The parser's dirty-row set
-    /// only names rows that were written, not rows that shifted when the
-    /// screen scrolled, so deltas are computed by comparing viewports.
-    last_viewport: Vec<Vec<PtyCell>>,
+    /// Hash of each viewport row as it was last published. Comparing hashes
+    /// avoids cloning the whole cell grid on every PTY read; only rows whose
+    /// hash changed are converted into wire cells.
+    last_row_hashes: Vec<u64>,
 }
 
 pub struct PaneRuntime {
@@ -195,7 +199,7 @@ impl PaneRuntime {
             session: Arc::clone(&session),
             spec: spec.clone(),
             state: Mutex::new(PaneState {
-                last_viewport: screen.buffer().clone(),
+                last_row_hashes: screen.buffer().iter().map(|row| row_hash(row)).collect(),
                 screen,
                 seq: 0,
                 program: spec.program.clone(),
@@ -284,7 +288,11 @@ impl PaneRuntime {
     fn ingest(&self, bytes: &[u8]) {
         let mut state = self.lock_state();
         let history_before = state.screen.history_size() as u64;
+        #[cfg(feature = "bench-profile")]
+        let feed_start = bench_profile::begin();
         state.screen.feed(bytes);
+        #[cfg(feature = "bench-profile")]
+        bench_profile::record(&bench_profile::PANE_FEED_NS, feed_start);
         let metadata = std::mem::take(&mut *state.pending_metadata.lock().expect("OSC metadata"));
         // Scrolling can shift clean rows. Compare the authoritative cells,
         // including color and hyperlink data, against the previous viewport.
@@ -318,13 +326,21 @@ impl PaneRuntime {
 
         state.seq = state.seq.saturating_add(1);
         state.last_activity_unix_ms = now_unix_ms();
-        let rows = changed_rows(&state.last_viewport, state.screen.buffer());
+        #[cfg(feature = "bench-profile")]
+        let diff_start = bench_profile::begin();
+        let rows = changed_rows(&state.last_row_hashes, state.screen.buffer());
         let PaneState {
-            last_viewport,
+            last_row_hashes,
             screen,
             ..
         } = &mut *state;
-        last_viewport.clone_from(screen.buffer());
+        last_row_hashes.clear();
+        last_row_hashes.extend(screen.buffer().iter().map(|row| row_hash(row)));
+        #[cfg(feature = "bench-profile")]
+        {
+            bench_profile::record(&bench_profile::PANE_DIFF_NS, diff_start);
+            bench_profile::add(&bench_profile::PANE_ROWS_CHANGED, rows.len() as u64);
+        }
         let delta = common_fields(&state, self.id, state.seq);
         let bell = events.contains(&TermEvent::Bell);
         self.publish(PaneUpdate::Delta(PaneDelta {
@@ -443,11 +459,12 @@ impl PaneRuntime {
             total,
         );
         let PaneState {
-            last_viewport,
+            last_row_hashes,
             screen,
             ..
         } = &mut *state;
-        last_viewport.clone_from(screen.buffer());
+        last_row_hashes.clear();
+        last_row_hashes.extend(screen.buffer().iter().map(|row| row_hash(row)));
         let seq = state.seq.saturating_add(1);
         state.seq = seq;
         let snapshot = snapshot_from(&state, self.id, seq);
@@ -545,7 +562,14 @@ impl PaneRuntime {
 
     fn publish(&self, update: PaneUpdate) {
         // No receivers is normal for detached sessions; keep the state anyway.
+        #[cfg(feature = "bench-profile")]
+        let publish_start = bench_profile::begin();
         let _ = self.updates.send(Arc::new(update));
+        #[cfg(feature = "bench-profile")]
+        {
+            bench_profile::record(&bench_profile::PANE_PUBLISH_NS, publish_start);
+            bench_profile::add(&bench_profile::PANE_INGESTS, 1);
+        }
     }
 
     fn lock_state(&self) -> MutexGuard<'_, PaneState> {
@@ -703,17 +727,51 @@ fn now_unix_ms() -> u64 {
 /// scroll (which shifts every row up and only marks the new bottom row) would
 /// leave the client with stale rows. Diffing the viewport is the only way to
 /// keep a cell-delta client correct.
-fn changed_rows(previous: &[Vec<PtyCell>], visible: &[Vec<PtyCell>]) -> Vec<RowUpdate> {
-    visible
-        .iter()
-        .enumerate()
-        .filter(|(index, line)| previous.get(*index) != Some(*line))
-        .map(|(index, line)| RowUpdate {
+fn row_hash(line: &[PtyCell]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for cell in line {
+        cell.data.hash(&mut hasher);
+        cell.fg.hash(&mut hasher);
+        cell.bg.hash(&mut hasher);
+        cell.bold.hash(&mut hasher);
+        cell.dim.hash(&mut hasher);
+        cell.italics.hash(&mut hasher);
+        cell.underscore.hash(&mut hasher);
+        cell.blink.hash(&mut hasher);
+        cell.reverse.hash(&mut hasher);
+        cell.hidden.hash(&mut hasher);
+        cell.strikethrough.hash(&mut hasher);
+        cell.hyperlink.as_deref().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn changed_rows_at(
+    previous: &mut [u64],
+    visible: &[Vec<PtyCell>],
+    candidates: impl Iterator<Item = usize>,
+) -> Vec<RowUpdate> {
+    let mut rows = Vec::new();
+    for index in candidates {
+        let Some(line) = visible.get(index) else { continue };
+        let Some(slot) = previous.get_mut(index) else { continue };
+        let hash = row_hash(line);
+        if *slot == hash {
+            continue;
+        }
+        *slot = hash;
+        rows.push(RowUpdate {
             row: index as u16,
             cells: cells_from_row(line),
             wrapped: false,
-        })
-        .collect()
+        });
+    }
+    rows
+}
+
+fn changed_rows(previous: &[u64], visible: &[Vec<PtyCell>]) -> Vec<RowUpdate> {
+    let mut hashes = previous.to_vec();
+    changed_rows_at(&mut hashes, visible, 0..visible.len())
 }
 
 fn scrollback_budget() -> usize {
@@ -989,7 +1047,9 @@ mod tests {
         let previous = vec![row("a"), row("b"), row("c"), row("d")];
         // One line scrolled off: the parser reports only row 3 as dirty.
         let visible = vec![row("b"), row("c"), row("d"), row("e")];
-        let updates = changed_rows(&previous, &visible);
+        let previous_hashes = previous.iter().map(|row| row_hash(row)).collect::<Vec<_>>();
+        let visible_hashes = visible.iter().map(|row| row_hash(row)).collect::<Vec<_>>();
+        let updates = changed_rows(&previous_hashes, &visible);
         assert_eq!(
             updates.iter().map(|update| update.row).collect::<Vec<_>>(),
             vec![0, 1, 2, 3]
@@ -998,11 +1058,11 @@ mod tests {
         assert_eq!(updates[3].cells[0].text, "e");
 
         // A no-op repaint reports nothing.
-        assert!(changed_rows(&visible, &visible).is_empty());
+        assert!(changed_rows(&visible_hashes, &visible).is_empty());
 
         // A viewport of a different height does not panic and reports the tail.
         let shorter = vec![row("c"), row("d")];
-        let updates = changed_rows(&previous, &shorter);
+        let updates = changed_rows(&previous_hashes, &shorter);
         assert_eq!(updates.len(), 2);
     }
 

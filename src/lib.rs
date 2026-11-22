@@ -5,6 +5,9 @@
 //! entry point. Frontends never parse ANSI or encode keys. The optional `gui`
 //! feature adds the egui reference adapter used by `stitch-mux gui`.
 
+#[cfg(feature = "bench-profile")]
+pub mod bench_profile;
+
 pub mod client;
 pub mod core;
 pub mod protocol;

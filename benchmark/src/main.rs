@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use stitch_mux::client::{ClientSession, Outbound, SessionView, command};
+use stitch_mux::bench_profile;
 use stitch_mux::core::{CaptureFormat, SplitAxis};
 use stitch_mux::protocol::{
     Command, DEFAULT_CLIENT_CAPABILITIES, Endpoint, Hello, InputEvent, PROTOCOL_VERSION, ViewMode,
@@ -1137,8 +1138,12 @@ async fn main() {
 
     let control = measure_control(&endpoint, &config).await;
     let input = measure_input(&endpoint, &config, &echo_bin, &mut oracle).await;
+    bench_profile::reset();
+    bench_profile::set_enabled(true);
     let (completion, ingest, trigger, visible) =
         measure_output(&endpoint, &config, &burst_bin, &mut oracle).await;
+    bench_profile::set_enabled(false);
+    let pipeline = bench_profile::snapshot();
     let multiclient = measure_multiclient(&endpoint, &config, &echo_bin, &mut oracle).await;
     let split = measure_split(&endpoint, &config, &echo_bin).await;
 
@@ -1232,6 +1237,20 @@ async fn main() {
         metrics[sample.name] = sample.json();
     }
 
+    let per_ingest = |ns: u64| {
+        if pipeline.pane_ingests == 0 {
+            0.0
+        } else {
+            ns as f64 / pipeline.pane_ingests as f64 / 1_000_000.0
+        }
+    };
+    let per_frame = |ns: u64, frames: u64| {
+        if frames == 0 {
+            0.0
+        } else {
+            ns as f64 / frames as f64 / 1_000_000.0
+        }
+    };
     let report = json!({
         "schema": 1,
         "tool": "stitch-mux-headless-benchmark",
@@ -1256,6 +1275,23 @@ async fn main() {
         "screen_oracle": {
             "failures": oracle.failures.len(),
             "details": oracle.failures,
+        },
+        "output_pipeline_profile": {
+            "note": "instrumented output samples only; timers add overhead",
+            "pane_ingests": pipeline.pane_ingests,
+            "pane_rows_changed": pipeline.pane_rows_changed,
+            "server_frames": pipeline.server_frames,
+            "client_frames": pipeline.client_frames,
+            "pane_feed_ms_total": pipeline.pane_feed_ns as f64 / 1_000_000.0,
+            "pane_diff_ms_total": pipeline.pane_diff_ns as f64 / 1_000_000.0,
+            "pane_publish_ms_total": pipeline.pane_publish_ns as f64 / 1_000_000.0,
+            "server_send_ms_total": pipeline.server_send_ns as f64 / 1_000_000.0,
+            "client_apply_ms_total": pipeline.client_apply_ns as f64 / 1_000_000.0,
+            "pane_feed_ms_per_ingest": per_ingest(pipeline.pane_feed_ns),
+            "pane_diff_ms_per_ingest": per_ingest(pipeline.pane_diff_ns),
+            "pane_publish_ms_per_ingest": per_ingest(pipeline.pane_publish_ns),
+            "server_send_ms_per_frame": per_frame(pipeline.server_send_ns, pipeline.server_frames),
+            "client_apply_ms_per_frame": per_frame(pipeline.client_apply_ns, pipeline.client_frames),
         },
         "metrics": metrics,
     });
