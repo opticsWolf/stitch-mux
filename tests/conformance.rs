@@ -23,7 +23,7 @@ fn blank(cols: u16, rows: u16) -> Vec<Row> {
 fn write(rows: &mut [Row], y: usize, x: usize, text: &str, cell: Cell) {
     for (offset, ch) in text.chars().enumerate() {
         let mut glyph = cell.clone();
-        glyph.text = ch.to_string();
+        glyph.text = ch.to_string().into();
         rows[y].cells[x + offset] = glyph;
     }
 }

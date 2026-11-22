@@ -16,6 +16,73 @@ use vte::{Params, Parser, Perform};
 const COLS: usize = 80;
 const ROWS: usize = 24;
 
+const DSR_REQUEST: &[u8] = b"\x1b[6n";
+const DSR_RESPONSE: &[u8] = b"\x1b[1;1R";
+const DSR_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Stateful DSR filter for the outer PTY.
+///
+/// ConPTY/crossterm clients probe the host with `ESC[6n`. A real terminal
+/// answers, otherwise the attach client blocks before writing frames. This
+/// buffer handles requests split across PTY reads without corrupting the
+/// marker oracle.
+#[derive(Debug)]
+struct DsrBootstrap {
+    deadline: Instant,
+    pending: Vec<u8>,
+}
+
+impl DsrBootstrap {
+    fn new() -> Self {
+        Self {
+            deadline: Instant::now() + DSR_BOOTSTRAP_TIMEOUT,
+            pending: Vec::new(),
+        }
+    }
+
+    fn filter(&mut self, bytes: &[u8]) -> (Vec<u8>, usize) {
+        let mut combined = std::mem::take(&mut self.pending);
+        combined.extend_from_slice(bytes);
+        let mut responses = 0;
+
+        loop {
+            let Some(offset) = find_subslice(&combined, DSR_REQUEST) else {
+                break;
+            };
+            let mut next = Vec::with_capacity(combined.len() - DSR_REQUEST.len());
+            next.extend_from_slice(&combined[..offset]);
+            next.extend_from_slice(&combined[offset + DSR_REQUEST.len()..]);
+            combined = next;
+            responses += 1;
+        }
+
+        if Instant::now() < self.deadline {
+            let prefix = partial_prefix_len(&combined, DSR_REQUEST);
+            let keep = combined.len() - prefix;
+            self.pending.extend_from_slice(&combined[keep..]);
+            combined.truncate(keep);
+        }
+
+        (combined, responses)
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn partial_prefix_len(bytes: &[u8], needle: &[u8]) -> usize {
+    (1..needle.len())
+        .rev()
+        .find(|len| bytes.ends_with(&needle[..*len]))
+        .unwrap_or(0)
+}
+
 struct Sink {
     all: String,
     cells: Vec<Vec<char>>,
@@ -160,6 +227,7 @@ pub struct OuterSession {
     writer: Box<dyn Write + Send>,
     reader: Receiver<Vec<u8>>,
     oracle: LineOracle,
+    dsr: DsrBootstrap,
     raw: Vec<u8>,
     child: Box<dyn Child + Send + Sync>,
     _slave: Box<dyn SlavePty + Send>,
@@ -205,6 +273,7 @@ impl OuterSession {
             writer,
             reader: rx,
             oracle: LineOracle::new(),
+            dsr: DsrBootstrap::new(),
             raw: Vec::new(),
             child,
             _slave: slave,
@@ -244,9 +313,7 @@ impl OuterSession {
             let slice = remaining.min(Duration::from_millis(5));
             match self.reader.recv_timeout(slice) {
                 Ok(bytes) => {
-                    self.raw.extend_from_slice(&bytes);
-                    self.respond_to_dsr(&bytes);
-                    self.oracle.feed(&bytes);
+                    self.absorb(&bytes);
                     if self.oracle.contains(marker) {
                         return true;
                     }
@@ -260,22 +327,19 @@ impl OuterSession {
         }
     }
 
-    /// ConPTY/crossterm probes the host with `ESC[6n`. A real terminal answers;
-    /// without a reply the attach client blocks before writing any frames.
-    fn respond_to_dsr(&mut self, bytes: &[u8]) {
-        let needle = [0x1b, b'[', b'6', b'n'];
-        let count = bytes.windows(needle.len()).filter(|w| *w == needle).count();
-        for _ in 0..count {
-            let _ = self.writer.write_all(b"[1;1R");
+    fn absorb(&mut self, bytes: &[u8]) {
+        let (visible, responses) = self.dsr.filter(bytes);
+        for _ in 0..responses {
+            let _ = self.writer.write_all(DSR_RESPONSE);
             let _ = self.writer.flush();
         }
+        self.raw.extend_from_slice(&visible);
+        self.oracle.feed(&visible);
     }
 
     fn drain(&mut self) {
         while let Ok(bytes) = self.reader.try_recv() {
-            self.raw.extend_from_slice(&bytes);
-            self.respond_to_dsr(&bytes);
-            self.oracle.feed(&bytes);
+            self.absorb(&bytes);
         }
     }
 }
@@ -283,5 +347,31 @@ impl OuterSession {
 impl Drop for OuterSession {
     fn drop(&mut self) {
         let _ = self.child.kill();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DSR_REQUEST, DSR_RESPONSE, DsrBootstrap, partial_prefix_len};
+
+    #[test]
+    fn dsr_prefix_split_across_reads_is_answered_once() {
+        let mut filter = DsrBootstrap::new();
+        let (first, responses) = filter.filter(b"abc\x1b[");
+        assert_eq!(responses, 0);
+        assert_eq!(first, b"abc");
+
+        let (second, responses) = filter.filter(b"6nrest");
+        assert_eq!(responses, 1);
+        assert_eq!(second, b"rest");
+        assert_eq!(DSR_REQUEST.len(), 4);
+        assert_eq!(DSR_RESPONSE, b"\x1b[1;1R");
+    }
+
+    #[test]
+    fn partial_prefix_helper_tracks_longest_suffix() {
+        assert_eq!(partial_prefix_len(b"abc\x1b", DSR_REQUEST), 1);
+        assert_eq!(partial_prefix_len(b"abc\x1b[6", DSR_REQUEST), 3);
+        assert_eq!(partial_prefix_len(b"abc", DSR_REQUEST), 0);
     }
 }

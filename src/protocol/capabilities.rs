@@ -18,6 +18,8 @@ pub mod client {
     pub const ACTIONS: u64 = 1 << 15;
     pub const DETACHED_PANES: u64 = 1 << 16;
     pub const MULTI_WINDOW: u64 = 1 << 17;
+    pub const STRUCTURED_PANE_FRAME: u64 = 1 << 18;
+    pub const PANE_FRAME_ACK: u64 = 1 << 19;
 }
 
 /// Server capability bits advertised in HelloAck.
@@ -36,6 +38,8 @@ pub mod server {
     pub const ACTIONS: u64 = 1 << 11;
     pub const DETACHED_PANES: u64 = 1 << 12;
     pub const MULTI_WINDOW: u64 = 1 << 13;
+    pub const STRUCTURED_PANE_FRAME: u64 = 1 << 14;
+    pub const PANE_FRAME_ACK: u64 = 1 << 15;
 }
 
 pub const DEFAULT_CLIENT_CAPABILITIES: u64 = client::STRUCTURED_VIEW
@@ -54,7 +58,9 @@ pub const DEFAULT_CLIENT_CAPABILITIES: u64 = client::STRUCTURED_VIEW
     | client::EVENTS
     | client::ACTIONS
     | client::DETACHED_PANES
-    | client::MULTI_WINDOW;
+    | client::MULTI_WINDOW
+    | client::STRUCTURED_PANE_FRAME
+    | client::PANE_FRAME_ACK;
 
 pub const DEFAULT_SERVER_CAPABILITIES: u64 = server::STRUCTURED_VIEW
     | server::ANSI
@@ -69,7 +75,9 @@ pub const DEFAULT_SERVER_CAPABILITIES: u64 = server::STRUCTURED_VIEW
     | server::EVENTS
     | server::ACTIONS
     | server::DETACHED_PANES
-    | server::MULTI_WINDOW;
+    | server::MULTI_WINDOW
+    | server::STRUCTURED_PANE_FRAME
+    | server::PANE_FRAME_ACK;
 
 #[cfg(test)]
 mod tests {

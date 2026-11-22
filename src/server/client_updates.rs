@@ -7,10 +7,15 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
+
+use crate::core::RevisionCoalescer;
 
 #[cfg(feature = "bench-profile")]
 use crate::bench_profile;
-use crate::protocol::{FrameError, FrameWriter, PaneDelta};
+use crate::protocol::{
+    FrameError, FrameWriter, PaneDelta, StructuredPaneFrame, client_caps,
+};
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
 
@@ -71,6 +76,10 @@ impl ClientUpdateQueue {
     pub fn overflows(&self) -> u32 {
         self.overflow.load(Ordering::Relaxed)
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.rx.is_empty()
+    }
 }
 
 /// Offer an update without ever blocking a PTY reader.
@@ -95,9 +104,77 @@ pub struct UpdateCoalescer {
     ordered: Vec<Arc<PaneUpdate>>,
     deltas: BTreeMap<u64, PaneDelta>,
     last_sent: BTreeMap<u64, u64>,
+    emitters: BTreeMap<u64, RevisionCoalescer>,
+    in_flight: BTreeMap<u64, (u64, Instant)>,
+    max_delta_hz: u32,
+    client_caps: u64,
+}
+
+const DEFAULT_MAX_DELTA_HZ: u32 = 60;
+
+fn configured_max_delta_hz() -> u32 {
+    std::env::var("STITCH_MUX_MAX_DELTA_HZ")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(DEFAULT_MAX_DELTA_HZ)
+        .clamp(1, 1_000)
+}
+
+fn ack_deadline() -> Duration {
+    let ms = std::env::var("STITCH_MUX_ACK_DEADLINE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(50)
+        .clamp(1, 5_000);
+    Duration::from_millis(ms)
 }
 
 impl UpdateCoalescer {
+    pub fn with_capabilities(client_caps: u64) -> Self {
+        Self {
+            max_delta_hz: configured_max_delta_hz(),
+            client_caps,
+            ..Self::default()
+        }
+    }
+
+    /// Records an acknowledgement. Stale or mismatched acks are ignored.
+    pub fn ack(&mut self, pane_id: u64, seq: u64) {
+        if self.in_flight.get(&pane_id).is_some_and(|(pending, _)| *pending == seq) {
+            self.in_flight.remove(&pane_id);
+        }
+    }
+
+    /// Panes whose last frame was not acknowledged within the deadline.
+    pub fn deadline_panes(&self) -> Vec<u64> {
+        let deadline = ack_deadline();
+        self.in_flight
+            .iter()
+            .filter(|(_, (_, sent_at))| sent_at.elapsed() >= deadline)
+            .map(|(pane_id, _)| *pane_id)
+            .collect()
+    }
+
+    /// Clears in-flight state after a full snapshot has been sent.
+    pub fn clear_in_flight(&mut self, pane_id: u64) {
+        self.in_flight.remove(&pane_id);
+    }
+
+    fn emitter(&mut self, pane_id: u64) -> &mut RevisionCoalescer {
+        let rate = self.max_delta_hz;
+        self.emitters
+            .entry(pane_id)
+            .or_insert_with(|| RevisionCoalescer::new(rate))
+    }
+
+    fn arm(&mut self, pane_id: u64, seq: u64) {
+        self.in_flight.insert(pane_id, (seq, Instant::now()));
+    }
+
+    pub fn set_capabilities(&mut self, client_caps: u64) {
+        self.client_caps = client_caps;
+    }
+
     pub fn add(&mut self, update: Arc<PaneUpdate>) {
         match update.as_ref() {
             PaneUpdate::Delta(delta) => {
@@ -141,20 +218,62 @@ impl UpdateCoalescer {
     /// every delta until the two spaces meet again.
     pub fn seed(&mut self, pane_id: u64, seq: u64) {
         self.last_sent.insert(pane_id, seq);
+        self.emitter(pane_id).seed(seq, Instant::now());
+        self.in_flight.remove(&pane_id);
         // The snapshot supersedes any delta queued before it; `ordered` still
         // holds those entries, and `flush` skips a delta without a pending row.
         self.deltas.remove(&pane_id);
     }
 
-    /// Send all pending updates. Delta sequence numbers are made contiguous for
-    /// this client so coalescing never looks like a protocol gap.
+    /// Send all pending updates without rate limiting. Used by tests and by
+    /// paths that must deliver the final state immediately.
     pub async fn flush<W>(&mut self, writer: &mut FrameWriter<W>) -> Result<(), FrameError>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        self.flush_inner(writer, true).await
+    }
+
+    /// Send pending updates with revision coalescing. `force` bypasses the rate
+    /// window, which is required when the update queue is empty so the final
+    /// authoritative state is never stranded.
+    pub async fn flush_paced<W>(
+        &mut self,
+        writer: &mut FrameWriter<W>,
+        force: bool,
+    ) -> Result<(), FrameError>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        self.flush_inner(writer, force).await
+    }
+
+    async fn flush_inner<W>(
+        &mut self,
+        writer: &mut FrameWriter<W>,
+        force: bool,
+    ) -> Result<(), FrameError>
     where
         W: AsyncWrite + Unpin,
     {
         use crate::protocol::MessageKind;
 
-        for update in self.ordered.drain(..) {
+        let now = Instant::now();
+        let mut ready = BTreeMap::new();
+        for (pane_id, delta) in std::mem::take(&mut self.deltas) {
+            let decision = self.emitter(pane_id).observe(delta.seq, now);
+            let polled = self.emitter(pane_id).poll(now).is_some();
+            if force || decision.emit || polled {
+                ready.insert(pane_id, delta);
+            } else {
+                #[cfg(feature = "bench-profile")]
+                bench_profile::add(&bench_profile::DELTAS_DEFERRED, 1);
+                self.deltas.insert(pane_id, delta);
+            }
+        }
+
+        let mut exits = Vec::new();
+        for update in std::mem::take(&mut self.ordered) {
             match update.as_ref() {
                 PaneUpdate::Snapshot(snapshot) => {
                     // A newer snapshot (attach, resync, layout change) may have
@@ -165,6 +284,8 @@ impl UpdateCoalescer {
                         continue;
                     }
                     self.last_sent.insert(snapshot.pane_id, snapshot.seq);
+                    self.emitter(snapshot.pane_id).seed(snapshot.seq, now);
+                    self.in_flight.remove(&snapshot.pane_id);
                     #[cfg(feature = "bench-profile")]
                     let send_start = bench_profile::begin();
                     let sent = writer.send(MessageKind::PaneSnapshot, snapshot).await;
@@ -175,37 +296,53 @@ impl UpdateCoalescer {
                     }
                     sent?;
                 }
-                PaneUpdate::Delta(delta) => {
-                    let Some(mut pending) = self.deltas.remove(&delta.pane_id) else {
-                        continue;
-                    };
-                    let next = self.last_sent.entry(delta.pane_id).or_insert(0);
-                    *next = next.saturating_add(1);
-                    pending.seq = *next;
-                    #[cfg(feature = "bench-profile")]
-                    let send_start = bench_profile::begin();
-                    let sent = writer.send(MessageKind::PaneDelta, &pending).await;
-                    #[cfg(feature = "bench-profile")]
-                    {
-                        bench_profile::record(&bench_profile::SERVER_SEND_NS, send_start);
-                        bench_profile::add(&bench_profile::SERVER_FRAMES, 1);
-                    }
-                    sent?;
+                PaneUpdate::Delta(_) => {
+                    // Deltas are emitted from `ready` below so a deferred pane
+                    // cannot be duplicated by a later queue entry.
                 }
-                PaneUpdate::Exit(exit) => {
-                    #[cfg(feature = "bench-profile")]
-                    let send_start = bench_profile::begin();
-                    let sent = writer.send(MessageKind::Exit, exit).await;
-                    #[cfg(feature = "bench-profile")]
-                    {
-                        bench_profile::record(&bench_profile::SERVER_SEND_NS, send_start);
-                        bench_profile::add(&bench_profile::SERVER_FRAMES, 1);
-                    }
-                    sent?;
-                }
+                PaneUpdate::Exit(exit) => exits.push(exit.clone()),
             }
         }
-        self.deltas.clear();
+
+        for (pane_id, mut pending) in ready {
+            let next = self.last_sent.entry(pane_id).or_insert(0);
+            *next = next.saturating_add(1);
+            pending.seq = *next;
+            #[cfg(feature = "bench-profile")]
+            let send_start = bench_profile::begin();
+            let sent = if self.client_caps & client_caps::STRUCTURED_PANE_FRAME != 0 {
+                #[cfg(feature = "bench-profile")]
+                let encode_start = bench_profile::begin();
+                let encoded = StructuredPaneFrame::from_delta(&pending).encode();
+                #[cfg(feature = "bench-profile")]
+                bench_profile::record(&bench_profile::WIRE_ENCODE_NS, encode_start);
+                match encoded {
+                    Ok(frame) => writer.send_frame(&frame).await,
+                    Err(error) => Err(error),
+                }
+            } else {
+                writer.send(MessageKind::PaneDelta, &pending).await
+            };
+            #[cfg(feature = "bench-profile")]
+            {
+                bench_profile::record(&bench_profile::SERVER_SEND_NS, send_start);
+                bench_profile::add(&bench_profile::SERVER_FRAMES, 1);
+            }
+            sent?;
+            self.arm(pane_id, pending.seq);
+        }
+
+        for exit in exits {
+            #[cfg(feature = "bench-profile")]
+            let send_start = bench_profile::begin();
+            let sent = writer.send(MessageKind::Exit, &exit).await;
+            #[cfg(feature = "bench-profile")]
+            {
+                bench_profile::record(&bench_profile::SERVER_SEND_NS, send_start);
+                bench_profile::add(&bench_profile::SERVER_FRAMES, 1);
+            }
+            sent?;
+        }
         Ok(())
     }
 
@@ -213,6 +350,8 @@ impl UpdateCoalescer {
         self.ordered.clear();
         self.deltas.clear();
         self.last_sent.clear();
+        self.emitters.clear();
+        self.in_flight.clear();
     }
 }
 

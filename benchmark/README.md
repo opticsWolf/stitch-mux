@@ -53,6 +53,13 @@ Pane deltas are computed from per-row hashes of the authoritative screen,
 so a PTY read no longer clones the whole viewport into `last_viewport`.
 Only changed rows are converted to wire cells.
 
+Structured clients that advertise `client::STRUCTURED_PANE_FRAME` receive a
+flat binary frame instead of MessagePack `PaneDelta`: fixed-size cells, row
+records, and interned cluster/link tables. Cell text now stores single-codepoint
+glyphs inline, avoiding a heap allocation per cell. Client-side frame
+acknowledgements and bounded revision coalescing keep the final screen state
+authoritative; a missing acknowledgement triggers a full snapshot.
+
 The output lane also records `output_trigger_ipc_ms` and
 `output_visible_after_trigger_ms`, which split the completion measurement into
 command round trip and server/client propagation. Marker polling uses
@@ -60,22 +67,24 @@ command round trip and server/client propagation. Marker polling uses
 measurement does not clone the whole `SessionView` every 2 ms.
 
 Enabling the `bench-profile` feature adds `output_pipeline_profile`, which
-times pane feed, row diffing, delta publish, server frame writes, and client
-frame application. Timers perturb the absolute numbers; use the breakdown for
-attribution. On the 1 MiB burst the dominant serial cost is pane diffing
-(~205 ms per sample), followed by screen feed (~77 ms); server send and client
-apply are much smaller. Throttling pane publishes and scrolling-aware partial
-hashes were both tried and reverted: they broke the screen oracle or input
-latency without improving throughput.
+times pane feed, row diffing, delta publish, wire encoding, server frame writes,
+and client frame application. It also reports `deltas_deferred` and
+`full_repaints` so coalescing cannot silently hide a missed final frame.
+Timers perturb the absolute numbers; use the breakdown for attribution. Naive
+publish throttling and scroll-aware partial hashes were both tried and
+reverted: they broke the screen oracle or input latency. The current coalescer
+only delays while the update queue is nonempty and always forces the newest
+revision on the last flush.
 
 Options: `--samples`, `--warmup`, `--burst-bytes`, `--fixture-dir`,
 `--stitch-bin`, `--tmux-bin`, `--skip-tmux`, `--outer-lane`, `--out`, `--help`.
 The fixture is resolved from `--fixture-dir`,
 `STITCH_MUX_FIXTURE_DIR`, then `target/release` / `target/debug`.
 
-The JSON report has `schema`, `config`, `host`, `screen_oracle`, and `metrics`
-sections. Each timing metric carries count, p50, p95, mean, min, max, and raw
-samples.
+The JSON report has `schema`, `commit`, `profile`, `host`, `dependencies`,
+`config`, `reference_lanes`, `screen_oracle`, `output_pipeline_profile`, and
+`metrics` sections. Each timing metric carries count, p50, p95, mean, min, max,
+and raw samples. Run `scripts/check-local-pty.sh` before publishing results.
 
 ## Scope and references
 

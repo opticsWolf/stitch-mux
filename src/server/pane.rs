@@ -980,7 +980,7 @@ fn cells_from_row(line: &[PtyCell]) -> Vec<Cell> {
             }
         }
         cells.push(Cell {
-            text: cell.data.clone(),
+            text: cell.data.clone().into(),
             fg: parse_color(&cell.fg),
             bg: parse_color(&cell.bg),
             attrs,

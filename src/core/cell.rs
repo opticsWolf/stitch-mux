@@ -1,3 +1,4 @@
+use super::CellText;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -42,7 +43,7 @@ impl Attrs {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
-    pub text: String,
+    pub text: CellText,
     pub fg: Color,
     pub bg: Color,
     pub attrs: Attrs,
@@ -53,7 +54,7 @@ pub struct Cell {
 impl Cell {
     pub fn blank() -> Self {
         Self {
-            text: String::new(),
+            text: CellText::default(),
             fg: Color::Default,
             bg: Color::Default,
             attrs: Attrs::empty(),

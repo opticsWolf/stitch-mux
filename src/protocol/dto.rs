@@ -343,6 +343,14 @@ pub struct Resync {
     pub reason: String,
 }
 
+/// Acknowledgement for the highest contiguous structured pane frame applied
+/// by a client.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PaneFrameAck {
+    pub pane_id: u64,
+    pub seq: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClipboardSelection {
@@ -560,7 +568,7 @@ pub fn message<T: serde::de::DeserializeOwned>(
 /// Re-exported only so golden fixtures can build cells concisely.
 pub fn test_cell(text: &str, fg: Color, bg: Color, attrs: Attrs, width: u8) -> Cell {
     Cell {
-        text: text.to_owned(),
+        text: text.to_owned().into(),
         fg,
         bg,
         attrs,

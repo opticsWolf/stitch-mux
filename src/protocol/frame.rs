@@ -38,11 +38,13 @@ pub enum MessageKind {
     CommandResponse = 25,
     SubscribeEvents = 26,
     Event = 27,
+    StructuredPaneFrame = 28,
+    PaneFrameAck = 29,
 }
 
 impl MessageKind {
     /// Every v1 message kind, in wire order. Used by conformance tests.
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 29] = [
         Self::Hello,
         Self::HelloAck,
         Self::Attach,
@@ -70,6 +72,8 @@ impl MessageKind {
         Self::CommandResponse,
         Self::SubscribeEvents,
         Self::Event,
+        Self::StructuredPaneFrame,
+        Self::PaneFrameAck,
     ];
 
     pub const fn as_u8(self) -> u8 {
@@ -80,7 +84,11 @@ impl MessageKind {
         matches!(
             self,
             // CommandResponse can carry a bounded CaptureResponse.
-            Self::Render | Self::PaneSnapshot | Self::CaptureResponse | Self::CommandResponse
+            Self::Render
+                | Self::PaneSnapshot
+                | Self::CaptureResponse
+                | Self::CommandResponse
+                | Self::StructuredPaneFrame
         )
     }
 
@@ -125,10 +133,67 @@ impl TryFrom<u8> for MessageKind {
             25 => Ok(Self::CommandResponse),
             26 => Ok(Self::SubscribeEvents),
             27 => Ok(Self::Event),
+            28 => Ok(Self::StructuredPaneFrame),
+            29 => Ok(Self::PaneFrameAck),
             other => Err(FrameError::UnknownKind(other)),
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameStatus {
+    Active,
+    Reserved,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameDirection {
+    ClientToServer,
+    ServerToClient,
+    Bidirectional,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameKindSpec {
+    pub kind: MessageKind,
+    pub status: FrameStatus,
+    pub direction: FrameDirection,
+    pub feature: &'static str,
+}
+
+/// Stable v1 wire ledger. Removed kinds must be marked `Reserved`; their
+/// numeric values are never reused.
+pub const WIRE_LEDGER_V1: &[FrameKindSpec] = &[
+    FrameKindSpec { kind: MessageKind::Hello, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "handshake" },
+    FrameKindSpec { kind: MessageKind::HelloAck, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "handshake" },
+    FrameKindSpec { kind: MessageKind::Attach, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "session" },
+    FrameKindSpec { kind: MessageKind::Attached, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "session" },
+    FrameKindSpec { kind: MessageKind::Layout, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "layout" },
+    FrameKindSpec { kind: MessageKind::PaneSnapshot, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "panes" },
+    FrameKindSpec { kind: MessageKind::PaneDelta, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "panes" },
+    FrameKindSpec { kind: MessageKind::Focus, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "focus" },
+    FrameKindSpec { kind: MessageKind::Render, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "terminal" },
+    FrameKindSpec { kind: MessageKind::Input, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "input" },
+    FrameKindSpec { kind: MessageKind::ResizeRequest, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "layout" },
+    FrameKindSpec { kind: MessageKind::ResizeEvent, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "layout" },
+    FrameKindSpec { kind: MessageKind::FocusRequest, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "focus" },
+    FrameKindSpec { kind: MessageKind::SetLayout, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "layout" },
+    FrameKindSpec { kind: MessageKind::Detach, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "session" },
+    FrameKindSpec { kind: MessageKind::Clipboard, status: FrameStatus::Active, direction: FrameDirection::Bidirectional, feature: "clipboard" },
+    FrameKindSpec { kind: MessageKind::Exit, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "session" },
+    FrameKindSpec { kind: MessageKind::Error, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "errors" },
+    FrameKindSpec { kind: MessageKind::Ping, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "health" },
+    FrameKindSpec { kind: MessageKind::Pong, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "health" },
+    FrameKindSpec { kind: MessageKind::Resync, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "resync" },
+    FrameKindSpec { kind: MessageKind::CaptureRequest, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "capture" },
+    FrameKindSpec { kind: MessageKind::CaptureResponse, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "capture" },
+    FrameKindSpec { kind: MessageKind::CommandRequest, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "commands" },
+    FrameKindSpec { kind: MessageKind::CommandResponse, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "commands" },
+    FrameKindSpec { kind: MessageKind::SubscribeEvents, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "events" },
+    FrameKindSpec { kind: MessageKind::Event, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "events" },
+    FrameKindSpec { kind: MessageKind::StructuredPaneFrame, status: FrameStatus::Active, direction: FrameDirection::ServerToClient, feature: "panes" },
+    FrameKindSpec { kind: MessageKind::PaneFrameAck, status: FrameStatus::Active, direction: FrameDirection::ClientToServer, feature: "panes" },
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame {
@@ -393,6 +458,25 @@ mod tests {
         assert_eq!(decoder.buffered(), split);
         assert_eq!(decoder.push(&encoded[split..]).unwrap(), vec![frame]);
         assert_eq!(decoder.buffered(), 0);
+    }
+
+    #[test]
+    fn wire_ledger_covers_every_kind_exactly_once() {
+        use super::{FrameStatus, WIRE_LEDGER_V1};
+        assert_eq!(WIRE_LEDGER_V1.len(), MessageKind::ALL.len());
+        for kind in MessageKind::ALL {
+            assert_eq!(
+                WIRE_LEDGER_V1
+                    .iter()
+                    .filter(|entry| entry.kind == kind)
+                    .count(),
+                1,
+                "missing or duplicate ledger entry for {kind:?}"
+            );
+        }
+        assert!(WIRE_LEDGER_V1
+            .iter()
+            .all(|entry| entry.status == FrameStatus::Active));
     }
 
     #[test]

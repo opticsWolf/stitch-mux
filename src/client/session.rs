@@ -12,7 +12,7 @@ use crate::core::{Direction, PaneId, ResolvedPane, Size};
 use crate::protocol::{
     Attach, Command, CommandRequest, CommandResponse, Connection, Detach, Endpoint, ErrorInfo,
     FocusRequest, Frame, FrameError, FrameReader, FrameWriter, Hello, HelloAck, InputEvent,
-    MessageKind, ResizeRequest, Resync, Stream, decode_render,
+    MessageKind, PaneFrameAck, ResizeRequest, Resync, Stream, decode_pane_frame, decode_render,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -345,6 +345,22 @@ where
     result
 }
 
+async fn ack_pane<W>(
+    writer: &mut FrameWriter<W>,
+    pane_id: u64,
+    seq: u64,
+) -> Result<(), FrameError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    writer
+        .send(
+            MessageKind::PaneFrameAck,
+            &PaneFrameAck { pane_id, seq },
+        )
+        .await
+}
+
 async fn apply_frame_inner<W>(
     view: &mut SessionView,
     frame: &Frame,
@@ -383,7 +399,10 @@ where
         }
         MessageKind::PaneDelta => {
             let delta: crate::protocol::PaneDelta = crate::protocol::decode_message(frame)?;
-            if view.apply_delta(delta).is_err() {
+            let pane_id = delta.pane_id;
+            let seq = delta.seq;
+            let applied = view.apply_delta(delta);
+            if applied.is_err() {
                 writer
                     .send(
                         MessageKind::Resync,
@@ -392,6 +411,27 @@ where
                         },
                     )
                     .await?;
+            } else {
+                ack_pane(writer, pane_id, seq).await?;
+            }
+        }
+        MessageKind::StructuredPaneFrame => {
+            let decoded = decode_pane_frame(frame)?;
+            let delta = decoded.to_delta()?;
+            let pane_id = delta.pane_id;
+            let seq = delta.seq;
+            let applied = view.apply_delta(delta);
+            if applied.is_err() {
+                writer
+                    .send(
+                        MessageKind::Resync,
+                        &Resync {
+                            reason: "sequence gap".into(),
+                        },
+                    )
+                    .await?;
+            } else {
+                ack_pane(writer, pane_id, seq).await?;
             }
         }
         MessageKind::Focus => {

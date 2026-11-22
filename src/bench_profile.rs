@@ -16,6 +16,9 @@ pub(crate) static SERVER_SEND_NS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static SERVER_FRAMES: AtomicU64 = AtomicU64::new(0);
 pub(crate) static CLIENT_APPLY_NS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static CLIENT_FRAMES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static WIRE_ENCODE_NS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static DELTAS_DEFERRED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static FULL_REPAINTS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Snapshot {
@@ -28,6 +31,9 @@ pub struct Snapshot {
     pub server_frames: u64,
     pub client_apply_ns: u64,
     pub client_frames: u64,
+    pub wire_encode_ns: u64,
+    pub deltas_deferred: u64,
+    pub full_repaints: u64,
 }
 
 pub fn set_enabled(enabled: bool) {
@@ -44,6 +50,9 @@ pub fn reset() {
     SERVER_FRAMES.store(0, Ordering::Relaxed);
     CLIENT_APPLY_NS.store(0, Ordering::Relaxed);
     CLIENT_FRAMES.store(0, Ordering::Relaxed);
+    WIRE_ENCODE_NS.store(0, Ordering::Relaxed);
+    DELTAS_DEFERRED.store(0, Ordering::Relaxed);
+    FULL_REPAINTS.store(0, Ordering::Relaxed);
 }
 
 pub fn snapshot() -> Snapshot {
@@ -57,6 +66,9 @@ pub fn snapshot() -> Snapshot {
         server_frames: SERVER_FRAMES.load(Ordering::Relaxed),
         client_apply_ns: CLIENT_APPLY_NS.load(Ordering::Relaxed),
         client_frames: CLIENT_FRAMES.load(Ordering::Relaxed),
+        wire_encode_ns: WIRE_ENCODE_NS.load(Ordering::Relaxed),
+        deltas_deferred: DELTAS_DEFERRED.load(Ordering::Relaxed),
+        full_repaints: FULL_REPAINTS.load(Ordering::Relaxed),
     }
 }
 

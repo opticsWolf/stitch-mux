@@ -42,6 +42,7 @@ bench-profile = []
 [dependencies]
 base64.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
+compact_str = { version = "0.9", features = ["serde"] }
 crossterm = "0.29"
 eframe = { version = "0.37", optional = true }
 egui = { version = "0.37", optional = true }

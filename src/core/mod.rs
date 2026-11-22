@@ -6,20 +6,24 @@
 pub mod action;
 pub mod capture;
 pub mod cell;
+pub mod cell_text;
 pub mod frame;
 pub mod geometry;
 pub mod ids;
 pub mod keymap;
 pub mod layout;
+pub mod revision_coalescer;
 pub mod status;
 pub mod workspace;
 
 pub use action::ActionId;
 pub use capture::CaptureFormat;
 pub use cell::{Attrs, Cell, Color, Cursor, CursorShape, Modes, Row};
+pub use cell_text::CellText;
 pub use frame::{Frame, changed_rows};
 pub use geometry::{Rect, Size};
 pub use ids::{ClientId, PaneId, SessionId, WindowId};
+pub use revision_coalescer::{CoalescedRevision, RevisionCoalescer};
 pub use layout::{
     Direction, LayoutError, LayoutNode, PanePlacement, ResolvedPane, SplitAxis, close_leaf,
     contains as layout_contains, first_leaf, focus_direction, hit_test, leaves as layout_leaves,

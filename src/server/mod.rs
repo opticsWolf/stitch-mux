@@ -31,6 +31,8 @@ use crate::protocol::{
     ResizeRequest, RunPlacement, RunResult, Stream, SubscribeEvents, ViewMode, WaitResult,
     WaitTarget, WindowFocus, capabilities, decode_message,
 };
+#[cfg(feature = "bench-profile")]
+use crate::bench_profile;
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
@@ -570,7 +572,7 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
     let mut attached: Option<Arc<Session>> = None;
     let mut focus: Option<u64> = None;
     let mut update_rx: Option<client_updates::ClientUpdateQueue> = None;
-    let mut coalescer = client_updates::UpdateCoalescer::default();
+    let mut coalescer = client_updates::UpdateCoalescer::with_capabilities(client_caps);
     let mut compositor = AnsiCompositor::new();
     let mut update_tasks: Vec<JoinHandle<()>> = Vec::new();
     let mut layout_rx: Option<broadcast::Receiver<Arc<Layout>>> = None;
@@ -711,8 +713,15 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                             coalescer.add(queued);
                         }
                     }
-                    match tokio::time::timeout(Duration::from_secs(2), coalescer.flush(&mut writer))
-                        .await
+                    let force = update_rx
+                        .as_ref()
+                        .map(|queue| queue.is_empty())
+                        .unwrap_or(true);
+                    match tokio::time::timeout(
+                        Duration::from_secs(2),
+                        coalescer.flush_paced(&mut writer, force),
+                    )
+                    .await
                     {
                         Ok(Ok(())) => {}
                         Ok(Err(err)) => {
@@ -723,6 +732,31 @@ async fn handle_connection(stream: Stream, state: Arc<ServerState>) -> Result<()
                             let _ = send_backpressure_error(&mut writer).await;
                             break;
                         }
+                    }
+                    let overdue = coalescer.deadline_panes();
+                    if !overdue.is_empty()
+                        && let Some(session) = attached.as_ref()
+                        && {
+                            #[cfg(feature = "bench-profile")]
+                            bench_profile::add(
+                                &bench_profile::FULL_REPAINTS,
+                                overdue.len() as u64,
+                            );
+                            true
+                        }
+                        && let Err(err) = send_session_state(
+                            &mut writer,
+                            session,
+                            focus,
+                            &state,
+                            view_mode,
+                            &mut compositor,
+                            &mut coalescer,
+                        )
+                        .await
+                    {
+                        failure = Some(err);
+                        break;
                     }
                 }
             }
@@ -1095,6 +1129,10 @@ async fn handle_frame(
                     send_error(writer, session_error_code(&err), err.to_string()).await?;
                 }
             }
+        }
+        MessageKind::PaneFrameAck => {
+            let ack: crate::protocol::PaneFrameAck = decode_message(&frame)?;
+            coalescer.ack(ack.pane_id, ack.seq);
         }
         MessageKind::Resync => {
             if let Some(session) = attached.as_ref() {

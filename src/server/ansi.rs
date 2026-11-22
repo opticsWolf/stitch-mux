@@ -41,7 +41,7 @@ impl GridCell {
 
     fn from_cell(cell: &Cell) -> Self {
         Self {
-            text: cell.text.clone(),
+            text: cell.text.as_str().to_owned(),
             fg: cell.fg,
             bg: cell.bg,
             attrs: cell.attrs,
